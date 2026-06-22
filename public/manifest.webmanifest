@@ -1,0 +1,12 @@
+{
+  "name": "LETUS PMS",
+  "short_name": "LETUS PMS",
+  "description": "파렛트 렌탈 수불관리 시스템",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1d2235",
+  "theme_color": "#1d2235",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
