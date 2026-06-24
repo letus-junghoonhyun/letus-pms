@@ -77,6 +77,7 @@ function Auth() {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
+  const [company, setCompany] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -92,7 +93,7 @@ function Auth() {
         else {
           const u = data.user;
           if (u) {
-            await supabase.from("profiles").upsert({ id: u.id, name: email.split("@")[0] });
+            await supabase.from("profiles").upsert({ id: u.id, name: company || email.split("@")[0], email, company: company || null });
             await supabase.from("user_roles").upsert({ user_id: u.id, role: "협력업체" }, { onConflict: "user_id" });
           }
           if (!data.session) setMsg("가입 완료! 로그인하세요. (로그인이 안 되면 Supabase에서 이메일 인증을 꺼주세요)");
@@ -122,7 +123,9 @@ function Auth() {
             ))}
           </div>
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="이메일" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
+          {mode === "signup" && <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="회사명(거래처명)" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
           <input value={pw} onChange={(e) => setPw(e.target.value)} type="password" placeholder="비밀번호" onKeyDown={(e) => e.key === "Enter" && submit()} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }} />
+          {mode === "signup" && <div style={{ fontSize: 11, color: C.hint, marginBottom: 12, lineHeight: 1.5 }}>가입 후 관리자가 소속 거래처를 연결하면 본인 거래처 건이 보여요.</div>}
           {msg && <div style={{ fontSize: 12, color: C.red, background: C.redBg, padding: "8px 10px", borderRadius: 8, marginBottom: 12 }}>{msg}</div>}
           <button disabled={busy || !email || !pw} onClick={submit} style={{ width: "100%", background: busy ? "#c7cad1" : C.teal, color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 15, cursor: "pointer" }}>
             {busy ? "처리 중…" : mode === "login" ? "로그인" : "가입하기"}
@@ -165,18 +168,22 @@ function Shell({ session }) {
   const [role, setRole] = useState("");
   const [flash, setFlash] = useState(null);
   const [users, setUsers] = useState([]);
+  const [blocked, setBlocked] = useState(false);
 
   const loadAll = useCallback(async () => {
     setErr("");
     try {
-      const [pt, up, pa, pp, sh, ur] = await Promise.all([
+      const [pt, up, pa, pp, sh, ur, me] = await Promise.all([
         supabase.from("pallet_type").select("*").order("code"),
         supabase.from("unit_price").select("*"),
         supabase.from("partner").select("*").eq("active", true).order("name"),
         supabase.from("partner_pallet").select("*"),
         supabase.from("shipment").select("*").order("depart_at", { ascending: false }),
         supabase.from("user_roles").select("role").eq("user_id", session.user.id).maybeSingle(),
+        supabase.from("profiles").select("active").eq("id", session.user.id).maybeSingle(),
       ]);
+      // 비활성 계정이면 차단 (active 컬럼 없으면 undefined → 통과)
+      if (me?.data && me.data.active === false) { setBlocked(true); setLoading(false); return; }
       // 단가는 협력업체에게 RLS로 막혀 빈 값이 올 수 있어요 — 그건 에러가 아니므로 제외하고 검사
       const firstErr = [pt, pa, pp, sh].find((r) => r.error);
       if (firstErr) throw firstErr.error;
@@ -196,14 +203,14 @@ function Shell({ session }) {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  // 사용자 관리(관리자 전용): 가입자 목록 + 역할/소속거래처
+  // 사용자 관리(관리자 전용): 가입자 목록 + 역할/소속거래처/계정상태
   const loadUsers = useCallback(async () => {
     const [pf, ur] = await Promise.all([
-      supabase.from("profiles").select("id, name, partner_code"),
+      supabase.from("profiles").select("id, name, email, company, partner_code, active"),
       supabase.from("user_roles").select("user_id, role"),
     ]);
     const rm = {}; (ur.data || []).forEach((r) => { rm[r.user_id] = r.role; });
-    setUsers((pf.data || []).map((p) => ({ ...p, role: rm[p.id] || "협력업체" })));
+    setUsers((pf.data || []).map((p) => ({ ...p, active: p.active !== false, role: rm[p.id] || "협력업체" })));
   }, []);
 
   const setUserRole = async (userId, newRole) => {
@@ -220,6 +227,13 @@ function Shell({ session }) {
       if (error) throw error;
       await loadUsers();
     } catch (e) { alert("소속 거래처 변경 실패: " + (e.message || e)); }
+  };
+  const setUserActive = async (userId, active) => {
+    try {
+      const { error } = await supabase.from("profiles").update({ active }).eq("id", userId);
+      if (error) throw error;
+      await loadUsers();
+    } catch (e) { alert("계정 상태 변경 실패: " + (e.message || e)); }
   };
 
   const register = async (partner, pallet, qty, departDate, note) => {
@@ -340,6 +354,17 @@ function Shell({ session }) {
 
   const partnersFull = partners.map((p) => ({ ...p, contracted: contracted[p.code] || [] }));
 
+  if (blocked) return (
+    <div style={{ minHeight: "100vh", background: C.page, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "system-ui, sans-serif", padding: 16 }}>
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 28, maxWidth: 360, textAlign: "center" }}>
+        <div style={{ fontSize: 30, marginBottom: 8 }}>🔒</div>
+        <h2 style={{ margin: "0 0 8px", fontSize: 17 }}>비활성화된 계정입니다</h2>
+        <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 18px" }}>이 계정은 관리자에 의해 접근이 차단되었어요. 사용이 필요하면 관리자에게 문의하세요.</p>
+        <button onClick={() => supabase.auth.signOut()} style={{ ...btnTeal, justifyContent: "center", width: "100%" }}>로그아웃</button>
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: "system-ui, sans-serif", color: C.text, background: C.page }}>
       {/* 데스크톱 사이드바 */}
@@ -372,7 +397,7 @@ function Shell({ session }) {
             {nav === "회수" && caps.operate && <Recovery {...{ ships, setStatus }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice }} />}
-            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, setUserRole, setUserPartner, meId: session.user.id }} />}
+            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, setUserRole, setUserPartner, setUserActive, meId: session.user.id }} />}
           </>
         )}
       </main>
@@ -834,29 +859,40 @@ const ROLE_BADGE = {
   관리자: { bg: C.redBg, fg: C.red }, 운송팀: { bg: C.tealBg, fg: C.tealDk },
   정산담당: { bg: C.blueBg, fg: C.blue }, 협력업체: { bg: "#eef0f3", fg: C.sub },
 };
-function Users({ users, partners, setUserRole, setUserPartner, meId }) {
+function Users({ users, partners, setUserRole, setUserPartner, setUserActive, meId }) {
   const [q, setQ] = useState("");
-  const list = users.filter((u) => !q || (u.name || "").includes(q) || (u.role || "").includes(q));
-  const pname = (code) => partners.find((p) => p.code === code)?.name;
+  const isPending = (u) => u.role === "협력업체" && !u.partner_code && u.active;
+  const pendingCount = users.filter(isPending).length;
+  const list = users.filter((u) => !q || (u.name || "").includes(q) || (u.email || "").includes(q) || (u.company || "").includes(q) || (u.role || "").includes(q));
+  // 승인 대기(미지정 협력업체)를 맨 위로 정렬
+  const sorted = [...list].sort((a, b) => (isPending(b) ? 1 : 0) - (isPending(a) ? 1 : 0));
   return (
     <>
-      <Head title="사용자 관리" sub="가입자별 역할과 소속 거래처를 지정해요 · 관리자 전용" />
-      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="이름·역할로 검색…" style={{ width: "100%", maxWidth: 320, boxSizing: "border-box", fontSize: 13, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 14 }} />
+      <Head title="사용자 관리" sub="가입자별 역할·소속 거래처·계정 상태를 관리해요 · 관리자 전용" />
+      {pendingCount > 0 && (
+        <div style={{ background: C.amberBg, color: C.amber, fontSize: 13, padding: "9px 14px", borderRadius: 8, marginBottom: 14 }}>
+          ⚠ 소속 거래처 미지정 협력업체 <b>{pendingCount}명</b> — 거래처를 연결해야 데이터를 볼 수 있어요(승인 대기).
+        </div>
+      )}
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="이름·이메일·회사·역할로 검색…" style={{ width: "100%", maxWidth: 340, boxSizing: "border-box", fontSize: 13, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 14 }} />
       <div style={{ overflowX: "auto" }}>
         <table style={tbl}>
-          <thead><tr><Th>사용자</Th><Th>역할</Th><Th>소속 거래처 (협력업체)</Th></tr></thead>
+          <thead><tr><Th>사용자</Th><Th>역할</Th><Th>소속 거래처 (협력업체)</Th><Th>계정</Th></tr></thead>
           <tbody>
-            {list.map((u) => {
-              const me = u.id === meId; const rb = ROLE_BADGE[u.role] || ROLE_BADGE.협력업체;
+            {sorted.map((u) => {
+              const me = u.id === meId; const rb = ROLE_BADGE[u.role] || ROLE_BADGE.협력업체; const pending = isPending(u);
               return (
-                <tr key={u.id} style={{ borderTop: `1px solid ${C.border}` }}>
-                  <Td>{u.name || u.id.slice(0, 8)} {me && <span style={{ fontSize: 10, color: C.teal }}>(나)</span>}</Td>
+                <tr key={u.id} style={{ borderTop: `1px solid ${C.border}`, background: pending ? C.amberBg + "55" : u.active ? "transparent" : "#fafafa", opacity: u.active ? 1 : 0.6 }}>
+                  <Td>
+                    <div style={{ fontWeight: 600, fontSize: 12 }}>{u.company || u.name || "(이름없음)"} {me && <span style={{ fontSize: 10, color: C.teal }}>(나)</span>}</div>
+                    <div style={{ fontSize: 11, color: C.hint }}>{u.email || u.id.slice(0, 8)}</div>
+                  </Td>
                   <Td>
                     <select value={u.role} disabled={me} onChange={(e) => setUserRole(u.id, e.target.value)}
                       style={{ fontSize: 12, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: me ? C.page : `${rb.bg}`, color: rb.fg }}>
                       {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
                     </select>
-                    {me && <div style={{ fontSize: 10, color: C.hint, marginTop: 2 }}>본인 역할은 변경 불가</div>}
+                    {me && <div style={{ fontSize: 10, color: C.hint, marginTop: 2 }}>본인 변경 불가</div>}
                   </Td>
                   <Td>
                     {u.role === "협력업체" ? (
@@ -867,14 +903,21 @@ function Users({ users, partners, setUserRole, setUserPartner, meId }) {
                       </select>
                     ) : <span style={{ fontSize: 12, color: C.hint }}>—</span>}
                   </Td>
+                  <Td>
+                    {me ? <span style={{ fontSize: 11, color: C.hint }}>—</span> : (
+                      <button onClick={() => setUserActive(u.id, !u.active)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${u.active ? C.border : C.red}`, background: u.active ? "#fff" : C.redBg, color: u.active ? C.sub : C.red }}>
+                        {u.active ? "활성 · 비활성화" : "비활성 · 활성화"}
+                      </button>
+                    )}
+                  </Td>
                 </tr>
               );
             })}
-            {list.length === 0 && <tr><td colSpan={3} style={{ padding: "20px 6px", fontSize: 12, color: C.hint, textAlign: "center" }}>가입한 사용자가 없어요.</td></tr>}
+            {sorted.length === 0 && <tr><td colSpan={4} style={{ padding: "20px 6px", fontSize: 12, color: C.hint, textAlign: "center" }}>가입한 사용자가 없어요.</td></tr>}
           </tbody>
         </table>
       </div>
-      <Note>협력업체는 <b>소속 거래처를 지정해야</b> 그 거래처로 온 출고 건만 보여요. 미지정이면 아무 데이터도 안 보입니다(보안상 기본 차단). 역할·소속은 DB(RLS)에서도 강제돼요.</Note>
+      <Note>협력업체는 <b>소속 거래처를 지정해야</b> 그 거래처로 온 출고 건만 보여요(미지정=차단). <b>비활성화</b>한 계정은 로그인해도 접근이 막혀요. 모든 권한은 DB(RLS)에서도 강제됩니다.</Note>
     </>
   );
 }
