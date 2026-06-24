@@ -15,7 +15,12 @@ const C = {
 
 const DELIVERED = ["입고확인", "회수요청", "회수완료"];
 const daysSince = (d) => Math.max(0, Math.round((Date.now() - new Date(d)) / 86400000));
-const isUnrecovered = (s) => (s.status === "출고완료" || s.status === "입고확인") && daysSince(s.depart_at) >= 7;
+const isReturn = (s) => s.direction === "반납";
+// 미회수: 우리가 거래처로 보낸(정방향) 것 중 아직 안 돌아온 것만. 반납은 제외.
+const isUnrecovered = (s) => !isReturn(s) && (s.status === "출고완료" || s.status === "입고확인") && daysSince(s.depart_at) >= 7;
+const DirBadge = ({ s }) => isReturn(s)
+  ? <span style={{ fontSize: 10, color: "#854F0B", background: "#FAEEDA", padding: "1px 6px", borderRadius: 10 }}>반납</span>
+  : <span style={{ fontSize: 10, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10 }}>출고</span>;
 const won = (n) => "₩" + (n || 0).toLocaleString();
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Date.now() + Math.random());
 
@@ -59,13 +64,14 @@ const NAV_BY_ROLE = {
   관리자: ["현황", "출고", "확인", "회수", "정산", "마스터", "사용자"],
   운송팀: ["현황", "출고", "확인", "회수", "정산", "마스터"],
   정산담당: ["현황", "정산", "마스터"],
-  협력업체: ["현황", "확인"],
+  협력업체: ["현황", "반납", "확인"],
 };
 // 역할별 능력치 (화면 가리기 + 버튼 잠금에 사용 / DB는 RLS가 별도로 막음)
 const capsOf = (role) => ({
-  outbound: ["관리자", "운송팀"].includes(role),   // 출고 등록
+  outbound: ["관리자", "운송팀"].includes(role),   // 출고 등록(방향 선택 가능)
   operate: ["관리자", "운송팀"].includes(role),     // 회수요청·회수완료 등 내부 조치
   confirmOwn: role === "협력업체",                   // 본인 건 입고확인만
+  returnReg: role === "협력업체",                    // 반납 출고 등록(거래처→우리)
   master: ["관리자", "운송팀"].includes(role),       // 거래처 등록·엑셀
   priceEdit: ["관리자", "정산담당"].includes(role),  // 단가 편집
   billing: ["관리자", "정산담당"].includes(role),    // 정산 확정
@@ -236,7 +242,7 @@ function Shell({ session }) {
     } catch (e) { alert("계정 상태 변경 실패: " + (e.message || e)); }
   };
 
-  const register = async (partner, pallet, qty, departDate, note) => {
+  const register = async (partner, pallet, qty, departDate, note, direction = "출고") => {
     try {
       const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
       if (e1) throw e1;
@@ -245,15 +251,15 @@ function Shell({ session }) {
       const depart_at = departDate ? new Date(departDate + "T09:00:00").toISOString() : new Date().toISOString();
       const { error: e2 } = await supabase.from("shipment").insert({
         id, slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
-        pallet_code: pallet, qty, status: "출고완료", depart_at, note: note || null, created_by: session.user.id,
+        pallet_code: pallet, qty, status: "출고완료", direction, depart_at, note: note || null, created_by: session.user.id,
       });
       if (e2) throw e2;
       await supabase.from("movement").insert({
-        id: uid(), shipment_id: id, type: "출고", source: "앱", pallet_code: pallet, qty,
+        id: uid(), shipment_id: id, type: direction, direction, source: "앱", pallet_code: pallet, qty,
         to_partner: partner.code, to_partner_name: partner.name, created_by: session.user.id,
       });
       setFlash(slip); setNav("현황"); loadAll();
-    } catch (e) { alert("출고 등록 실패: " + (e.message || e)); }
+    } catch (e) { alert((direction === "반납" ? "반납" : "출고") + " 등록 실패: " + (e.message || e)); }
   };
 
   // 단가 편집 (관리자·정산담당)
@@ -337,6 +343,7 @@ function Shell({ session }) {
 
   const ALL_ITEMS = [
     { key: "현황", label: "수불 현황" }, { key: "출고", label: "출고 등록" },
+    { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
     { key: "정산", label: "정산" }, { key: "마스터", label: "거래처·단가" },
     { key: "사용자", label: "사용자 관리" },
@@ -393,7 +400,8 @@ function Shell({ session }) {
           <>
             {nav === "현황" && <Dashboard {...{ ships, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} onRegister={register} />}
-            {nav === "확인" && <Confirm {...{ ships, setStatus }} />}
+            {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} onRegister={register} />}
+            {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, setStatus }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice }} />}
@@ -451,12 +459,13 @@ function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [
       <Tabs tabs={tabs} tab={tab} setTab={setTab} count={(t) => t === "전체" ? ships.length : t === "미회수" ? ships.filter(isUnrecovered).length : ships.filter((s) => s.status === t).length} />
       <div style={{ overflowX: "auto" }}>
         <table style={tbl}>
-          <thead><tr><Th>상태</Th><Th>전표</Th><Th>유형</Th><Th r>수량</Th><Th>거래처</Th><Th>경과</Th><Th>조치</Th></tr></thead>
+          <thead><tr><Th>방향</Th><Th>상태</Th><Th>전표</Th><Th>유형</Th><Th r>수량</Th><Th>거래처</Th><Th>경과</Th><Th>조치</Th></tr></thead>
           <tbody>
             {filtered.map((s) => {
               const danger = isUnrecovered(s); const d = daysSince(s.depart_at);
               return (
                 <tr key={s.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <Td><DirBadge s={s} /></Td>
                   <Td><Pill status={danger ? "미회수" : s.status} /></Td>
                   <Td c={C.sub}>{s.slip_no}</Td><Td>{s.pallet_code}</Td><Td r>{s.qty}</Td><Td>{s.to_partner_name}</Td>
                   <Td c={danger ? C.red : s.status === "회수완료" ? C.hint : C.text} b={danger}>{s.status === "회수완료" ? "—" : d + "일"}</Td>
@@ -538,17 +547,25 @@ function EditShipmentModal({ s, palletTypes, onClose, onSave, onCancel }) {
 
 function Outbound({ partners, palletTypes, onRegister }) {
   const today = new Date().toISOString().slice(0, 10);
+  const [dir, setDir] = useState("출고");
   const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
   const [pallet, setPallet] = useState(null); const [qty, setQty] = useState(20);
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
   const [date, setDate] = useState(today); const [note, setNote] = useState("");
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
+  const isRet = dir === "반납";
 
   return (
     <>
-      <Head title="출고 등록" sub="거래처를 검색해서 고르고, 유형·수량 입력" />
+      <Head title="출고 등록" sub="방향을 고르고, 거래처·유형·수량 입력" />
       <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>방향</div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 18, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
+          {[["출고", "출고 (우리→거래처)"], ["반납", "반납 (거래처→우리)"]].map(([v, label]) => (
+            <button key={v} onClick={() => setDir(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: dir === v ? (v === "반납" ? C.amber : C.teal) : "transparent", color: dir === v ? "#fff" : C.sub }}>{label}</button>
+          ))}
+        </div>
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>거래처 <span style={{ color: C.hint, fontSize: 11 }}>· 검색</span></div>
         {!sel ? (
           <div style={{ position: "relative", marginBottom: 18 }}>
@@ -597,32 +614,78 @@ function Outbound({ partners, palletTypes, onRegister }) {
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
         <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
-        <button disabled={!sel || !pallet || busy} onClick={async () => { setBusy(true); await onRegister(sel, pallet, qty, date, note); setBusy(false); setNote(""); setDate(today); }} style={{ width: "100%", background: (!sel || !pallet || busy) ? "#c7cad1" : C.teal, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : "출고 등록"}</button>
-        <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>등록 즉시 전표 자동 발행 · Supabase에 저장</p>
+        <button disabled={!sel || !pallet || busy} onClick={async () => { setBusy(true); await onRegister(sel, pallet, qty, date, note, dir); setBusy(false); setNote(""); setDate(today); }} style={{ width: "100%", background: (!sel || !pallet || busy) ? "#c7cad1" : (isRet ? C.amber : C.teal), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isRet ? "반납 등록" : "출고 등록"}</button>
+        <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
       </div>
     </>
   );
 }
 
-function Confirm({ ships, setStatus }) {
-  const pending = ships.filter((s) => s.status === "출고완료");
+// 협력업체용 반납 등록 — 본인 거래처 명의로 우리에게 돌려보내는 파렛트 기록
+function ReturnRegister({ partners, palletTypes, onRegister }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const me = partners[0]; // 협력업체는 RLS로 본인 거래처만 보임
+  const [pallet, setPallet] = useState(null); const [qty, setQty] = useState(20);
+  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [busy, setBusy] = useState(false);
   return (
     <>
-      <Head title="입고확인" sub="도착지에서 받는 사람이 확인하는 화면" />
-      {pending.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: C.hint, fontSize: 13 }}>확인 대기 중인 출고가 없어요.</div> : (
+      <Head title="반납 등록" sub="우리(렌탈사)에게 돌려보내는 파렛트를 등록하세요" />
+      <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
+        {!me ? (
+          <div style={{ fontSize: 13, color: C.amber, background: C.amberBg, padding: "12px 14px", borderRadius: 8 }}>아직 소속 거래처가 연결되지 않았어요. 관리자에게 문의하세요.</div>
+        ) : (
+          <>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 주체</div>
+            <div style={{ border: `1px solid ${C.amber}`, background: C.amberBg, borderRadius: 8, padding: "10px 12px", marginBottom: 18, fontSize: 14, color: C.amber, fontWeight: 600 }}>{me.name} → 렌탈사(우리)</div>
+
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+              {palletTypes.map((p) => { const on = pallet === p.code; return <button key={p.code} onClick={() => setPallet(p.code)} style={{ minWidth: 70, fontSize: 14, padding: "11px 14px", borderRadius: 8, cursor: "pointer", border: on ? `1px solid ${C.amber}` : `1px solid ${C.border}`, background: on ? C.amberBg : "#fff", color: on ? C.amber : C.text, fontWeight: on ? 600 : 400 }}>{p.code}</button>; })}
+            </div>
+
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>수량</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 16px", marginBottom: 18 }}>
+              <button onClick={() => setQty(Math.max(1, qty - 1))} style={{ background: "none", border: "none", fontSize: 22, color: C.sub, cursor: "pointer" }}>−</button>
+              <input value={qty} onChange={(e) => setQty(Math.max(1, parseInt(e.target.value) || 1))} type="number" style={{ width: 80, textAlign: "center", fontSize: 20, fontWeight: 600, border: "none", outline: "none" }} />
+              <button onClick={() => setQty(qty + 1)} style={{ background: "none", border: "none", fontSize: 22, color: C.amber, cursor: "pointer" }}>+</button>
+            </div>
+
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납일자</div>
+            <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }} />
+
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
+
+            <button disabled={!pallet || busy} onClick={async () => { setBusy(true); await onRegister(me, pallet, qty, date, note, "반납"); setBusy(false); setNote(""); setDate(today); setPallet(null); }} style={{ width: "100%", background: (!pallet || busy) ? "#c7cad1" : C.amber, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : "반납 등록"}</button>
+            <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>등록하면 우리쪽에서 입고확인 후 수불이 정리돼요</p>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+function Confirm({ ships, setStatus, caps = {} }) {
+  // 협력업체: 우리가 보낸(정방향 출고)을 받았다고 확인 / 내부: 거래처가 보낸(반납)을 우리가 받았다고 확인
+  const pending = ships.filter((s) => s.status === "출고완료" && (caps.confirmOwn ? !isReturn(s) : true));
+  const sub = caps.confirmOwn ? "우리쪽에서 보낸 파렛트를 받으셨으면 확인하세요" : "거래처가 반납한 파렛트 등 입고를 확인하세요";
+  return (
+    <>
+      <Head title="입고확인" sub={sub} />
+      {pending.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: C.hint, fontSize: 13 }}>확인 대기 중인 건이 없어요.</div> : (
         <div style={{ display: "grid", gap: 12, maxWidth: 560 }}>
           {pending.map((s) => (
             <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, display: "flex", alignItems: "center", gap: 14 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 600 }}>{s.to_partner_name}</div>
-                <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장</div>
+                <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{s.to_partner_name}</div>
+                <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.note ? ` · ${s.note}` : ""}</div>
               </div>
-              <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnTeal}>✓ 확인</button>
+              <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnTeal}>✓ 입고확인</button>
             </div>
           ))}
         </div>
       )}
-      <Note>확인을 누르면 입고확인으로 바뀌고 수불 현황·정산에 즉시 반영돼요.</Note>
+      <Note>{caps.confirmOwn ? "확인하면 우리 장부에 즉시 반영돼요." : "반납 입고확인을 누르면 그 수량만큼 해당 거래처 수불(미회수)이 정리돼요."}</Note>
     </>
   );
 }
