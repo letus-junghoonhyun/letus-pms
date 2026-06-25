@@ -252,19 +252,22 @@ function Shell({ session }) {
     } catch (e) { alert("계정 상태 변경 실패: " + (e.message || e)); }
   };
 
-  // lines: [{ pallet, qty }] — 여러 파렛트 종류를 한 전표(slip)로 묶어 등록(혼합 출고)
+  // lines: [{ pallet, qty }] — 여러 파렛트 종류를 한 번에 등록(혼합). 전표번호는 유형마다 고유 발급.
   const register = async (partner, lines, departDate, note, direction = "출고", center = null) => {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     try {
-      const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
-      if (e1) throw e1;
       const depart_at = departDate ? new Date(departDate + "T09:00:00").toISOString() : new Date().toISOString();
-      const shipRows = valid.map((l) => ({
-        id: uid(), slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
-        pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction, center,
-        depart_at, note: note || null, created_by: session.user.id,
-      }));
+      const shipRows = [];
+      for (const l of valid) {
+        const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
+        if (e1) throw e1;
+        shipRows.push({
+          id: uid(), slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
+          pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction, center,
+          depart_at, note: note || null, created_by: session.user.id,
+        });
+      }
       const { error: e2 } = await supabase.from("shipment").insert(shipRows);
       if (e2) throw e2;
       const mvRows = shipRows.map((s) => ({
@@ -272,7 +275,7 @@ function Shell({ session }) {
         to_partner: partner.code, to_partner_name: partner.name, created_by: session.user.id,
       }));
       await supabase.from("movement").insert(mvRows);
-      setFlash(slip); setNav("현황"); loadAll();
+      setFlash(shipRows[0].slip_no + (shipRows.length > 1 ? ` 외 ${shipRows.length - 1}건` : "")); setNav("현황"); loadAll();
     } catch (e) { alert((direction === "반납" ? "반납" : "출고") + " 등록 실패: " + (e.message || e)); }
   };
 
