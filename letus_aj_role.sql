@@ -6,6 +6,11 @@
 -- 협력업체: 본인 거래처의 '회수' 요청(AJ로 회수)을 직접 등록 가능.
 -- ============================================================
 
+-- user_roles 의 역할 CHECK 제약에 'AJ' 추가 (없으면 역할 변경이 막힘)
+ALTER TABLE user_roles DROP CONSTRAINT IF EXISTS user_roles_role_check;
+ALTER TABLE user_roles ADD CONSTRAINT user_roles_role_check
+  CHECK (role IN ('관리자','운송팀','정산담당','협력업체','AJ'));
+
 DROP POLICY IF EXISTS "aj select" ON aj_request;
 CREATE POLICY "aj select" ON aj_request FOR SELECT TO authenticated
   USING (is_internal() OR my_role() = 'AJ' OR (my_role() = '협력업체' AND partner_code = my_partner()));
