@@ -94,12 +94,13 @@ const fromOf = (s) => isReturn(s) ? s.to_partner_name : (s.center || "렌탈사"
 const toOf = (s) => isReturn(s) ? (s.center || "렌탈사") : s.to_partner_name;
 
 // ─── 역할 & 권한 ─────────────────────────────────────────────
-const ROLES = ["관리자", "운송팀", "정산담당", "협력업체"];
+const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
 const NAV_BY_ROLE = {
   관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "정산", "마스터", "사용자"],
   운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "정산", "마스터"],
   정산담당: ["현황", "재고", "정산", "마스터"],
   협력업체: ["현황", "반납", "확인"],
+  AJ: ["AJ"],   // AJ네트웍스 직원: 요청 처리 화면만
 };
 // 역할별 능력치 (화면 가리기 + 버튼 잠금에 사용 / DB는 RLS가 별도로 막음)
 const capsOf = (role) => ({
@@ -110,7 +111,8 @@ const capsOf = (role) => ({
   master: ["관리자", "운송팀"].includes(role),       // 거래처 등록·엑셀
   priceEdit: ["관리자", "정산담당"].includes(role),  // 단가 편집
   billing: ["관리자", "정산담당"].includes(role),    // 정산 확정
-  aj: ["관리자", "운송팀"].includes(role),           // AJ 공급/회수 요청 관리
+  aj: ["관리자", "운송팀"].includes(role),           // AJ 요청 생성·관리(우리쪽)
+  ajWorker: role === "AJ",                            // AJ네트웍스 직원: 요청 완료 처리
   inventory: ["관리자", "운송팀", "정산담당"].includes(role), // 재고 현황 조회
   users: role === "관리자",                          // 사용자 관리
 });
@@ -529,11 +531,11 @@ function Shell({ session }) {
           <>
             {nav === "현황" && <Dashboard {...{ ships, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} onRegister={register} />}
-            {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} />}
+            {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, recoverToCenter, recoverToAj }} />}
             {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes }} />}
-            {nav === "AJ" && caps.aj && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships }} />}
+            {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner }} />}
             {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, setUserRole, setUserPartner, setUserActive, meId: session.user.id }} />}
@@ -801,42 +803,69 @@ function Outbound({ partners, palletTypes, onRegister }) {
 }
 
 // 협력업체용 반납 등록 — 본인 보유 수량 한도 내에서, 여러 유형 한 번에, 받는 센터 지정
-function ReturnRegister({ partners, palletTypes, ships, ajReqs = [], onRegister }) {
+function ReturnRegister({ partners, palletTypes, ships, ajReqs = [], onRegister, onAjReturn }) {
   const today = new Date().toISOString().slice(0, 10);
   const me = partners[0]; // 협력업체는 RLS로 본인 거래처만 보임
   const [qtys, setQtys] = useState({});
   const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(CENTERS[0]); const [busy, setBusy] = useState(false);
-  const heldOf = (code) => (me ? heldQty(ships, ajReqs, me.code, code) : 0);
+  const [dest, setDest] = useState("센터"); // 센터 / AJ
+  const isAj = dest === "AJ";
+  const heldOf = (code) => (me ? availableToRecover(ships, ajReqs, me.code, code) : 0);
   const totalHeld = palletTypes.reduce((a, p) => a + heldOf(p.code), 0);
   const total = qtysTotal(qtys);
+  const submit = async () => {
+    setBusy(true);
+    if (isAj) await onAjReturn({ type: "회수", lines: qtysToLines(qtys), partner: me, note });
+    else await onRegister(me, qtysToLines(qtys), date, note, "반납", center);
+    setBusy(false); setNote(""); setDate(today); setQtys({});
+  };
   return (
     <>
-      <Head title="반납 등록" sub="보유 중인 파렛트를 메인센터로 반납 등록하세요" />
+      <Head title="반납 등록" sub="보유 중인 파렛트를 센터로 반납하거나 AJ로 회수하세요" />
       <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
         {!me ? (
           <div style={{ fontSize: 13, color: C.amber, background: C.amberBg, padding: "12px 14px", borderRadius: 8 }}>아직 소속 거래처가 연결되지 않았어요. 관리자에게 문의하세요.</div>
         ) : totalHeld === 0 ? (
-          <div style={{ fontSize: 13, color: C.sub, background: C.page, padding: "16px", borderRadius: 8, textAlign: "center" }}>현재 보유 중인 파렛트가 없어요. 반납할 수량이 없습니다.</div>
+          <div style={{ fontSize: 13, color: C.sub, background: C.page, padding: "16px", borderRadius: 8, textAlign: "center" }}>현재 보유 중인(반납 가능) 파렛트가 없어요.</div>
         ) : (
           <>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 주체 → 받는 센터</div>
-            <div style={{ border: `1px solid ${C.amber}`, background: C.amberBg, borderRadius: 8, padding: "10px 12px", marginBottom: 14, fontSize: 14, color: C.amber, fontWeight: 600 }}>{me.name}</div>
-            <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
-              {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 주체</div>
+            <div style={{ border: `1px solid ${C.amber}`, background: C.amberBg, borderRadius: 8, padding: "10px 12px", marginBottom: 16, fontSize: 14, color: C.amber, fontWeight: 600 }}>{me.name}</div>
 
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 수량 <span style={{ color: C.hint, fontSize: 11 }}>· 보유 한도 내</span></div>
-            <PalletQtyEditor palletTypes={palletTypes.filter((p) => heldOf(p.code) > 0)} qtys={qtys} setQtys={setQtys} color={C.amber} bg={C.amberBg} maxOf={heldOf} />
-            {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>반납 합계 <b style={{ color: C.text }}>{total}</b>장</div>}
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>회수 방향</div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 16, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
+              {[["센터", "센터로 반납"], ["AJ", "AJ로 회수"]].map(([v, label]) => (
+                <button key={v} onClick={() => setDest(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: dest === v ? (v === "AJ" ? "#7a4ad8" : C.teal) : "transparent", color: dest === v ? "#fff" : C.sub }}>{label}</button>
+              ))}
+            </div>
 
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납일자</div>
-            <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }} />
+            {isAj ? (
+              <div style={{ border: `1px solid #c9b6f0`, background: "#f3eeff", borderRadius: 8, padding: "10px 12px", marginBottom: 18, fontSize: 13, color: "#5b3aa6" }}>AJ네트웍스로 회수 요청돼요. AJ 직원이 확인하면 처리 완료됩니다. (우리 센터 재고로 들어오지 않아요)</div>
+            ) : (
+              <>
+                <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>받는 센터</div>
+                <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
+                  {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </>
+            )}
+
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isAj ? "회수" : "반납"} 수량 <span style={{ color: C.hint, fontSize: 11 }}>· 보유 한도 내</span></div>
+            <PalletQtyEditor palletTypes={palletTypes.filter((p) => heldOf(p.code) > 0)} qtys={qtys} setQtys={setQtys} color={isAj ? "#7a4ad8" : C.amber} bg={isAj ? "#f3eeff" : C.amberBg} maxOf={heldOf} />
+            {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
+
+            {!isAj && (
+              <>
+                <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납일자</div>
+                <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }} />
+              </>
+            )}
 
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
             <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
-            <button disabled={total === 0 || busy} onClick={async () => { setBusy(true); await onRegister(me, qtysToLines(qtys), date, note, "반납", center); setBusy(false); setNote(""); setDate(today); setQtys({}); }} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : C.amber, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : "반납 등록"}</button>
-            <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>등록하면 센터에서 입고확인 후 수불이 정리돼요</p>
+            <button disabled={total === 0 || busy} onClick={submit} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : (isAj ? "#7a4ad8" : C.amber), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isAj ? "AJ 회수요청" : "센터 반납 등록"}</button>
+            <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isAj ? "AJ 직원이 확인하면 AJ로 회수 처리돼요" : "센터에서 입고확인 후 우리 재고로 정리돼요"}</p>
           </>
         )}
       </div>
@@ -1035,7 +1064,8 @@ function Inventory({ ships, ajReqs, partners, palletTypes }) {
 }
 
 // AJ 연동 — 공급/회수 요청 등록·완료 처리 (가설정: 수동 2단계)
-function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships }) {
+function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps = {} }) {
+  const canCreate = !!caps.aj; // 내부만 요청 생성, AJ직원은 완료만
   const [type, setType] = useState("공급");
   const [qtys, setQtys] = useState({});
   const [center, setCenter] = useState(CENTERS[0]);
@@ -1053,10 +1083,10 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cance
 
   return (
     <>
-      <Head title="AJ 연동" sub="AJ네트웍스에 공급/회수 요청 · 완료 시 재고 반영 (가설정 수동)" />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, alignItems: "start" }}>
-        {/* 요청 등록 */}
-        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+      <Head title={canCreate ? "AJ 연동" : "AJ 요청 처리"} sub={canCreate ? "AJ네트웍스에 공급/회수 요청 · 완료 시 재고 반영 (가설정 수동)" : "접수된 요청을 처리(완료)하세요 · AJ네트웍스 직원용"} />
+      <div style={{ display: "grid", gridTemplateColumns: canCreate ? "repeat(auto-fit, minmax(300px, 1fr))" : "1fr", gap: 16, alignItems: "start" }}>
+        {/* 요청 등록 (내부만) */}
+        {canCreate && <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
           <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600 }}>새 요청</h3>
           <div style={{ display: "flex", gap: 6, marginBottom: 16, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
             {[["공급", "공급요청 (AJ→센터)"], ["회수", "회수요청 (센터→AJ)"]].map(([v, label]) => (
@@ -1070,7 +1100,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cance
           {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 12, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
           <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="메모(선택)" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 14, resize: "vertical", fontFamily: "inherit" }} />
           <button disabled={total === 0 || busy} onClick={submit} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : (isSupply ? C.teal : C.amber), color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 15, cursor: "pointer" }}>{busy ? "접수 중…" : `${type}요청 접수`}</button>
-        </div>
+        </div>}
 
         {/* 진행중 요청 */}
         <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
@@ -1087,7 +1117,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cance
                     </div>
                     <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                       <button onClick={() => completeAjRequest(r)} style={btnTealSm}>완료</button>
-                      <button onClick={() => cancelAjRequest(r)} style={{ ...btnGhost, padding: "5px 8px" }}>✕</button>
+                      {canCreate && <button onClick={() => cancelAjRequest(r)} style={{ ...btnGhost, padding: "5px 8px" }}>✕</button>}
                     </div>
                   </div>
                 </div>
@@ -1314,6 +1344,7 @@ function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, ca
 const ROLE_BADGE = {
   관리자: { bg: C.redBg, fg: C.red }, 운송팀: { bg: C.tealBg, fg: C.tealDk },
   정산담당: { bg: C.blueBg, fg: C.blue }, 협력업체: { bg: "#eef0f3", fg: C.sub },
+  AJ: { bg: C.amberBg, fg: C.amber },
 };
 
 // 검색 가능한 거래처 선택기 (수백 개여도 검색으로 빠르게). 드롭다운은 화면 고정(fixed)으로 표에 안 갇힘.
