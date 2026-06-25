@@ -96,11 +96,11 @@ const toOf = (s) => isReturn(s) ? (s.center || "렌탈사") : s.to_partner_name;
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
 const NAV_BY_ROLE = {
-  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "정산", "마스터", "사용자"],
-  운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "정산", "마스터"],
-  정산담당: ["현황", "재고", "정산", "마스터"],
-  협력업체: ["현황", "반납", "확인"],
-  AJ: ["AJ"],   // AJ네트웍스 직원: 요청 처리 화면만
+  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "정산", "마스터", "사용자", "설정"],
+  운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "정산", "마스터", "설정"],
+  정산담당: ["현황", "재고", "정산", "마스터", "설정"],
+  협력업체: ["현황", "반납", "확인", "설정"],
+  AJ: ["AJ", "설정"],   // AJ네트웍스 직원: 요청 처리 + 내 설정
 };
 // 역할별 능력치 (화면 가리기 + 버튼 잠금에 사용 / DB는 RLS가 별도로 막음)
 const capsOf = (role) => ({
@@ -530,7 +530,7 @@ function Shell({ session }) {
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
     { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 연동" },
     { key: "정산", label: "정산" }, { key: "마스터", label: "거래처·단가" },
-    { key: "사용자", label: "사용자 관리" },
+    { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
   const allowed = NAV_BY_ROLE[role] || ["현황"];
   const items = ALL_ITEMS.filter((it) => allowed.includes(it.key));
@@ -569,8 +569,10 @@ function Shell({ session }) {
           return <button key={it.key} onClick={() => setNav(it.key)} style={{ display: "block", width: "100%", padding: "9px 12px", marginBottom: 3, borderRadius: 8, border: "none", cursor: "pointer", textAlign: "left", fontSize: 13, background: on ? C.dark2 : "transparent", color: on ? "#fff" : C.side }}>{it.label}</button>;
         })}
         <div style={{ marginTop: 18, padding: "0 8px" }}>
-          <div style={{ color: "#6b7494", fontSize: 11 }}>{session.user.email}</div>
-          <div style={{ color: C.teal, fontSize: 11, marginBottom: 8 }}>{role}</div>
+          <button onClick={() => setNav("설정")} style={{ display: "block", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: 8 }}>
+            <div style={{ color: "#6b7494", fontSize: 11 }}>{session.user.email}</div>
+            <div style={{ color: C.teal, fontSize: 11 }}>{role} · 내 설정 ›</div>
+          </button>
           <button onClick={() => supabase.auth.signOut()} style={{ fontSize: 11, color: C.side, background: "transparent", border: "1px solid #3a4258", borderRadius: 6, padding: "5px 9px", cursor: "pointer" }}>로그아웃</button>
         </div>
       </aside>
@@ -592,6 +594,7 @@ function Shell({ session }) {
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner }} />}
             {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, setUserRole, setUserPartner, setUserActive, adminResetPassword, meId: session.user.id }} />}
+            {nav === "설정" && <Settings session={session} role={role} partners={partnersFull} />}
           </>
         )}
       </main>
@@ -1399,6 +1402,81 @@ const ROLE_BADGE = {
   정산담당: { bg: C.blueBg, fg: C.blue }, 협력업체: { bg: "#eef0f3", fg: C.sub },
   AJ: { bg: C.amberBg, fg: C.amber },
 };
+
+// 내 설정 — 계정 정보 + 비밀번호 변경
+function Settings({ session, role, partners }) {
+  const [prof, setProf] = useState(null);
+  const [name, setName] = useState(""); const [company, setCompany] = useState("");
+  const [savingP, setSavingP] = useState(false); const [pmsg, setPmsg] = useState("");
+  const [pw, setPw] = useState(""); const [pw2, setPw2] = useState(""); const [savingPw, setSavingPw] = useState(false); const [pwmsg, setPwmsg] = useState("");
+
+  useEffect(() => {
+    supabase.from("profiles").select("name, company, partner_code, active").eq("id", session.user.id).maybeSingle()
+      .then(({ data }) => { setProf(data || {}); setName(data?.name || ""); setCompany(data?.company || ""); });
+  }, [session.user.id]);
+
+  const rb = ROLE_BADGE[role] || ROLE_BADGE.협력업체;
+  const myPartner = prof?.partner_code ? partners.find((p) => p.code === prof.partner_code) : null;
+  const joined = session.user.created_at ? fmtDT(session.user.created_at) : "—";
+
+  const saveProfile = async () => {
+    setSavingP(true); setPmsg("");
+    const { error } = await supabase.from("profiles").update({ name: name || null, company: company || null }).eq("id", session.user.id);
+    setSavingP(false); setPmsg(error ? "저장 실패: " + error.message : "저장됐어요.");
+  };
+  const changePw = async () => {
+    if (pw.length < 6) { setPwmsg("비밀번호는 6자 이상이어야 해요."); return; }
+    if (pw !== pw2) { setPwmsg("두 비밀번호가 달라요."); return; }
+    setSavingPw(true); setPwmsg("");
+    const { error } = await supabase.auth.updateUser({ password: pw });
+    setSavingPw(false);
+    if (error) setPwmsg("변경 실패: " + error.message);
+    else { setPw(""); setPw2(""); setPwmsg("비밀번호가 변경됐어요."); }
+  };
+
+  const Row = ({ label, children }) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: `1px solid ${C.border}`, gap: 12 }}>
+      <span style={{ fontSize: 12, color: C.sub }}>{label}</span>
+      <span style={{ fontSize: 13, textAlign: "right" }}>{children}</span>
+    </div>
+  );
+
+  return (
+    <>
+      <Head title="내 설정" sub="계정 정보 확인 및 비밀번호 변경" />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, alignItems: "start", maxWidth: 760 }}>
+        {/* 계정 정보 */}
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 18px" }}>
+          <h3 style={{ margin: "0 0 6px", fontSize: 14, fontWeight: 600 }}>계정 정보</h3>
+          <Row label="이메일">{session.user.email}</Row>
+          <Row label="역할"><span style={{ fontSize: 11, color: rb.fg, background: rb.bg, padding: "2px 9px", borderRadius: 20 }}>{role}</span></Row>
+          {role === "협력업체" && <Row label="소속 거래처">{myPartner ? `${myPartner.name} · ${myPartner.type}` : <span style={{ color: C.amber }}>미지정 (관리자 문의)</span>}</Row>}
+          <Row label="가입일">{joined}</Row>
+          <Row label="상태"><span style={{ color: prof?.active === false ? C.red : C.green }}>{prof?.active === false ? "비활성" : "활성"}</span></Row>
+
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>표시 이름</div>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="이름" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 8 }} />
+            <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>회사명</div>
+            <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="회사명" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
+            <button onClick={saveProfile} disabled={savingP} style={{ ...btnTeal, width: "100%", justifyContent: "center" }}>{savingP ? "저장 중…" : "정보 저장"}</button>
+            {pmsg && <div style={{ fontSize: 12, color: pmsg.startsWith("저장됐") ? C.green : C.red, marginTop: 8 }}>{pmsg}</div>}
+          </div>
+        </div>
+
+        {/* 비밀번호 변경 */}
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 18px" }}>
+          <h3 style={{ margin: "0 0 10px", fontSize: 14, fontWeight: 600 }}>비밀번호 변경</h3>
+          <input value={pw} onChange={(e) => setPw(e.target.value)} type="password" placeholder="새 비밀번호(6자 이상)" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 8 }} />
+          <input value={pw2} onChange={(e) => setPw2(e.target.value)} type="password" placeholder="새 비밀번호 확인" onKeyDown={(e) => e.key === "Enter" && changePw()} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
+          <button onClick={changePw} disabled={savingPw} style={{ ...btnTeal, width: "100%", justifyContent: "center" }}>{savingPw ? "변경 중…" : "비밀번호 변경"}</button>
+          {pwmsg && <div style={{ fontSize: 12, color: pwmsg.startsWith("비밀번호가") ? C.green : C.red, marginTop: 8 }}>{pwmsg}</div>}
+          <p style={{ fontSize: 11, color: C.hint, marginTop: 12, lineHeight: 1.6 }}>비밀번호를 잊었을 땐 로그아웃 후 로그인 화면의 "비밀번호를 잊으셨나요?"를 이용하거나, 관리자에게 초기화를 요청하세요.</p>
+        </div>
+      </div>
+    </>
+  );
+}
 
 // 검색 가능한 거래처 선택기 (수백 개여도 검색으로 빠르게). 드롭다운은 화면 고정(fixed)으로 표에 안 갇힘.
 function PartnerPicker({ value, partners, onChange }) {
