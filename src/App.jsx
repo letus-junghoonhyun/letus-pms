@@ -61,12 +61,19 @@ const TypeBadge = ({ t }) => { const b = TYPE_BADGE[t] || TYPE_BADGE.업체; ret
 // 메인 센터 (반납 받는 곳) — 추후 마스터 데이터로 보완 예정
 const CENTERS = ["양지물류센터", "안성센터", "평택센터"];
 
-// 거래처가 현재 보유한 수량(반납 가능 수량) = 보낸(정방향) − 이미 돌려준/반납신청(반납)
+// 거래처가 현재 보유한 수량(반납 가능 수량)
+//  = 거래처가 "입고확인"한 정방향 − 이미 돌려준/반납신청(반납)
+//  ※ 출고완료(아직 업체가 입고확인 안 함)는 보유로 잡지 않음
 const heldQty = (ships, partnerCode, palletCode) => {
-  const out = ships.filter((s) => !isReturn(s) && s.to_partner === partnerCode && s.pallet_code === palletCode && ["출고완료", "입고확인", "회수요청"].includes(s.status)).reduce((a, s) => a + s.qty, 0);
+  const out = ships.filter((s) => !isReturn(s) && s.to_partner === partnerCode && s.pallet_code === palletCode && ["입고확인", "회수요청"].includes(s.status)).reduce((a, s) => a + s.qty, 0);
   const ret = ships.filter((s) => isReturn(s) && s.to_partner === partnerCode && s.pallet_code === palletCode && ["출고완료", "입고확인"].includes(s.status)).reduce((a, s) => a + s.qty, 0);
   return Math.max(0, out - ret);
 };
+// 날짜·시간 포맷
+const fmtDT = (iso) => { if (!iso) return "—"; const d = new Date(iso); const p = (n) => String(n).padStart(2, "0"); return `${String(d.getFullYear()).slice(2)}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+// 출고처 → 입고처 (방향 기준). 정방향: 센터→거래처 / 반납: 거래처→센터
+const fromOf = (s) => isReturn(s) ? s.to_partner_name : (s.center || "렌탈사");
+const toOf = (s) => isReturn(s) ? (s.center || "렌탈사") : s.to_partner_name;
 
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체"];
@@ -321,7 +328,9 @@ function Shell({ session }) {
 
   const setStatus = async (s, newStatus, mvType) => {
     try {
-      const { error } = await supabase.from("shipment").update({ status: newStatus }).eq("id", s.id);
+      const patch = { status: newStatus };
+      if (newStatus === "입고확인" && !s.confirmed_at) patch.confirmed_at = new Date().toISOString();
+      const { error } = await supabase.from("shipment").update(patch).eq("id", s.id);
       if (error) throw error;
       if (mvType) await supabase.from("movement").insert({
         id: uid(), shipment_id: s.id, type: mvType, source: "앱", pallet_code: s.pallet_code, qty: s.qty,
@@ -456,12 +465,18 @@ function Tabs({ tabs, tab, setTab, count }) {
 function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment }) {
   const [tab, setTab] = useState("전체");
   const [edit, setEdit] = useState(null);
+  const [from, setFrom] = useState(""); const [to, setTo] = useState("");
   const tabs = ["전체", "출고완료", "입고확인", "회수요청", "미회수"];
   const todayStr = new Date().toISOString().slice(0, 10);
   const today = ships.filter((s) => (s.depart_at || "").slice(0, 10) === todayStr).reduce((a, s) => a + s.qty, 0);
   const unrec = ships.filter(isUnrecovered).reduce((a, s) => a + s.qty, 0);
   const waiting = ships.filter((s) => s.status === "출고완료").length;
-  const filtered = tab === "전체" ? ships : tab === "미회수" ? ships.filter(isUnrecovered) : ships.filter((s) => s.status === tab);
+  // 날짜 범위 필터(출고/반납일 기준)
+  const inRange = (s) => { const d = (s.depart_at || "").slice(0, 10); if (from && d < from) return false; if (to && d > to) return false; return true; };
+  const byTab = (s) => tab === "전체" ? true : tab === "미회수" ? isUnrecovered(s) : s.status === tab;
+  const filtered = ships.filter((s) => inRange(s) && byTab(s));
+  const cnt = (t) => ships.filter(inRange).filter((s) => t === "전체" ? true : t === "미회수" ? isUnrecovered(s) : s.status === t).length;
+  const quick = (days) => { const e = new Date(); const sdt = new Date(); sdt.setDate(e.getDate() - days); setFrom(sdt.toISOString().slice(0, 10)); setTo(e.toISOString().slice(0, 10)); };
 
   return (
     <>
@@ -473,10 +488,19 @@ function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [
         <Metric label="입고확인 대기" value={waiting} unit="건" tone="warn" />
         <Metric label="총 건수" value={ships.length} unit="건" tone="plain" />
       </div>
-      <Tabs tabs={tabs} tab={tab} setTab={setTab} count={(t) => t === "전체" ? ships.length : t === "미회수" ? ships.filter(isUnrecovered).length : ships.filter((s) => s.status === t).length} />
+      {/* 날짜 조회 */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+        <span style={{ color: C.hint }}>~</span>
+        <input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+        <button onClick={() => quick(7)} style={btnGhost}>최근7일</button>
+        <button onClick={() => quick(30)} style={btnGhost}>최근30일</button>
+        {(from || to) && <button onClick={() => { setFrom(""); setTo(""); }} style={{ ...btnGhost, color: C.sub }}>전체</button>}
+      </div>
+      <Tabs tabs={tabs} tab={tab} setTab={setTab} count={cnt} />
       <div style={{ overflowX: "auto" }}>
         <table style={tbl}>
-          <thead><tr><Th>방향</Th><Th>상태</Th><Th>전표</Th><Th>유형</Th><Th r>수량</Th><Th>거래처</Th><Th>경과</Th><Th>조치</Th></tr></thead>
+          <thead><tr><Th>방향</Th><Th>상태</Th><Th>전표</Th><Th>유형</Th><Th r>수량</Th><Th>출고처</Th><Th>입고처</Th><Th>출고일시</Th><Th>입고확인</Th><Th>경과</Th><Th>조치</Th></tr></thead>
           <tbody>
             {filtered.map((s) => {
               const danger = isUnrecovered(s); const d = daysSince(s.depart_at);
@@ -484,7 +508,10 @@ function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [
                 <tr key={s.id} style={{ borderTop: `1px solid ${C.border}` }}>
                   <Td><DirBadge s={s} /></Td>
                   <Td><Pill status={danger ? "미회수" : s.status} /></Td>
-                  <Td c={C.sub}>{s.slip_no}</Td><Td>{s.pallet_code}</Td><Td r>{s.qty}</Td><Td>{s.to_partner_name}</Td>
+                  <Td c={C.sub}>{s.slip_no}</Td><Td>{s.pallet_code}</Td><Td r>{s.qty}</Td>
+                  <Td>{fromOf(s)}</Td><Td>{toOf(s)}</Td>
+                  <Td c={C.sub}>{fmtDT(s.depart_at)}</Td>
+                  <Td c={s.confirmed_at ? C.text : C.hint}>{fmtDT(s.confirmed_at)}</Td>
                   <Td c={danger ? C.red : s.status === "회수완료" ? C.hint : C.text} b={danger}>{s.status === "회수완료" ? "—" : d + "일"}</Td>
                   <Td>
                     <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -500,10 +527,11 @@ function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [
                 </tr>
               );
             })}
+            {filtered.length === 0 && <tr><td colSpan={11} style={{ padding: "20px 6px", fontSize: 12, color: C.hint, textAlign: "center" }}>해당 조건의 건이 없어요.</td></tr>}
           </tbody>
         </table>
       </div>
-      <Note>7일 이상 회수 안 된 건은 미회수(빨강)로 자동 분류돼요. 조치 버튼으로 상태가 흐르고 Supabase에 바로 저장됩니다. <b>⋯</b> 버튼으로 출고완료 건을 수정·취소할 수 있어요(이력 보존).</Note>
+      <Note>날짜 범위로 조회할 수 있어요. 출고처→입고처로 흐름이, 출고일시·입고확인 시각이 함께 보입니다. <b>⋯</b> 버튼으로 출고완료 건을 수정·취소할 수 있어요(이력 보존).</Note>
       {edit && <EditShipmentModal s={edit} palletTypes={palletTypes} onClose={() => setEdit(null)} onSave={editShipment} onCancel={cancelShipment} />}
     </>
   );
@@ -637,14 +665,10 @@ function Outbound({ partners, palletTypes, onRegister }) {
           </div>
         )}
 
-        {isRet && (
-          <>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 받는 센터</div>
-            <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
-              {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </>
-        )}
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납 받는 센터" : "출고하는 센터"}</div>
+        <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
+          {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
 
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· 여러 종류 한 번에</span></div>
         <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isRet ? C.amber : C.teal} bg={isRet ? C.amberBg : C.tealBg} />
@@ -660,7 +684,7 @@ function Outbound({ partners, palletTypes, onRegister }) {
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
         <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
-        <button disabled={!sel || total === 0 || busy} onClick={async () => { setBusy(true); await onRegister(sel, qtysToLines(qtys), date, note, dir, isRet ? center : null); setBusy(false); reset(); }} style={{ width: "100%", background: (!sel || total === 0 || busy) ? "#c7cad1" : (isRet ? C.amber : C.teal), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isRet ? "반납 등록" : "출고 등록"}</button>
+        <button disabled={!sel || total === 0 || busy} onClick={async () => { setBusy(true); await onRegister(sel, qtysToLines(qtys), date, note, dir, center); setBusy(false); reset(); }} style={{ width: "100%", background: (!sel || total === 0 || busy) ? "#c7cad1" : (isRet ? C.amber : C.teal), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isRet ? "반납 등록" : "출고 등록"}</button>
         <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
       </div>
     </>
