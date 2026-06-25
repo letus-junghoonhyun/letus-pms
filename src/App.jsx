@@ -264,7 +264,10 @@ function Shell({ session }) {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     try {
-      const depart_at = departDate ? new Date(departDate + "T09:00:00").toISOString() : new Date().toISOString();
+      // 선택한 날짜 + 실제 처리 시각(시:분:초)을 반영
+      const nowD = new Date();
+      let depart_at = nowD.toISOString();
+      if (departDate) { const [y, m, d] = departDate.split("-").map(Number); const dt = new Date(nowD); dt.setFullYear(y, m - 1, d); depart_at = dt.toISOString(); }
       const shipRows = [];
       for (const l of valid) {
         const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
@@ -567,7 +570,9 @@ function EditShipmentModal({ s, palletTypes, onClose, onSave, onCancel }) {
   const today = new Date().toISOString().slice(0, 10);
   const save = async () => {
     setBusy(true);
-    await onSave(s, { pallet_code: pallet, qty: Number(qty), depart_at: new Date(date + "T09:00:00").toISOString(), note: note || null });
+    // 날짜만 바꾸고 원래 시각은 유지
+    const orig = new Date(s.depart_at || Date.now()); const [y, m, d] = date.split("-").map(Number); orig.setFullYear(y, m - 1, d);
+    await onSave(s, { pallet_code: pallet, qty: Number(qty), depart_at: orig.toISOString(), note: note || null });
     setBusy(false); onClose();
   };
   const cancel = async () => {
