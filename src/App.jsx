@@ -539,8 +539,9 @@ function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [
                   <Td c={danger ? C.red : s.status === "회수완료" ? C.hint : C.text} b={danger}>{s.status === "회수완료" ? "—" : d + "일"}</Td>
                   <Td>
                     <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                      {/* 협력업체는 본인 건 입고확인만, 내부(운송/관리)는 전체 조치, 정산담당은 조회만 */}
-                      {s.status === "출고완료" && (caps.operate || caps.confirmOwn) && <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnGhost}>입고확인</button>}
+                      {/* 정방향 입고확인: 협력업체는 본인 정방향만, 내부는 전체(반납 입고확인 포함). 협력업체는 자기 반납을 확인 못 함 */}
+                      {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnGhost}>입고확인</button>}
+                      {s.status === "출고완료" && caps.confirmOwn && isReturn(s) && <span style={{ color: C.hint, fontSize: 11 }}>센터 확인 대기</span>}
                       {s.status === "입고확인" && caps.operate && <button onClick={() => setStatus(s, "회수요청", "회수요청")} style={btnGhost}>회수요청</button>}
                       {s.status === "회수요청" && caps.operate && <button onClick={() => setStatus(s, "회수완료", "회수")} style={btnTealSm}>회수완료</button>}
                       {s.status === "회수완료" && <span style={{ color: C.green }}>✓</span>}

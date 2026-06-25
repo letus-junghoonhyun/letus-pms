@@ -97,10 +97,10 @@ CREATE POLICY "ship select" ON shipment FOR SELECT TO authenticated
 -- 출고 등록은 내부(관리자·운송팀)만
 CREATE POLICY "ship insert" ON shipment FOR INSERT TO authenticated
   WITH CHECK (my_role() IN ('관리자','운송팀'));
--- 상태 변경: 내부 전체 / 협력업체는 본인 거래처 건만(입고확인 등)
+-- 상태 변경: 내부 전체 / 협력업체는 본인 거래처의 '정방향(출고)' 건만(입고확인). 반납 입고확인은 센터(내부)만.
 CREATE POLICY "ship update" ON shipment FOR UPDATE TO authenticated
-  USING (my_role() IN ('관리자','운송팀') OR (my_role() = '협력업체' AND to_partner = my_partner()))
-  WITH CHECK (my_role() IN ('관리자','운송팀') OR (my_role() = '협력업체' AND to_partner = my_partner()));
+  USING (my_role() IN ('관리자','운송팀') OR (my_role() = '협력업체' AND to_partner = my_partner() AND direction = '출고'))
+  WITH CHECK (my_role() IN ('관리자','운송팀') OR (my_role() = '협력업체' AND to_partner = my_partner() AND direction = '출고'));
 
 -- ── 9) movement: shipment과 동일 가시성 ─────────────────────
 CREATE POLICY "mv select" ON movement FOR SELECT TO authenticated
