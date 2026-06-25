@@ -441,6 +441,16 @@ function Shell({ session }) {
     } catch (e) { alert("거래처 등록 실패: " + (e.message || e)); }
   };
 
+  // 거래처 삭제(소프트) — 재고 보유/진행중이면 차단, 이력은 보존
+  const deletePartner = async (p) => {
+    if (!window.confirm(`'${p.name}' 거래처를 삭제할까요?\n(과거 출고 이력은 보존되고 목록에서만 사라져요)`)) return;
+    try {
+      const { error } = await supabase.from("partner").update({ active: false }).eq("code", p.code);
+      if (error) throw error;
+      await loadAll();
+    } catch (e) { alert("거래처 삭제 실패: " + (e.message || e)); }
+  };
+
   const bulkAddPartners = async (list) => {
     const existing = new Set(partners.map((p) => p.name));
     const seen = new Set();
@@ -525,7 +535,7 @@ function Shell({ session }) {
             {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes }} />}
             {nav === "AJ" && caps.aj && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
-            {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice }} />}
+            {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner }} />}
             {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, setUserRole, setUserPartner, setUserActive, meId: session.user.id }} />}
           </>
         )}
@@ -1198,11 +1208,14 @@ function PriceRow({ p, price, editable, onSave }) {
   );
 }
 
-function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, caps = {}, setPrice }) {
+function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, caps = {}, setPrice, ships = [], ajReqs = [], deletePartner }) {
   const [name, setName] = useState(""); const [type, setType] = useState("업체");
   const [pq, setPq] = useState(""); const [pf, setPf] = useState("전체");
   const [preview, setPreview] = useState([]); const [busy, setBusy] = useState(false); const [msg, setMsg] = useState("");
   const filtered = partners.filter((p) => (pf === "전체" || p.type === pf) && (p.name.includes(pq) || pq === ""));
+  // 보유 재고 또는 진행중(미확인 출고)이 있으면 삭제 불가
+  const hasStock = (code) => palletTypes.some((t) => heldQty(ships, ajReqs, code, t.code) > 0)
+    || ships.some((s) => !isReturn(s) && s.to_partner === code && !s.canceled && s.status === "출고완료");
 
   const normType = (v) => { const s = String(v || "").trim(); if (s.includes("시공")) return "시공팀"; if (s.includes("센터")) return "센터"; return "업체"; };
   const pickName = (r) => r["거래처명"] ?? r["거래처"] ?? r["이름"] ?? r["업체명"] ?? r["name"] ?? r["NAME"] ?? Object.values(r)[0] ?? "";
@@ -1250,13 +1263,18 @@ function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, ca
           </div>
           <div style={{ maxHeight: 240, overflow: "auto", marginBottom: 12 }}>
             <table style={tbl}><tbody>
-              {filtered.map((p) => (
+              {filtered.map((p) => { const locked = hasStock(p.code); return (
                 <tr key={p.code} style={{ borderTop: `1px solid ${C.border}` }}>
                   <Td>{p.name}</Td>
                   <Td><TypeBadge t={p.type} /></Td>
+                  {caps.master && <td style={{ padding: "8px 6px", textAlign: "right" }}>
+                    {locked
+                      ? <span style={{ fontSize: 10, color: C.hint }} title="보유 재고/진행중 건이 있어 삭제 불가">재고있음</span>
+                      : <button onClick={() => deletePartner(p)} style={{ fontSize: 11, color: C.red, background: "none", border: "none", cursor: "pointer", padding: "2px 6px" }} title="거래처 삭제">삭제</button>}
+                  </td>}
                 </tr>
-              ))}
-              {filtered.length === 0 && <tr><td colSpan={2} style={{ padding: "16px 6px", fontSize: 12, color: C.hint, textAlign: "center" }}>검색 결과 없음</td></tr>}
+              ); })}
+              {filtered.length === 0 && <tr><td colSpan={caps.master ? 3 : 2} style={{ padding: "16px 6px", fontSize: 12, color: C.hint, textAlign: "center" }}>검색 결과 없음</td></tr>}
             </tbody></table>
           </div>
           {caps.master && <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
