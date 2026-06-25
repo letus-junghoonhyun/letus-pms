@@ -584,7 +584,7 @@ function Shell({ session }) {
           </div>
         ) : (
           <>
-            {nav === "현황" && <Dashboard {...{ ships, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
+            {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} onRegister={register} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
@@ -625,7 +625,7 @@ function Tabs({ tabs, tab, setTab, count }) {
   );
 }
 
-function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment, resetData }) {
+function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment, resetData }) {
   const [tab, setTab] = useState("전체");
   const [edit, setEdit] = useState(null);
   const [from, setFrom] = useState(""); const [to, setTo] = useState("");
@@ -637,8 +637,18 @@ function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [
   // 날짜 범위 필터(출고/반납일 기준)
   const inRange = (s) => { const d = (s.depart_at || "").slice(0, 10); if (from && d < from) return false; if (to && d > to) return false; return true; };
   const byTab = (s) => tab === "전체" ? true : tab === "미회수" ? isUnrecovered(s) : s.status === tab;
-  const filtered = ships.filter((s) => inRange(s) && byTab(s));
-  const cnt = (t) => ships.filter(inRange).filter((s) => t === "전체" ? true : t === "미회수" ? isUnrecovered(s) : s.status === t).length;
+  // AJ 요청(공급/회수)도 수불 흐름이므로 같이 표시 — 가짜 행으로 변환
+  const ajRows = ajReqs.map((r) => ({
+    _aj: true, id: "aj_" + r.id, ajType: r.type, status: r.status, pallet_code: r.pallet_code, qty: r.qty,
+    from: r.type === "회수" ? (r.partner_name || r.center || "—") : "AJ네트웍스",
+    to: r.type === "회수" ? "AJ네트웍스" : (r.center || "—"),
+    depart_at: r.requested_at, confirmed_at: r.completed_at, slip_no: "AJ",
+  }));
+  const shipFiltered = ships.filter((s) => inRange(s) && byTab(s));
+  // AJ행은 '전체' 탭에서만 (상태가 출고완료/입고확인 체계와 다름)
+  const ajFiltered = tab === "전체" ? ajRows.filter(inRange) : [];
+  const filtered = [...shipFiltered, ...ajFiltered].sort((a, b) => (b.depart_at || "").localeCompare(a.depart_at || ""));
+  const cnt = (t) => ships.filter(inRange).filter((s) => t === "전체" ? true : t === "미회수" ? isUnrecovered(s) : s.status === t).length + (t === "전체" ? ajRows.filter(inRange).length : 0);
   const quick = (days) => { const e = new Date(); const sdt = new Date(); sdt.setDate(e.getDate() - days); setFrom(sdt.toISOString().slice(0, 10)); setTo(e.toISOString().slice(0, 10)); };
 
   return (
@@ -670,6 +680,21 @@ function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [
           <thead><tr><Th>방향</Th><Th>상태</Th><Th>전표</Th><Th>유형</Th><Th r>수량</Th><Th>출고처</Th><Th>입고처</Th><Th>출고일시</Th><Th>입고확인</Th><Th>경과</Th><Th>조치</Th></tr></thead>
           <tbody>
             {filtered.map((s) => {
+              if (s._aj) {
+                const isRec = s.ajType === "회수"; const dn = s.status === "완료";
+                return (
+                  <tr key={s.id} style={{ borderTop: `1px solid ${C.border}`, background: "#faf7ff" }}>
+                    <Td><span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "1px 6px", borderRadius: 10 }}>{isRec ? "AJ회수" : "AJ공급"}</span></Td>
+                    <Td><span style={{ fontSize: 11, padding: "2px 9px", borderRadius: 20, background: dn ? C.greenBg : C.amberBg, color: dn ? C.green : C.amber }}>{dn ? "AJ완료" : "AJ요청"}</span></Td>
+                    <Td c={C.hint}>AJ</Td><Td>{s.pallet_code}</Td><Td r>{s.qty}</Td>
+                    <Td>{s.from}</Td><Td>{s.to}</Td>
+                    <Td c={C.sub}>{fmtDT(s.depart_at)}</Td>
+                    <Td c={s.confirmed_at ? C.text : C.hint}>{fmtDT(s.confirmed_at)}</Td>
+                    <Td c={C.hint}>—</Td>
+                    <Td><span style={{ color: C.hint, fontSize: 11 }}>{dn ? "✓" : "AJ 처리 대기"}</span></Td>
+                  </tr>
+                );
+              }
               const danger = isUnrecovered(s); const d = daysSince(s.depart_at);
               return (
                 <tr key={s.id} style={{ borderTop: `1px solid ${C.border}` }}>
