@@ -340,6 +340,20 @@ function Shell({ session }) {
     } catch (e) { alert("상태 변경 실패: " + (e.message || e)); }
   };
 
+  // ⚠️ 테스트용: 출고/반납/이동 데이터 전체 삭제 (거래처·단가·계정은 유지). 운영 전환 시 제거.
+  const resetData = async () => {
+    if (!window.confirm("[테스트 초기화]\n모든 출고·반납·이동 데이터를 삭제합니다.\n거래처·단가·계정은 유지됩니다.\n\n되돌릴 수 없어요. 진행할까요?")) return;
+    if (!window.confirm("마지막 확인 — 정말 모두 삭제할까요?")) return;
+    try {
+      const a = await supabase.from("movement").delete().not("id", "is", null);
+      if (a.error) throw a.error;
+      const b = await supabase.from("shipment").delete().not("id", "is", null);
+      if (b.error) throw b.error;
+      await loadAll();
+      alert("초기화 완료 — 출고/반납 데이터가 모두 삭제됐어요.");
+    } catch (e) { alert("초기화 실패: " + (e.message || e)); }
+  };
+
   const addPartner = async (name, type) => {
     try {
       const code = "P" + Date.now().toString().slice(-7);
@@ -424,7 +438,7 @@ function Shell({ session }) {
           </div>
         ) : (
           <>
-            {nav === "현황" && <Dashboard {...{ ships, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment }} />}
+            {nav === "현황" && <Dashboard {...{ ships, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} onRegister={register} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} onRegister={register} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
@@ -462,7 +476,7 @@ function Tabs({ tabs, tab, setTab, count }) {
   );
 }
 
-function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment }) {
+function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment, resetData }) {
   const [tab, setTab] = useState("전체");
   const [edit, setEdit] = useState(null);
   const [from, setFrom] = useState(""); const [to, setTo] = useState("");
@@ -480,7 +494,11 @@ function Dashboard({ ships, flash, setStatus, setNav, caps = {}, palletTypes = [
 
   return (
     <>
-      <Head title="수불 현황" sub={new Date().toLocaleDateString("ko-KR")} action={caps.outbound ? <button onClick={() => setNav("출고")} style={btnTeal}>+ 출고 등록</button> : null} />
+      <Head title="수불 현황" sub={new Date().toLocaleDateString("ko-KR")} action={
+        <div style={{ display: "flex", gap: 8 }}>
+          {caps.users && <button onClick={resetData} style={{ fontSize: 12, padding: "8px 12px", borderRadius: 8, border: `1px solid ${C.red}`, background: "#fff", color: C.red, cursor: "pointer" }} title="테스트용 — 출고/반납 데이터 전체 삭제">🧪 초기화</button>}
+          {caps.outbound && <button onClick={() => setNav("출고")} style={btnTeal}>+ 출고 등록</button>}
+        </div>} />
       {flash && <div style={{ background: C.greenBg, color: C.green, fontSize: 13, padding: "9px 14px", borderRadius: 8, marginBottom: 14 }}>✓ 출고 등록 완료 — 전표 {flash} 발행</div>}
       <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
         <Metric label="금일 출고" value={today} unit="장" tone="plain" />
