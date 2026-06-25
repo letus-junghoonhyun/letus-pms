@@ -58,6 +58,16 @@ const Th = ({ children, r }) => <th style={{ fontSize: 11, color: C.hint, fontWe
 const TYPE_BADGE = { 시공팀: { bg: C.blueBg, fg: C.blue }, 센터: { bg: C.amberBg, fg: C.amber }, 업체: { bg: "#eef0f3", fg: C.sub } };
 const TypeBadge = ({ t }) => { const b = TYPE_BADGE[t] || TYPE_BADGE.업체; return <span style={{ fontSize: 11, color: b.fg, background: b.bg, padding: "2px 8px", borderRadius: 20 }}>{t}</span>; };
 
+// 메인 센터 (반납 받는 곳) — 추후 마스터 데이터로 보완 예정
+const CENTERS = ["양지물류센터", "안성센터", "평택센터"];
+
+// 거래처가 현재 보유한 수량(반납 가능 수량) = 보낸(정방향) − 이미 돌려준/반납신청(반납)
+const heldQty = (ships, partnerCode, palletCode) => {
+  const out = ships.filter((s) => !isReturn(s) && s.to_partner === partnerCode && s.pallet_code === palletCode && ["출고완료", "입고확인", "회수요청"].includes(s.status)).reduce((a, s) => a + s.qty, 0);
+  const ret = ships.filter((s) => isReturn(s) && s.to_partner === partnerCode && s.pallet_code === palletCode && ["출고완료", "입고확인"].includes(s.status)).reduce((a, s) => a + s.qty, 0);
+  return Math.max(0, out - ret);
+};
+
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체"];
 const NAV_BY_ROLE = {
@@ -242,22 +252,26 @@ function Shell({ session }) {
     } catch (e) { alert("계정 상태 변경 실패: " + (e.message || e)); }
   };
 
-  const register = async (partner, pallet, qty, departDate, note, direction = "출고") => {
+  // lines: [{ pallet, qty }] — 여러 파렛트 종류를 한 전표(slip)로 묶어 등록(혼합 출고)
+  const register = async (partner, lines, departDate, note, direction = "출고", center = null) => {
+    const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
+    if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     try {
       const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
       if (e1) throw e1;
-      const id = uid();
-      // departDate(YYYY-MM-DD)가 있으면 그 날짜로, 없으면 지금
       const depart_at = departDate ? new Date(departDate + "T09:00:00").toISOString() : new Date().toISOString();
-      const { error: e2 } = await supabase.from("shipment").insert({
-        id, slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
-        pallet_code: pallet, qty, status: "출고완료", direction, depart_at, note: note || null, created_by: session.user.id,
-      });
+      const shipRows = valid.map((l) => ({
+        id: uid(), slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
+        pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction, center,
+        depart_at, note: note || null, created_by: session.user.id,
+      }));
+      const { error: e2 } = await supabase.from("shipment").insert(shipRows);
       if (e2) throw e2;
-      await supabase.from("movement").insert({
-        id: uid(), shipment_id: id, type: direction, direction, source: "앱", pallet_code: pallet, qty,
+      const mvRows = shipRows.map((s) => ({
+        id: uid(), shipment_id: s.id, type: direction, direction, source: "앱", pallet_code: s.pallet_code, qty: s.qty,
         to_partner: partner.code, to_partner_name: partner.name, created_by: session.user.id,
-      });
+      }));
+      await supabase.from("movement").insert(mvRows);
       setFlash(slip); setNav("현황"); loadAll();
     } catch (e) { alert((direction === "반납" ? "반납" : "출고") + " 등록 실패: " + (e.message || e)); }
   };
@@ -400,7 +414,7 @@ function Shell({ session }) {
           <>
             {nav === "현황" && <Dashboard {...{ ships, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} onRegister={register} />}
-            {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} onRegister={register} />}
+            {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} onRegister={register} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, setStatus }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
@@ -545,20 +559,51 @@ function EditShipmentModal({ s, palletTypes, onClose, onSave, onCancel }) {
   );
 }
 
+// 여러 파렛트 유형 + 수량을 한 번에 입력 (혼합). maxOf 주면 그 한도까지만(보유수량 제한).
+function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf }) {
+  const set = (code, v) => setQtys((q) => ({ ...q, [code]: v }));
+  return (
+    <div style={{ display: "grid", gap: 8, marginBottom: 18 }}>
+      {palletTypes.map((p) => {
+        const max = maxOf ? maxOf(p.code) : Infinity;
+        const disabled = !!maxOf && max <= 0;
+        const v = qtys[p.code] || 0;
+        return (
+          <div key={p.code} style={{ display: "flex", alignItems: "center", gap: 10, opacity: disabled ? 0.4 : 1 }}>
+            <div style={{ width: 104, flexShrink: 0 }}>
+              <span style={{ fontSize: 14, fontWeight: 600 }}>{p.code}</span>
+              {maxOf && <span style={{ fontSize: 11, color: C.hint }}> · 보유 {max}</span>}
+            </div>
+            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", border: `1px solid ${v > 0 ? color : C.border}`, borderRadius: 8, padding: "4px 12px", background: v > 0 ? bg : "#fff" }}>
+              <button disabled={disabled} onClick={() => set(p.code, Math.max(0, v - 1))} style={{ background: "none", border: "none", fontSize: 20, color: C.sub, cursor: "pointer" }}>−</button>
+              <input type="number" value={v} disabled={disabled} onChange={(e) => { let n = Math.max(0, parseInt(e.target.value) || 0); if (max !== Infinity) n = Math.min(n, max); set(p.code, n); }} style={{ width: 56, textAlign: "center", fontSize: 16, fontWeight: 600, border: "none", outline: "none", background: "transparent" }} />
+              <button disabled={disabled || v >= max} onClick={() => set(p.code, Math.min(max, v + 1))} style={{ background: "none", border: "none", fontSize: 20, color, cursor: disabled || v >= max ? "default" : "pointer" }}>+</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+const qtysToLines = (qtys) => Object.entries(qtys).map(([pallet, qty]) => ({ pallet, qty: qty || 0 })).filter((l) => l.qty > 0);
+const qtysTotal = (qtys) => Object.values(qtys).reduce((a, n) => a + (n || 0), 0);
+
 function Outbound({ partners, palletTypes, onRegister }) {
   const today = new Date().toISOString().slice(0, 10);
   const [dir, setDir] = useState("출고");
   const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
-  const [pallet, setPallet] = useState(null); const [qty, setQty] = useState(20);
+  const [qtys, setQtys] = useState({});
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
-  const [date, setDate] = useState(today); const [note, setNote] = useState("");
+  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(CENTERS[0]);
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
   const isRet = dir === "반납";
+  const total = qtysTotal(qtys);
+  const reset = () => { setQtys({}); setNote(""); setDate(today); };
 
   return (
     <>
-      <Head title="출고 등록" sub="방향을 고르고, 거래처·유형·수량 입력" />
+      <Head title="출고 등록" sub="방향을 고르고, 거래처·여러 유형·수량 입력" />
       <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>방향</div>
         <div style={{ display: "flex", gap: 6, marginBottom: 18, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
@@ -589,24 +634,22 @@ function Outbound({ partners, palletTypes, onRegister }) {
           </div>
         )}
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형 <span style={{ color: C.hint, fontSize: 11 }}>· 전체 유형 선택 가능</span></div>
-        <div style={{ display: "flex", gap: 8, marginBottom: 18, minHeight: 44, flexWrap: "wrap" }}>
-          {palletTypes.map((p) => {
-            const on = pallet === p.code;
-            return <button key={p.code} onClick={() => setPallet(p.code)} style={{ minWidth: 70, fontSize: 14, padding: "11px 14px", borderRadius: 8, cursor: "pointer", border: on ? `1px solid ${C.teal}` : `1px solid ${C.border}`, background: on ? C.tealBg : "#fff", color: on ? C.tealDk : C.text, fontWeight: on ? 600 : 400 }}>{p.code}</button>;
-          })}
-        </div>
+        {isRet && (
+          <>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 받는 센터</div>
+            <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
+              {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </>
+        )}
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>수량</div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 16px", marginBottom: 18 }}>
-          <button onClick={() => setQty(Math.max(1, qty - 1))} style={{ background: "none", border: "none", fontSize: 22, color: C.sub, cursor: "pointer" }}>−</button>
-          <input value={qty} onChange={(e) => setQty(Math.max(1, parseInt(e.target.value) || 1))} type="number" style={{ width: 80, textAlign: "center", fontSize: 20, fontWeight: 600, border: "none", outline: "none", MozAppearance: "textfield" }} />
-          <button onClick={() => setQty(qty + 1)} style={{ background: "none", border: "none", fontSize: 22, color: C.teal, cursor: "pointer" }}>+</button>
-        </div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· 여러 종류 한 번에</span></div>
+        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isRet ? C.amber : C.teal} bg={isRet ? C.amberBg : C.tealBg} />
+        {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
 
         <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 140 }}>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출고일자</div>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납일자" : "출고일자"}</div>
             <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
           </div>
         </div>
@@ -614,41 +657,41 @@ function Outbound({ partners, palletTypes, onRegister }) {
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
         <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
-        <button disabled={!sel || !pallet || busy} onClick={async () => { setBusy(true); await onRegister(sel, pallet, qty, date, note, dir); setBusy(false); setNote(""); setDate(today); }} style={{ width: "100%", background: (!sel || !pallet || busy) ? "#c7cad1" : (isRet ? C.amber : C.teal), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isRet ? "반납 등록" : "출고 등록"}</button>
+        <button disabled={!sel || total === 0 || busy} onClick={async () => { setBusy(true); await onRegister(sel, qtysToLines(qtys), date, note, dir, isRet ? center : null); setBusy(false); reset(); }} style={{ width: "100%", background: (!sel || total === 0 || busy) ? "#c7cad1" : (isRet ? C.amber : C.teal), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isRet ? "반납 등록" : "출고 등록"}</button>
         <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
       </div>
     </>
   );
 }
 
-// 협력업체용 반납 등록 — 본인 거래처 명의로 우리에게 돌려보내는 파렛트 기록
-function ReturnRegister({ partners, palletTypes, onRegister }) {
+// 협력업체용 반납 등록 — 본인 보유 수량 한도 내에서, 여러 유형 한 번에, 받는 센터 지정
+function ReturnRegister({ partners, palletTypes, ships, onRegister }) {
   const today = new Date().toISOString().slice(0, 10);
   const me = partners[0]; // 협력업체는 RLS로 본인 거래처만 보임
-  const [pallet, setPallet] = useState(null); const [qty, setQty] = useState(20);
-  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [busy, setBusy] = useState(false);
+  const [qtys, setQtys] = useState({});
+  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(CENTERS[0]); const [busy, setBusy] = useState(false);
+  const heldOf = (code) => (me ? heldQty(ships, me.code, code) : 0);
+  const totalHeld = palletTypes.reduce((a, p) => a + heldOf(p.code), 0);
+  const total = qtysTotal(qtys);
   return (
     <>
-      <Head title="반납 등록" sub="우리(렌탈사)에게 돌려보내는 파렛트를 등록하세요" />
+      <Head title="반납 등록" sub="보유 중인 파렛트를 메인센터로 반납 등록하세요" />
       <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
         {!me ? (
           <div style={{ fontSize: 13, color: C.amber, background: C.amberBg, padding: "12px 14px", borderRadius: 8 }}>아직 소속 거래처가 연결되지 않았어요. 관리자에게 문의하세요.</div>
+        ) : totalHeld === 0 ? (
+          <div style={{ fontSize: 13, color: C.sub, background: C.page, padding: "16px", borderRadius: 8, textAlign: "center" }}>현재 보유 중인 파렛트가 없어요. 반납할 수량이 없습니다.</div>
         ) : (
           <>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 주체</div>
-            <div style={{ border: `1px solid ${C.amber}`, background: C.amberBg, borderRadius: 8, padding: "10px 12px", marginBottom: 18, fontSize: 14, color: C.amber, fontWeight: 600 }}>{me.name} → 렌탈사(우리)</div>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 주체 → 받는 센터</div>
+            <div style={{ border: `1px solid ${C.amber}`, background: C.amberBg, borderRadius: 8, padding: "10px 12px", marginBottom: 14, fontSize: 14, color: C.amber, fontWeight: 600 }}>{me.name}</div>
+            <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
+              {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
 
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형</div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-              {palletTypes.map((p) => { const on = pallet === p.code; return <button key={p.code} onClick={() => setPallet(p.code)} style={{ minWidth: 70, fontSize: 14, padding: "11px 14px", borderRadius: 8, cursor: "pointer", border: on ? `1px solid ${C.amber}` : `1px solid ${C.border}`, background: on ? C.amberBg : "#fff", color: on ? C.amber : C.text, fontWeight: on ? 600 : 400 }}>{p.code}</button>; })}
-            </div>
-
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>수량</div>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 16px", marginBottom: 18 }}>
-              <button onClick={() => setQty(Math.max(1, qty - 1))} style={{ background: "none", border: "none", fontSize: 22, color: C.sub, cursor: "pointer" }}>−</button>
-              <input value={qty} onChange={(e) => setQty(Math.max(1, parseInt(e.target.value) || 1))} type="number" style={{ width: 80, textAlign: "center", fontSize: 20, fontWeight: 600, border: "none", outline: "none" }} />
-              <button onClick={() => setQty(qty + 1)} style={{ background: "none", border: "none", fontSize: 22, color: C.amber, cursor: "pointer" }}>+</button>
-            </div>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납 수량 <span style={{ color: C.hint, fontSize: 11 }}>· 보유 한도 내</span></div>
+            <PalletQtyEditor palletTypes={palletTypes.filter((p) => heldOf(p.code) > 0)} qtys={qtys} setQtys={setQtys} color={C.amber} bg={C.amberBg} maxOf={heldOf} />
+            {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>반납 합계 <b style={{ color: C.text }}>{total}</b>장</div>}
 
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>반납일자</div>
             <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }} />
@@ -656,8 +699,8 @@ function ReturnRegister({ partners, palletTypes, onRegister }) {
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
             <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
-            <button disabled={!pallet || busy} onClick={async () => { setBusy(true); await onRegister(me, pallet, qty, date, note, "반납"); setBusy(false); setNote(""); setDate(today); setPallet(null); }} style={{ width: "100%", background: (!pallet || busy) ? "#c7cad1" : C.amber, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : "반납 등록"}</button>
-            <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>등록하면 우리쪽에서 입고확인 후 수불이 정리돼요</p>
+            <button disabled={total === 0 || busy} onClick={async () => { setBusy(true); await onRegister(me, qtysToLines(qtys), date, note, "반납", center); setBusy(false); setNote(""); setDate(today); setQtys({}); }} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : C.amber, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : "반납 등록"}</button>
+            <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>등록하면 센터에서 입고확인 후 수불이 정리돼요</p>
           </>
         )}
       </div>
@@ -678,7 +721,7 @@ function Confirm({ ships, setStatus, caps = {} }) {
             <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, display: "flex", alignItems: "center", gap: 14 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{s.to_partner_name}</div>
-                <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.note ? ` · ${s.note}` : ""}</div>
+                <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.center ? ` · ${s.center}` : ""}{s.note ? ` · ${s.note}` : ""}</div>
               </div>
               <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnTeal}>✓ 입고확인</button>
             </div>
