@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as XLSX from "xlsx";
 import { supabase } from "./supabase.js";
 
@@ -1316,24 +1316,27 @@ const ROLE_BADGE = {
   정산담당: { bg: C.blueBg, fg: C.blue }, 협력업체: { bg: "#eef0f3", fg: C.sub },
 };
 
-// 검색 가능한 거래처 선택기 (수백 개여도 검색으로 빠르게)
+// 검색 가능한 거래처 선택기 (수백 개여도 검색으로 빠르게). 드롭다운은 화면 고정(fixed)으로 표에 안 갇힘.
 function PartnerPicker({ value, partners, onChange }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
+  const [rect, setRect] = useState(null);
+  const btnRef = useRef(null);
   const cur = partners.find((p) => p.code === value);
-  const matches = partners.filter((p) => !q || p.name.includes(q) || (p.type || "").includes(q)).slice(0, 30);
+  const matches = partners.filter((p) => !q || p.name.includes(q) || (p.type || "").includes(q)).slice(0, 50);
+  const openIt = () => { const r = btnRef.current.getBoundingClientRect(); setRect({ top: r.bottom + 4, left: r.left, width: Math.max(r.width, 220) }); setQ(""); setOpen(true); };
   return (
-    <div style={{ position: "relative", maxWidth: 240 }}>
-      <button onClick={() => { setOpen((o) => !o); setQ(""); }} style={{ width: "100%", textAlign: "left", fontSize: 12, padding: "6px 9px", borderRadius: 7, border: `1px solid ${value ? C.border : C.amber}`, background: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+    <div style={{ maxWidth: 240 }}>
+      <button ref={btnRef} onClick={() => (open ? setOpen(false) : openIt())} style={{ width: "100%", textAlign: "left", fontSize: 12, padding: "6px 9px", borderRadius: 7, border: `1px solid ${value ? C.border : C.amber}`, background: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
         <span style={{ color: cur ? C.text : C.amber, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cur ? `${cur.name} · ${cur.type}` : "(미지정 — 아무 것도 안 보임)"}</span>
         <span style={{ color: C.hint, flexShrink: 0 }}>▾</span>
       </button>
-      {open && (
+      {open && rect && (
         <>
-          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
-          <div style={{ position: "absolute", top: 36, left: 0, right: 0, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, zIndex: 41, boxShadow: "0 6px 20px rgba(0,0,0,.12)" }}>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
+          <div style={{ position: "fixed", top: rect.top, left: rect.left, width: rect.width, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, zIndex: 61, boxShadow: "0 6px 20px rgba(0,0,0,.15)" }}>
             <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="거래처 검색…" style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "8px 10px", border: "none", borderBottom: `1px solid ${C.border}`, outline: "none" }} />
-            <div style={{ maxHeight: 220, overflow: "auto" }}>
+            <div style={{ maxHeight: 240, overflow: "auto" }}>
               <button onClick={() => { onChange(null); setOpen(false); }} style={{ display: "block", width: "100%", textAlign: "left", fontSize: 12, padding: "8px 10px", border: "none", borderBottom: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", color: C.amber }}>(미지정)</button>
               {matches.map((p) => (
                 <button key={p.code} onClick={() => { onChange(p.code); setOpen(false); }} style={{ display: "flex", justifyContent: "space-between", width: "100%", textAlign: "left", fontSize: 12, padding: "8px 10px", border: "none", borderBottom: `1px solid ${C.border}`, background: p.code === value ? C.tealBg : "#fff", cursor: "pointer" }}>
