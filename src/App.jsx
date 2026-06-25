@@ -528,7 +528,7 @@ function Shell({ session }) {
     { key: "현황", label: "수불 현황" }, { key: "출고", label: "출고 등록" },
     { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
-    { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 연동" },
+    { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 요청" },
     { key: "정산", label: "정산" }, { key: "마스터", label: "거래처·단가" },
     { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
@@ -1139,7 +1139,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cance
 
   return (
     <>
-      <Head title={canCreate ? "AJ 연동" : "AJ 요청 처리"} sub={canCreate ? "AJ네트웍스에 공급/회수 요청 · 완료 시 재고 반영 (가설정 수동)" : "접수된 요청을 처리(완료)하세요 · AJ네트웍스 직원용"} />
+      <Head title={canCreate ? "AJ 요청" : "AJ 요청 처리"} sub={canCreate ? "AJ네트웍스에 공급/회수 요청 · 완료 시 재고 반영 (가설정 수동)" : "접수된 요청을 처리(완료)하세요 · AJ네트웍스 직원용"} />
       <div style={{ display: "grid", gridTemplateColumns: canCreate ? "repeat(auto-fit, minmax(300px, 1fr))" : "1fr", gap: 16, alignItems: "start" }}>
         {/* 요청 등록 (내부만) */}
         {canCreate && <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
