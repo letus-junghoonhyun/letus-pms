@@ -1315,6 +1315,39 @@ const ROLE_BADGE = {
   관리자: { bg: C.redBg, fg: C.red }, 운송팀: { bg: C.tealBg, fg: C.tealDk },
   정산담당: { bg: C.blueBg, fg: C.blue }, 협력업체: { bg: "#eef0f3", fg: C.sub },
 };
+
+// 검색 가능한 거래처 선택기 (수백 개여도 검색으로 빠르게)
+function PartnerPicker({ value, partners, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const cur = partners.find((p) => p.code === value);
+  const matches = partners.filter((p) => !q || p.name.includes(q) || (p.type || "").includes(q)).slice(0, 30);
+  return (
+    <div style={{ position: "relative", maxWidth: 240 }}>
+      <button onClick={() => { setOpen((o) => !o); setQ(""); }} style={{ width: "100%", textAlign: "left", fontSize: 12, padding: "6px 9px", borderRadius: 7, border: `1px solid ${value ? C.border : C.amber}`, background: "#fff", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+        <span style={{ color: cur ? C.text : C.amber, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cur ? `${cur.name} · ${cur.type}` : "(미지정 — 아무 것도 안 보임)"}</span>
+        <span style={{ color: C.hint, flexShrink: 0 }}>▾</span>
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+          <div style={{ position: "absolute", top: 36, left: 0, right: 0, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, zIndex: 41, boxShadow: "0 6px 20px rgba(0,0,0,.12)" }}>
+            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="거래처 검색…" style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "8px 10px", border: "none", borderBottom: `1px solid ${C.border}`, outline: "none" }} />
+            <div style={{ maxHeight: 220, overflow: "auto" }}>
+              <button onClick={() => { onChange(null); setOpen(false); }} style={{ display: "block", width: "100%", textAlign: "left", fontSize: 12, padding: "8px 10px", border: "none", borderBottom: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", color: C.amber }}>(미지정)</button>
+              {matches.map((p) => (
+                <button key={p.code} onClick={() => { onChange(p.code); setOpen(false); }} style={{ display: "flex", justifyContent: "space-between", width: "100%", textAlign: "left", fontSize: 12, padding: "8px 10px", border: "none", borderBottom: `1px solid ${C.border}`, background: p.code === value ? C.tealBg : "#fff", cursor: "pointer" }}>
+                  <span>{p.name}</span><TypeBadge t={p.type} />
+                </button>
+              ))}
+              {matches.length === 0 && <div style={{ padding: "10px", fontSize: 12, color: C.hint }}>검색 결과 없음</div>}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 function Users({ users, partners, setUserRole, setUserPartner, setUserActive, meId }) {
   const [q, setQ] = useState("");
   const isPending = (u) => u.role === "협력업체" && !u.partner_code && u.active;
@@ -1352,11 +1385,7 @@ function Users({ users, partners, setUserRole, setUserPartner, setUserActive, me
                   </Td>
                   <Td>
                     {u.role === "협력업체" ? (
-                      <select value={u.partner_code || ""} onChange={(e) => setUserPartner(u.id, e.target.value || null)}
-                        style={{ fontSize: 12, padding: "5px 8px", borderRadius: 7, border: `1px solid ${u.partner_code ? C.border : C.amber}`, maxWidth: 220 }}>
-                        <option value="">(미지정 — 아무 것도 안 보임)</option>
-                        {partners.map((p) => <option key={p.code} value={p.code}>{p.name} · {p.type}</option>)}
-                      </select>
+                      <PartnerPicker value={u.partner_code || ""} partners={partners} onChange={(code) => setUserPartner(u.id, code)} />
                     ) : <span style={{ fontSize: 12, color: C.hint }}>—</span>}
                   </Td>
                   <Td>
