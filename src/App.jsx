@@ -345,8 +345,11 @@ function Shell({ session }) {
     if (!window.confirm("[테스트 초기화]\n모든 출고·반납·이동 데이터를 삭제합니다.\n거래처·단가·계정은 유지됩니다.\n\n되돌릴 수 없어요. 진행할까요?")) return;
     if (!window.confirm("마지막 확인 — 정말 모두 삭제할까요?")) return;
     try {
-      const a = await supabase.from("movement").delete().not("id", "is", null);
-      if (a.error) throw a.error;
+      // 자식 테이블(shipment 참조)부터 삭제 후 shipment
+      for (const t of ["return_request", "confirmation", "movement"]) {
+        const r = await supabase.from(t).delete().not("id", "is", null);
+        if (r.error && !/does not exist|relation/i.test(r.error.message || "")) throw r.error;
+      }
       const b = await supabase.from("shipment").delete().not("id", "is", null);
       if (b.error) throw b.error;
       await loadAll();
