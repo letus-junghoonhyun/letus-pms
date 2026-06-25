@@ -129,7 +129,10 @@ function Auth() {
   const submit = async () => {
     setBusy(true); setMsg("");
     try {
-      if (mode === "login") {
+      if (mode === "forgot") {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
+        setMsg(error ? error.message : "재설정 메일을 보냈어요. 메일의 링크를 누르면 새 비밀번호를 정할 수 있어요. (실제 이메일 계정만 수신됩니다)");
+      } else if (mode === "login") {
         const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
         if (error) setMsg(error.message);
       } else {
@@ -169,12 +172,18 @@ function Auth() {
           </div>
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="이메일" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
           {mode === "signup" && <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="회사명(거래처명)" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
-          <input value={pw} onChange={(e) => setPw(e.target.value)} type="password" placeholder="비밀번호" onKeyDown={(e) => e.key === "Enter" && submit()} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }} />
+          {mode !== "forgot" && <input value={pw} onChange={(e) => setPw(e.target.value)} type="password" placeholder="비밀번호" onKeyDown={(e) => e.key === "Enter" && submit()} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }} />}
           {mode === "signup" && <div style={{ fontSize: 11, color: C.hint, marginBottom: 12, lineHeight: 1.5 }}>가입 후 관리자가 소속 거래처를 연결하면 본인 거래처 건이 보여요.</div>}
-          {msg && <div style={{ fontSize: 12, color: C.red, background: C.redBg, padding: "8px 10px", borderRadius: 8, marginBottom: 12 }}>{msg}</div>}
-          <button disabled={busy || !email || !pw} onClick={submit} style={{ width: "100%", background: busy ? "#c7cad1" : C.teal, color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 15, cursor: "pointer" }}>
-            {busy ? "처리 중…" : mode === "login" ? "로그인" : "가입하기"}
+          {mode === "forgot" && <div style={{ fontSize: 11, color: C.hint, marginBottom: 12, lineHeight: 1.5 }}>가입한 이메일을 넣으면 비밀번호 재설정 링크를 보내드려요.</div>}
+          {msg && <div style={{ fontSize: 12, color: msg.startsWith("재설정") ? C.green : C.red, background: msg.startsWith("재설정") ? C.greenBg : C.redBg, padding: "8px 10px", borderRadius: 8, marginBottom: 12 }}>{msg}</div>}
+          <button disabled={busy || !email || (mode !== "forgot" && !pw)} onClick={submit} style={{ width: "100%", background: busy ? "#c7cad1" : C.teal, color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 15, cursor: "pointer" }}>
+            {busy ? "처리 중…" : mode === "login" ? "로그인" : mode === "signup" ? "가입하기" : "재설정 메일 보내기"}
           </button>
+          <div style={{ textAlign: "center", marginTop: 12 }}>
+            {mode === "forgot"
+              ? <button onClick={() => { setMode("login"); setMsg(""); }} style={{ background: "none", border: "none", color: C.sub, fontSize: 12, cursor: "pointer" }}>← 로그인으로</button>
+              : <button onClick={() => { setMode("forgot"); setMsg(""); }} style={{ background: "none", border: "none", color: C.sub, fontSize: 12, cursor: "pointer", textDecoration: "underline" }}>비밀번호를 잊으셨나요?</button>}
+          </div>
         </div>
       </div>
     </div>
@@ -185,16 +194,47 @@ function Auth() {
 export default function App() {
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(false);
+  const [recovering, setRecovering] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); setAuthReady(true); });
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      if (event === "PASSWORD_RECOVERY") setRecovering(true); // 재설정 메일 링크로 들어옴
+      setSession(s);
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
   if (!authReady) return <Splash text="불러오는 중…" />;
+  if (recovering) return <ResetPassword onDone={() => setRecovering(false)} />;
   if (!session) return <Auth />;
   return <Shell session={session} />;
+}
+
+// 비밀번호 재설정(메일 링크로 진입했을 때) 새 비밀번호 입력 화면
+function ResetPassword({ onDone }) {
+  const [pw, setPw] = useState(""); const [pw2, setPw2] = useState(""); const [msg, setMsg] = useState(""); const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (pw.length < 6) { setMsg("비밀번호는 6자 이상이어야 해요."); return; }
+    if (pw !== pw2) { setMsg("두 비밀번호가 달라요."); return; }
+    setBusy(true);
+    const { error } = await supabase.auth.updateUser({ password: pw });
+    setBusy(false);
+    if (error) setMsg(error.message);
+    else { alert("비밀번호가 변경됐어요. 다시 로그인해주세요."); await supabase.auth.signOut(); onDone(); }
+  };
+  return (
+    <div style={{ minHeight: "100vh", background: C.page, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "system-ui, sans-serif", padding: 16 }}>
+      <div style={{ width: "100%", maxWidth: 360, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22 }}>
+        <h2 style={{ margin: "0 0 4px", fontSize: 17 }}>새 비밀번호 설정</h2>
+        <p style={{ fontSize: 12, color: C.sub, margin: "0 0 16px" }}>사용할 새 비밀번호를 입력하세요.</p>
+        <input value={pw} onChange={(e) => setPw(e.target.value)} type="password" placeholder="새 비밀번호(6자 이상)" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
+        <input value={pw2} onChange={(e) => setPw2(e.target.value)} type="password" placeholder="새 비밀번호 확인" onKeyDown={(e) => e.key === "Enter" && save()} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }} />
+        {msg && <div style={{ fontSize: 12, color: C.red, background: C.redBg, padding: "8px 10px", borderRadius: 8, marginBottom: 12 }}>{msg}</div>}
+        <button disabled={busy} onClick={save} style={{ width: "100%", background: busy ? "#c7cad1" : C.teal, color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 15, cursor: "pointer" }}>{busy ? "변경 중…" : "비밀번호 변경"}</button>
+      </div>
+    </div>
+  );
 }
 
 const Splash = ({ text }) => (
@@ -282,6 +322,19 @@ function Shell({ session }) {
       if (error) throw error;
       await loadUsers();
     } catch (e) { alert("계정 상태 변경 실패: " + (e.message || e)); }
+  };
+  // 관리자 비밀번호 초기화 (Edge Function 'admin-reset-password' 호출)
+  const adminResetPassword = async (u) => {
+    const temp = "letus" + Math.floor(1000 + Math.random() * 9000);
+    if (!window.confirm(`'${u.company || u.email || u.name}' 계정의 비밀번호를 임시 비밀번호로 초기화할까요?`)) return;
+    try {
+      const { data, error } = await supabase.functions.invoke("admin-reset-password", { body: { userId: u.id, newPassword: temp } });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      window.prompt("임시 비밀번호가 설정됐어요. 사용자에게 전달하세요(복사 후 닫기):", temp);
+    } catch (e) {
+      alert("비밀번호 초기화 실패: " + (e.message || e) + "\n\n(Edge Function 'admin-reset-password'가 배포됐는지 확인하세요)");
+    }
   };
 
   // lines: [{ pallet, qty }] — 여러 파렛트 종류를 한 번에 등록(혼합). 전표번호는 유형마다 고유 발급.
@@ -538,7 +591,7 @@ function Shell({ session }) {
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner }} />}
-            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, setUserRole, setUserPartner, setUserActive, meId: session.user.id }} />}
+            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, setUserRole, setUserPartner, setUserActive, adminResetPassword, meId: session.user.id }} />}
           </>
         )}
       </main>
@@ -1382,7 +1435,7 @@ function PartnerPicker({ value, partners, onChange }) {
     </div>
   );
 }
-function Users({ users, partners, setUserRole, setUserPartner, setUserActive, meId }) {
+function Users({ users, partners, setUserRole, setUserPartner, setUserActive, adminResetPassword, meId }) {
   const [q, setQ] = useState("");
   const isPending = (u) => u.role === "협력업체" && !u.partner_code && u.active;
   const pendingCount = users.filter(isPending).length;
@@ -1424,9 +1477,12 @@ function Users({ users, partners, setUserRole, setUserPartner, setUserActive, me
                   </Td>
                   <Td>
                     {me ? <span style={{ fontSize: 11, color: C.hint }}>—</span> : (
-                      <button onClick={() => setUserActive(u.id, !u.active)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${u.active ? C.border : C.red}`, background: u.active ? "#fff" : C.redBg, color: u.active ? C.sub : C.red }}>
-                        {u.active ? "활성 · 비활성화" : "비활성 · 활성화"}
-                      </button>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button onClick={() => setUserActive(u.id, !u.active)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${u.active ? C.border : C.red}`, background: u.active ? "#fff" : C.redBg, color: u.active ? C.sub : C.red }}>
+                          {u.active ? "활성 · 비활성화" : "비활성 · 활성화"}
+                        </button>
+                        <button onClick={() => adminResetPassword(u)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${C.border}`, background: "#fff", color: C.sub }}>비번 초기화</button>
+                      </div>
                     )}
                   </Td>
                 </tr>
