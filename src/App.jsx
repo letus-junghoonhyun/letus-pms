@@ -261,22 +261,27 @@ function Shell({ session }) {
   const [users, setUsers] = useState([]);
   const [blocked, setBlocked] = useState(false);
   const [ajReqs, setAjReqs] = useState([]);
+  const [centers, setCenters] = useState([]);        // 활성 센터 이름 목록
+  const [myCenterCodes, setMyCenterCodes] = useState(null); // 내 담당 센터(없으면 전체)
 
   const loadAll = useCallback(async () => {
     setErr("");
     try {
-      const [pt, up, pa, pp, sh, ur, me, aj] = await Promise.all([
+      const [pt, up, pa, pp, sh, ur, me, aj, ct] = await Promise.all([
         supabase.from("pallet_type").select("*").order("code"),
         supabase.from("unit_price").select("*"),
         supabase.from("partner").select("*").eq("active", true).order("name"),
         supabase.from("partner_pallet").select("*"),
         supabase.from("shipment").select("*").order("depart_at", { ascending: false }),
         supabase.from("user_roles").select("role").eq("user_id", session.user.id).maybeSingle(),
-        supabase.from("profiles").select("active").eq("id", session.user.id).maybeSingle(),
+        supabase.from("profiles").select("active, center_codes").eq("id", session.user.id).maybeSingle(),
         supabase.from("aj_request").select("*").order("requested_at", { ascending: false }),
+        supabase.from("app_center").select("name, active").eq("active", true).order("name"),
       ]);
       // 비활성 계정이면 차단 (active 컬럼 없으면 undefined → 통과)
       if (me?.data && me.data.active === false) { setBlocked(true); setLoading(false); return; }
+      setCenters((ct.data || []).map((c) => c.name));
+      setMyCenterCodes(me?.data?.center_codes || null);
       // 단가·AJ는 협력업체에게 RLS로 막혀 빈 값이 올 수 있어요 — 에러 아니므로 제외하고 검사
       const firstErr = [pt, pa, pp, sh].find((r) => r.error);
       if (firstErr) throw firstErr.error;
@@ -300,7 +305,7 @@ function Shell({ session }) {
   // 사용자 관리(관리자 전용): 가입자 목록 + 역할/소속거래처/계정상태
   const loadUsers = useCallback(async () => {
     const [pf, ur] = await Promise.all([
-      supabase.from("profiles").select("id, name, email, company, partner_code, active"),
+      supabase.from("profiles").select("id, name, email, company, partner_code, active, center_codes"),
       supabase.from("user_roles").select("user_id, role"),
     ]);
     const rm = {}; (ur.data || []).forEach((r) => { rm[r.user_id] = r.role; });
@@ -529,6 +534,20 @@ function Shell({ session }) {
     } catch (e) { alert("거래처 등록 실패: " + (e.message || e)); }
   };
 
+  // 센터 마스터 관리
+  const addCenter = async (name) => {
+    try { const { error } = await supabase.from("app_center").insert({ name }); if (error) throw error; await loadAll(); }
+    catch (e) { alert("센터 추가 실패: " + (e.message || e)); }
+  };
+  const toggleCenter = async (name, active) => {
+    try { const { error } = await supabase.from("app_center").update({ active }).eq("name", name); if (error) throw error; await loadAll(); }
+    catch (e) { alert("센터 상태 변경 실패: " + (e.message || e)); }
+  };
+  const setUserCenters = async (userId, names) => {
+    try { const { error } = await supabase.from("profiles").update({ center_codes: names }).eq("id", userId); if (error) throw error; await loadUsers(); }
+    catch (e) { alert("담당 센터 변경 실패: " + (e.message || e)); }
+  };
+
   // 거래처 삭제(소프트) — 재고 보유/진행중이면 차단, 이력은 보존
   const deletePartner = async (p) => {
     if (!window.confirm(`'${p.name}' 거래처를 삭제할까요?\n(과거 출고 이력은 보존되고 목록에서만 사라져요)`)) return;
@@ -568,6 +587,9 @@ function Shell({ session }) {
   const allowed = NAV_BY_ROLE[role] || ["현황"];
   const items = ALL_ITEMS.filter((it) => allowed.includes(it.key));
   const caps = capsOf(role);
+  // 센터 목록(없으면 기본 3개) / 내가 출고·이동 가능한 센터(관리자=전체, 미배정=전체)
+  const centerList = centers.length ? centers : CENTERS;
+  const myCenters = role === "관리자" ? centerList : (myCenterCodes && myCenterCodes.length ? centerList.filter((c) => myCenterCodes.includes(c)) : centerList);
 
   // 현재 메뉴가 권한 밖이면 첫 허용 메뉴로 되돌림
   useEffect(() => {
@@ -618,15 +640,15 @@ function Shell({ session }) {
         ) : (
           <>
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
-            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} onTransfer={transferCenters} />}
-            {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} onAjReturn={createAjRequest} />}
+            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} />}
+            {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
-            {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, recoverToCenter, recoverToAj }} />}
-            {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes }} />}
-            {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps }} />}
+            {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
+            {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
+            {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps, centers: centerList }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
-            {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner }} />}
-            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, setUserRole, setUserPartner, setUserActive, adminResetPassword, meId: session.user.id }} />}
+            {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner, centers, addCenter, toggleCenter }} />}
+            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId: session.user.id }} />}
             {nav === "설정" && <Settings session={session} role={role} partners={partnersFull} />}
           </>
         )}
@@ -844,13 +866,13 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
 const qtysToLines = (qtys) => Object.entries(qtys).map(([pallet, qty]) => ({ pallet, qty: qty || 0 })).filter((l) => l.qty > 0);
 const qtysTotal = (qtys) => Object.values(qtys).reduce((a, n) => a + (n || 0), 0);
 
-function Outbound({ partners, palletTypes, ships = [], ajReqs = [], onRegister, onTransfer }) {
+function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CENTERS, myCenters = CENTERS, onRegister, onTransfer }) {
   const today = new Date().toISOString().slice(0, 10);
   const [dir, setDir] = useState("출고");
   const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
   const [qtys, setQtys] = useState({});
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
-  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(CENTERS[0]); const [toCenter, setToCenter] = useState(CENTERS[1]);
+  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(myCenters[0] || centers[0]); const [toCenter, setToCenter] = useState(centers.find((c) => c !== (myCenters[0] || centers[0])) || centers[0]);
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
   const isRet = dir === "반납"; const isMv = dir === "이동";
@@ -884,12 +906,12 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], onRegister, 
           <div style={{ display: "flex", gap: 10, marginBottom: 18, alignItems: "flex-end" }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출발 센터</div>
-              <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }}>{CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+              <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }}>{myCenters.map((c) => <option key={c} value={c}>{c}</option>)}</select>
             </div>
             <div style={{ paddingBottom: 10, color: C.hint }}>→</div>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>도착 센터</div>
-              <select value={toCenter} onChange={(e) => setToCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${center === toCenter ? C.red : C.border}`, borderRadius: 8 }}>{CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+              <select value={toCenter} onChange={(e) => setToCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${center === toCenter ? C.red : C.border}`, borderRadius: 8 }}>{centers.map((c) => <option key={c} value={c}>{c}</option>)}</select>
             </div>
           </div>
         ) : (
@@ -919,7 +941,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], onRegister, 
 
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납 받는 센터" : "출고하는 센터"}</div>
             <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
-              {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
+              {myCenters.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </>
         )}
@@ -952,11 +974,11 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], onRegister, 
 }
 
 // 협력업체용 반납 등록 — 본인 보유 수량 한도 내에서, 여러 유형 한 번에, 받는 센터 지정
-function ReturnRegister({ partners, palletTypes, ships, ajReqs = [], onRegister, onAjReturn }) {
+function ReturnRegister({ partners, palletTypes, ships, ajReqs = [], centers = CENTERS, onRegister, onAjReturn }) {
   const today = new Date().toISOString().slice(0, 10);
   const me = partners[0]; // 협력업체는 RLS로 본인 거래처만 보임
   const [qtys, setQtys] = useState({});
-  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(CENTERS[0]); const [busy, setBusy] = useState(false);
+  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(centers[0]); const [busy, setBusy] = useState(false);
   const [dest, setDest] = useState("센터"); // 센터 / AJ
   const isAj = dest === "AJ";
   const heldOf = (code) => (me ? availableToRecover(ships, ajReqs, me.code, code) : 0);
@@ -994,7 +1016,7 @@ function ReturnRegister({ partners, palletTypes, ships, ajReqs = [], onRegister,
               <>
                 <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>받는 센터</div>
                 <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
-                  {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
+                  {centers.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               </>
             )}
@@ -1047,7 +1069,7 @@ function Confirm({ ships, setStatus, caps = {} }) {
   );
 }
 
-function Recovery({ ships, ajReqs, partners, palletTypes, recoverToCenter, recoverToAj }) {
+function Recovery({ ships, ajReqs, partners, palletTypes, centers = CENTERS, recoverToCenter, recoverToAj }) {
   const [act, setAct] = useState(null); // { partner, pallet, max }
   // 보유 중인 거래처 × 유형 목록 (회수/반납 대상)
   const rows = [];
@@ -1097,14 +1119,14 @@ function Recovery({ ships, ajReqs, partners, palletTypes, recoverToCenter, recov
         </div>
       )}
       <Note>보유분을 <b>센터 반납</b>(우리 센터 재고로 +) 또는 <b>AJ 회수</b>(AJ로 보냄)로 처리해요. 시공팀처럼 경로가 갈리는 경우 건별로 선택하면 됩니다. AJ 회수는 AJ 연동 메뉴에서 완료 처리하면 재고에 반영돼요.</Note>
-      {act && <RecoverModal act={act} onClose={() => setAct(null)} recoverToCenter={recoverToCenter} recoverToAj={recoverToAj} />}
+      {act && <RecoverModal act={act} centers={centers} onClose={() => setAct(null)} recoverToCenter={recoverToCenter} recoverToAj={recoverToAj} />}
     </>
   );
 }
 
-function RecoverModal({ act, onClose, recoverToCenter, recoverToAj }) {
+function RecoverModal({ act, centers = CENTERS, onClose, recoverToCenter, recoverToAj }) {
   const [qty, setQty] = useState(act.avail);
-  const [center, setCenter] = useState(CENTERS[0]);
+  const [center, setCenter] = useState(centers[0]);
   const [busy, setBusy] = useState(false);
   const isCenter = act.mode === "센터";
   const go = async () => {
@@ -1122,7 +1144,7 @@ function RecoverModal({ act, onClose, recoverToCenter, recoverToAj }) {
         {isCenter && (
           <>
             <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>받는 센터</div>
-            <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 14 }}>{CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+            <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 14 }}>{centers.map((c) => <option key={c} value={c}>{c}</option>)}</select>
           </>
         )}
         <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>수량</div>
@@ -1137,8 +1159,8 @@ function RecoverModal({ act, onClose, recoverToCenter, recoverToAj }) {
 }
 
 // 재고 현황 — 장부 재고(센터별) + 분포(거래처 보유) + AJ 미처리
-function Inventory({ ships, ajReqs, partners, palletTypes }) {
-  const centerTotal = (type) => CENTERS.reduce((a, c) => a + centerStock(ships, ajReqs, c, type), 0);
+function Inventory({ ships, ajReqs, partners, palletTypes, centers = CENTERS }) {
+  const centerTotal = (type) => centers.reduce((a, c) => a + centerStock(ships, ajReqs, c, type), 0);
   const partnerTotal = (type) => partners.reduce((a, p) => a + heldQty(ships, ajReqs, p.code, type), 0);
   const inTransit = (type) => sum(ships.filter((s) => !isReturn(s) && s.pallet_code === type && !s.canceled && s.status === "출고완료")); // 출고했으나 미확인
   const ajPending = (type) => sum(ajReqs.filter((r) => r.pallet_code === type && r.status === "요청"));
@@ -1154,7 +1176,7 @@ function Inventory({ ships, ajReqs, partners, palletTypes }) {
         <table style={tbl}>
           <thead><tr><Th>센터</Th>{palletTypes.map((t) => <Th key={t.code} r>{t.code}</Th>)}<Th r>합계</Th></tr></thead>
           <tbody>
-            {CENTERS.map((c) => { const tot = palletTypes.reduce((a, t) => a + centerStock(ships, ajReqs, c, t.code), 0); return (
+            {centers.map((c) => { const tot = palletTypes.reduce((a, t) => a + centerStock(ships, ajReqs, c, t.code), 0); return (
               <tr key={c} style={{ borderTop: `1px solid ${C.border}` }}>
                 <Td b>{c}</Td>
                 {palletTypes.map((t) => { const q = centerStock(ships, ajReqs, c, t.code); return <Td key={t.code} r c={q < 0 ? C.red : C.text}>{q.toLocaleString()}</Td>; })}
@@ -1213,11 +1235,11 @@ function Inventory({ ships, ajReqs, partners, palletTypes }) {
 }
 
 // AJ 연동 — 공급/회수 요청 등록·완료 처리 (가설정: 수동 2단계)
-function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps = {} }) {
+function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps = {}, centers = CENTERS }) {
   const canCreate = !!caps.aj; // 내부만 요청 생성, AJ직원은 완료만
   const [type, setType] = useState("공급");
   const [qtys, setQtys] = useState({});
-  const [center, setCenter] = useState(CENTERS[0]);
+  const [center, setCenter] = useState(centers[0]);
   const [note, setNote] = useState(""); const [busy, setBusy] = useState(false);
   const total = qtysTotal(qtys);
   const pending = ajReqs.filter((r) => r.status === "요청");
@@ -1243,7 +1265,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cance
             ))}
           </div>
           <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isSupply ? "공급 받는 센터" : "회수 보내는 센터"}</div>
-          <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 16 }}>{CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+          <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 16 }}>{centers.map((c) => <option key={c} value={c}>{c}</option>)}</select>
           <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량</div>
           <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isSupply ? C.teal : C.amber} bg={isSupply ? C.tealBg : C.amberBg} />
           {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 12, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
@@ -1387,7 +1409,8 @@ function PriceRow({ p, price, editable, onSave }) {
   );
 }
 
-function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, caps = {}, setPrice, ships = [], ajReqs = [], deletePartner }) {
+function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, caps = {}, setPrice, ships = [], ajReqs = [], deletePartner, centers = [], addCenter, toggleCenter }) {
+  const [cname, setCname] = useState("");
   const [name, setName] = useState(""); const [type, setType] = useState("업체");
   const [pq, setPq] = useState(""); const [pf, setPf] = useState("전체");
   const [preview, setPreview] = useState([]); const [busy, setBusy] = useState(false); const [msg, setMsg] = useState("");
@@ -1484,8 +1507,31 @@ function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, ca
             <div style={{ fontSize: 11, color: C.hint, marginTop: 8, lineHeight: 1.6 }}>양식: 첫 행에 <b>거래처명</b>, <b>구분</b>(업체/시공팀/센터) 열. 구분이 없으면 업체로 처리돼요. 이미 있는 이름은 자동 건너뜀.</div>
           </div>}
         </div>
+
+        {/* 센터 관리 (우리 보유 거점) */}
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px" }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 600 }}>센터 관리 <span style={{ color: C.hint, fontWeight: 400, fontSize: 11 }}>· 우리 보유 거점</span></h3>
+          <p style={{ fontSize: 11, color: C.hint, margin: "0 0 10px", lineHeight: 1.6 }}>센터는 우리 재고를 두는 곳이라 거래처와 분리해서 관리해요. 거래처로 만들면 재고가 안 맞아요.</p>
+          <div style={{ maxHeight: 220, overflow: "auto", marginBottom: 12 }}>
+            <table style={tbl}><tbody>
+              {centers.map((c) => (
+                <tr key={c} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <Td>{c}</Td>
+                  {caps.master && <td style={{ padding: "8px 6px", textAlign: "right" }}>
+                    <button onClick={() => toggleCenter(c, false)} style={{ fontSize: 11, color: C.red, background: "none", border: "none", cursor: "pointer" }} title="비활성화">숨김</button>
+                  </td>}
+                </tr>
+              ))}
+              {centers.length === 0 && <tr><td style={{ padding: "16px 6px", fontSize: 12, color: C.hint, textAlign: "center" }}>등록된 센터가 없어요. (letus_centers.sql 실행 필요)</td></tr>}
+            </tbody></table>
+          </div>
+          {caps.master && <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12, display: "flex", gap: 6 }}>
+            <input value={cname} onChange={(e) => setCname(e.target.value)} placeholder="새 센터명" style={{ flex: 1, minWidth: 0, fontSize: 13, padding: "7px 9px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
+            <button onClick={async () => { if (cname.trim()) { await addCenter(cname.trim()); setCname(""); } }} disabled={!cname.trim()} style={{ fontSize: 13, padding: "7px 14px", borderRadius: 8, border: "none", cursor: "pointer", background: !cname.trim() ? "#c7cad1" : C.teal, color: "#fff" }}>추가</button>
+          </div>}
+        </div>
       </div>
-      <Note>거래처가 많아져도 검색·구분 필터로 빠르게 찾을 수 있어요. 나중에 엑셀 일괄 등록도 붙일 수 있어요.</Note>
+      <Note>거래처가 많아져도 검색·구분 필터로 빠르게 찾을 수 있어요. 센터는 별도 '센터 관리'에서 추가/숨김 하세요.</Note>
     </>
   );
 }
@@ -1606,7 +1652,7 @@ function PartnerPicker({ value, partners, onChange }) {
     </div>
   );
 }
-function Users({ users, partners, setUserRole, setUserPartner, setUserActive, adminResetPassword, meId }) {
+function Users({ users, partners, centers = [], setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId }) {
   const [q, setQ] = useState("");
   const isPending = (u) => u.role === "협력업체" && !u.partner_code && u.active;
   const pendingCount = users.filter(isPending).length;
@@ -1624,7 +1670,7 @@ function Users({ users, partners, setUserRole, setUserPartner, setUserActive, ad
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="이름·이메일·회사·역할로 검색…" style={{ width: "100%", maxWidth: 340, boxSizing: "border-box", fontSize: 13, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 14 }} />
       <div style={{ overflowX: "auto" }}>
         <table style={tbl}>
-          <thead><tr><Th>사용자</Th><Th>역할</Th><Th>소속 거래처 (협력업체)</Th><Th>계정</Th></tr></thead>
+          <thead><tr><Th>사용자</Th><Th>역할</Th><Th>담당 센터 / 소속 거래처</Th><Th>계정</Th></tr></thead>
           <tbody>
             {sorted.map((u) => {
               const me = u.id === meId; const rb = ROLE_BADGE[u.role] || ROLE_BADGE.협력업체; const pending = isPending(u);
@@ -1644,6 +1690,15 @@ function Users({ users, partners, setUserRole, setUserPartner, setUserActive, ad
                   <Td>
                     {u.role === "협력업체" ? (
                       <PartnerPicker value={u.partner_code || ""} partners={partners} onChange={(code) => setUserPartner(u.id, code)} />
+                    ) : u.role === "관리자" ? (
+                      <span style={{ fontSize: 12, color: C.hint }}>전체 센터</span>
+                    ) : u.role === "운송팀" ? (
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", maxWidth: 260 }}>
+                        {centers.map((c) => { const on = (u.center_codes || []).includes(c); return (
+                          <button key={c} onClick={() => setUserCenters(u.id, on ? (u.center_codes || []).filter((x) => x !== c) : [...(u.center_codes || []), c])} style={{ fontSize: 11, padding: "3px 9px", borderRadius: 14, cursor: "pointer", border: on ? "none" : `1px solid ${C.border}`, background: on ? C.teal : "#fff", color: on ? "#fff" : C.sub }}>{c}</button>
+                        ); })}
+                        {(!u.center_codes || u.center_codes.length === 0) && <span style={{ fontSize: 10, color: C.hint, alignSelf: "center" }}>미배정=전체</span>}
+                      </div>
                     ) : <span style={{ fontSize: 12, color: C.hint }}>—</span>}
                   </Td>
                   <Td>
