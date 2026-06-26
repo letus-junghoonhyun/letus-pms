@@ -399,12 +399,24 @@ function Shell({ session }) {
       await loadAll(); return true;
     } catch (e) { alert("AJ 요청 실패: " + (e.message || e)); return false; }
   };
+  // AJ 직원 처리: 공급은 '발송'(우리 입고확인 대기), 회수는 '완료'(AJ가 가져감)
   const completeAjRequest = async (r) => {
+    try {
+      const patch = r.type === "공급"
+        ? { status: "발송", sent_at: new Date().toISOString() }
+        : { status: "완료", completed_at: new Date().toISOString() };
+      const { error } = await supabase.from("aj_request").update(patch).eq("id", r.id);
+      if (error) throw error;
+      await loadAll();
+    } catch (e) { alert("처리 실패: " + (e.message || e)); }
+  };
+  // 우리 센터 입고확인: 공급 '발송' → '완료' (이때 센터 재고 +)
+  const confirmAjSupply = async (r) => {
     try {
       const { error } = await supabase.from("aj_request").update({ status: "완료", completed_at: new Date().toISOString() }).eq("id", r.id);
       if (error) throw error;
       await loadAll();
-    } catch (e) { alert("완료 처리 실패: " + (e.message || e)); }
+    } catch (e) { alert("입고확인 실패: " + (e.message || e)); }
   };
   const cancelAjRequest = async (r) => {
     if (!window.confirm("이 요청을 삭제할까요?")) return;
@@ -645,7 +657,7 @@ function Shell({ session }) {
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
             {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
-            {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps, centers: centerList }} />}
+            {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, ships, caps, centers: centerList }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner, centers, addCenter, toggleCenter }} />}
             {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId: session.user.id }} />}
@@ -736,17 +748,21 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
           <tbody>
             {filtered.map((s) => {
               if (s._aj) {
-                const isRec = s.ajType === "회수"; const dn = s.status === "완료";
+                const isRec = s.ajType === "회수";
+                const st = s.status; // 요청 / 발송 / 완료
+                const label = st === "완료" ? "AJ완료" : st === "발송" ? "발송됨" : "AJ요청";
+                const sty = st === "완료" ? { bg: C.greenBg, fg: C.green } : st === "발송" ? { bg: C.blueBg, fg: C.blue } : { bg: C.amberBg, fg: C.amber };
+                const act = st === "완료" ? "✓" : st === "발송" ? "센터 입고대기" : "AJ 처리 대기";
                 return (
                   <tr key={s.id} style={{ borderTop: `1px solid ${C.border}`, background: "#faf7ff" }}>
                     <Td><span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "1px 6px", borderRadius: 10 }}>{isRec ? "AJ회수" : "AJ공급"}</span></Td>
-                    <Td><span style={{ fontSize: 11, padding: "2px 9px", borderRadius: 20, background: dn ? C.greenBg : C.amberBg, color: dn ? C.green : C.amber }}>{dn ? "AJ완료" : "AJ요청"}</span></Td>
+                    <Td><span style={{ fontSize: 11, padding: "2px 9px", borderRadius: 20, background: sty.bg, color: sty.fg }}>{label}</span></Td>
                     <Td c={C.hint}>AJ</Td><Td>{s.pallet_code}</Td><Td r>{s.qty}</Td>
                     <Td>{s.from}</Td><Td>{s.to}</Td>
                     <Td c={C.sub}>{fmtDT(s.depart_at)}</Td>
                     <Td c={s.confirmed_at ? C.text : C.hint}>{fmtDT(s.confirmed_at)}</Td>
                     <Td c={C.hint}>—</Td>
-                    <Td><span style={{ color: C.hint, fontSize: 11 }}>{dn ? "✓" : "AJ 처리 대기"}</span></Td>
+                    <Td><span style={{ color: C.hint, fontSize: 11 }}>{act}</span></Td>
                   </tr>
                 );
               }
@@ -1235,14 +1251,15 @@ function Inventory({ ships, ajReqs, partners, palletTypes, centers = CENTERS }) 
 }
 
 // AJ 연동 — 공급/회수 요청 등록·완료 처리 (가설정: 수동 2단계)
-function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cancelAjRequest, ships, caps = {}, centers = CENTERS }) {
-  const canCreate = !!caps.aj; // 내부만 요청 생성, AJ직원은 완료만
+function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, ships, caps = {}, centers = CENTERS }) {
+  const canCreate = !!caps.aj; // 내부만 요청 생성, AJ직원은 처리만
   const [type, setType] = useState("공급");
   const [qtys, setQtys] = useState({});
   const [center, setCenter] = useState(centers[0]);
   const [note, setNote] = useState(""); const [busy, setBusy] = useState(false);
   const total = qtysTotal(qtys);
-  const pending = ajReqs.filter((r) => r.status === "요청");
+  const pending = ajReqs.filter((r) => r.status === "요청");          // AJ직원 처리 대기
+  const inbound = ajReqs.filter((r) => r.type === "공급" && r.status === "발송"); // 우리 센터 입고 대기
   const done = ajReqs.filter((r) => r.status === "완료").slice(0, 30);
   const isSupply = type === "공급";
 
@@ -1273,9 +1290,9 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cance
           <button disabled={total === 0 || busy} onClick={submit} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : (isSupply ? C.teal : C.amber), color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 15, cursor: "pointer" }}>{busy ? "접수 중…" : `${type}요청 접수`}</button>
         </div>}
 
-        {/* 진행중 요청 */}
+        {/* AJ 처리 대기 (요청) */}
         <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
-          <h3 style={{ margin: "0 0 10px", fontSize: 14, fontWeight: 600 }}>진행중 (AJ 처리 대기) <span style={{ color: C.hint, fontWeight: 400 }}>{pending.length}</span></h3>
+          <h3 style={{ margin: "0 0 10px", fontSize: 14, fontWeight: 600 }}>AJ 처리 대기 <span style={{ color: C.hint, fontWeight: 400 }}>{pending.length}</span></h3>
           {pending.length === 0 ? <div style={{ fontSize: 13, color: C.hint, padding: "12px 0" }}>대기 중인 요청이 없어요.</div> : (
             <div style={{ display: "grid", gap: 8 }}>
               {pending.map((r) => (
@@ -1287,13 +1304,33 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, cance
                       <div style={{ fontSize: 11, color: C.hint, marginTop: 2 }}>{r.partner_name || r.center} · {fmtDT(r.requested_at)}</div>
                     </div>
                     <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                      <button onClick={() => completeAjRequest(r)} style={btnTealSm}>완료</button>
+                      <button onClick={() => completeAjRequest(r)} style={btnTealSm}>{r.type === "공급" ? "발송" : "회수완료"}</button>
                       {canCreate && <button onClick={() => cancelAjRequest(r)} style={{ ...btnGhost, padding: "5px 8px" }}>✕</button>}
                     </div>
                   </div>
                 </div>
               ))}
             </div>
+          )}
+          {/* 우리 센터 입고 대기 (공급 발송분) */}
+          {inbound.length > 0 && (
+            <>
+              <h3 style={{ margin: "16px 0 10px", fontSize: 14, fontWeight: 600 }}>우리 센터 입고 대기 <span style={{ color: C.hint, fontWeight: 400 }}>{inbound.length}</span></h3>
+              <div style={{ display: "grid", gap: 8 }}>
+                {inbound.map((r) => (
+                  <div key={r.id} style={{ border: `1px solid ${C.teal}`, background: C.tealBg, borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <span style={{ fontSize: 11, color: "#fff", background: C.teal, padding: "1px 7px", borderRadius: 10 }}>공급·발송됨</span>
+                        <span style={{ fontSize: 13, marginLeft: 6 }}>{r.pallet_code} · {r.qty}장</span>
+                        <div style={{ fontSize: 11, color: C.hint, marginTop: 2 }}>{r.center} · 발송 {fmtDT(r.sent_at)}</div>
+                      </div>
+                      {canCreate && <button onClick={() => confirmAjSupply(r)} style={btnTeal}>✓ 센터 입고확인</button>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
       </div>
