@@ -341,6 +341,11 @@ function Shell({ session }) {
   const register = async (partner, lines, departDate, note, direction = "출고", center = null) => {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
+    // 정방향 출고는 센터 재고 한도 초과 불가
+    if (direction === "출고") {
+      const over = valid.find((l) => l.qty > centerStock(ships, ajReqs, center, l.pallet));
+      if (over) { alert(`${center} 재고 부족: ${over.pallet} 재고 ${centerStock(ships, ajReqs, center, over.pallet)}장, 요청 ${over.qty}장`); return; }
+    }
     try {
       // 선택한 날짜 + 실제 처리 시각(시:분:초)을 반영
       const nowD = new Date();
@@ -585,7 +590,7 @@ function Shell({ session }) {
         ) : (
           <>
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
-            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} onRegister={register} />}
+            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, recoverToCenter, recoverToAj }} />}
@@ -783,7 +788,7 @@ function EditShipmentModal({ s, palletTypes, onClose, onSave, onCancel }) {
 }
 
 // 여러 파렛트 유형 + 수량을 한 번에 입력 (혼합). maxOf 주면 그 한도까지만(보유수량 제한).
-function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf }) {
+function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf, maxLabel = "보유" }) {
   const set = (code, v) => setQtys((q) => ({ ...q, [code]: v }));
   return (
     <div style={{ display: "grid", gap: 8, marginBottom: 18 }}>
@@ -795,7 +800,7 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
           <div key={p.code} style={{ display: "flex", alignItems: "center", gap: 10, opacity: disabled ? 0.4 : 1 }}>
             <div style={{ width: 104, flexShrink: 0 }}>
               <span style={{ fontSize: 14, fontWeight: 600 }}>{p.code}</span>
-              {maxOf && <span style={{ fontSize: 11, color: C.hint }}> · 보유 {max}</span>}
+              {maxOf && <span style={{ fontSize: 11, color: max <= 0 ? C.red : C.hint }}> · {maxLabel} {max}</span>}
             </div>
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", border: `1px solid ${v > 0 ? color : C.border}`, borderRadius: 8, padding: "4px 12px", background: v > 0 ? bg : "#fff" }}>
               <button disabled={disabled} onClick={() => set(p.code, Math.max(0, v - 1))} style={{ background: "none", border: "none", fontSize: 20, color: C.sub, cursor: "pointer" }}>−</button>
@@ -811,7 +816,7 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
 const qtysToLines = (qtys) => Object.entries(qtys).map(([pallet, qty]) => ({ pallet, qty: qty || 0 })).filter((l) => l.qty > 0);
 const qtysTotal = (qtys) => Object.values(qtys).reduce((a, n) => a + (n || 0), 0);
 
-function Outbound({ partners, palletTypes, onRegister }) {
+function Outbound({ partners, palletTypes, ships = [], ajReqs = [], onRegister }) {
   const today = new Date().toISOString().slice(0, 10);
   const [dir, setDir] = useState("출고");
   const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
@@ -823,6 +828,10 @@ function Outbound({ partners, palletTypes, onRegister }) {
   const isRet = dir === "반납";
   const total = qtysTotal(qtys);
   const reset = () => { setQtys({}); setNote(""); setDate(today); };
+  // 출고(정방향)는 선택 센터의 재고 한도 내에서만. 반납(거래처→센터)은 한도 없음.
+  const stockOf = (code) => centerStock(ships, ajReqs, center, code);
+  // 센터·방향 바뀌면 수량 초기화(이전 입력이 새 한도를 넘지 않도록)
+  useEffect(() => { setQtys({}); }, [center, dir]);
 
   return (
     <>
@@ -862,8 +871,8 @@ function Outbound({ partners, palletTypes, onRegister }) {
           {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· 여러 종류 한 번에</span></div>
-        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isRet ? C.amber : C.teal} bg={isRet ? C.amberBg : C.tealBg} />
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : "센터 재고 한도 내"}</span></div>
+        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isRet ? C.amber : C.teal} bg={isRet ? C.amberBg : C.tealBg} maxOf={isRet ? undefined : stockOf} maxLabel="재고" />
         {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
 
         <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
