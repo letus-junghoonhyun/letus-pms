@@ -17,7 +17,7 @@ const DELIVERED = ["입고확인", "회수요청", "회수완료"];
 const daysSince = (d) => Math.max(0, Math.round((Date.now() - new Date(d)) / 86400000));
 const isReturn = (s) => s.direction === "반납";
 // 미회수: 우리가 거래처로 보낸(정방향) 것 중 아직 안 돌아온 것만. 반납은 제외.
-const isUnrecovered = (s) => !isReturn(s) && (s.status === "출고완료" || s.status === "입고확인") && daysSince(s.depart_at) >= 7;
+const isUnrecovered = (s) => !isReturn(s) && s.direction !== "이동" && (s.status === "출고완료" || s.status === "입고확인") && daysSince(s.depart_at) >= 7;
 const DirBadge = ({ s }) => isMove(s)
   ? <span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "1px 6px", borderRadius: 10 }}>센터이동</span>
   : isReturn(s)
@@ -85,9 +85,9 @@ const centerStock = (ships, ajReqs, center, palletCode) => {
   let q = center === OPENING_CENTER ? OPENING_QTY : 0;
   q -= sum(ships.filter((s) => !isReturn(s) && !isMove(s) && s.center === center && s.pallet_code === palletCode && !s.canceled && ["출고완료", "입고확인"].includes(s.status)));
   q += sum(ships.filter((s) => isReturn(s) && s.center === center && s.pallet_code === palletCode && s.status === "입고확인"));
-  // 센터 이동: 출발센터 −, 도착센터 +
-  q -= sum(ships.filter((s) => isMove(s) && s.center === center && s.pallet_code === palletCode && !s.canceled));
-  q += sum(ships.filter((s) => isMove(s) && s.to_center === center && s.pallet_code === palletCode && !s.canceled));
+  // 센터 이동: 출발센터는 출고완료 시점에 −, 도착센터는 입고확인 시점에 +
+  q -= sum(ships.filter((s) => isMove(s) && s.center === center && s.pallet_code === palletCode && !s.canceled && ["출고완료", "입고확인"].includes(s.status)));
+  q += sum(ships.filter((s) => isMove(s) && s.to_center === center && s.pallet_code === palletCode && s.status === "입고확인"));
   q += sum(ajReqs.filter((r) => r.type === "공급" && r.center === center && r.pallet_code === palletCode && r.status === "완료"));
   q -= sum(ajReqs.filter((r) => r.type === "회수" && r.center === center && !r.partner_code && r.pallet_code === palletCode && r.status === "완료"));
   return q;
@@ -445,7 +445,7 @@ function Shell({ session }) {
       for (const l of valid) {
         const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
         if (e1) throw e1;
-        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "입고확인", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, confirmed_at: nowISO, created_by: session.user.id });
+        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, created_by: session.user.id });
       }
       const { error: e2 } = await supabase.from("shipment").insert(rows);
       if (e2) throw e2;
@@ -1056,8 +1056,8 @@ function Confirm({ ships, setStatus, caps = {} }) {
           {pending.map((s) => (
             <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, display: "flex", alignItems: "center", gap: 14 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{s.to_partner_name}</div>
-                <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.center ? ` · ${s.center}` : ""}{s.note ? ` · ${s.note}` : ""}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{fromOf(s)} → {toOf(s)}</div>
+                <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.note ? ` · ${s.note}` : ""}</div>
               </div>
               <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnTeal}>✓ 입고확인</button>
             </div>
