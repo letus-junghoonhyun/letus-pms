@@ -654,7 +654,7 @@ function Shell({ session }) {
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
-            {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
+            {nav === "확인" && <Confirm {...{ ships, setStatus, caps, ajReqs, confirmAjSupply }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
             {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, ships, caps, centers: centerList }} />}
@@ -1060,15 +1060,26 @@ function ReturnRegister({ partners, palletTypes, ships, ajReqs = [], centers = C
   );
 }
 
-function Confirm({ ships, setStatus, caps = {} }) {
-  // 협력업체: 우리가 보낸(정방향 출고)을 받았다고 확인 / 내부: 거래처가 보낸(반납)을 우리가 받았다고 확인
+function Confirm({ ships, setStatus, caps = {}, ajReqs = [], confirmAjSupply }) {
+  // 협력업체: 우리가 보낸(정방향 출고)을 받았다고 확인 / 내부: 거래처가 보낸(반납)·센터이동·AJ공급을 입고확인
   const pending = ships.filter((s) => s.status === "출고완료" && (caps.confirmOwn ? !isReturn(s) : true));
-  const sub = caps.confirmOwn ? "우리쪽에서 보낸 파렛트를 받으셨으면 확인하세요" : "거래처가 반납한 파렛트 등 입고를 확인하세요";
+  const ajInbound = !caps.confirmOwn ? ajReqs.filter((r) => r.type === "공급" && r.status === "발송") : [];
+  const sub = caps.confirmOwn ? "우리쪽에서 보낸 파렛트를 받으셨으면 확인하세요" : "거래처 반납·센터이동·AJ공급 등 들어오는 입고를 확인하세요";
+  const nothing = pending.length === 0 && ajInbound.length === 0;
   return (
     <>
       <Head title="입고확인" sub={sub} />
-      {pending.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: C.hint, fontSize: 13 }}>확인 대기 중인 건이 없어요.</div> : (
+      {nothing ? <div style={{ padding: 40, textAlign: "center", color: C.hint, fontSize: 13 }}>확인 대기 중인 건이 없어요.</div> : (
         <div style={{ display: "grid", gap: 12, maxWidth: 560 }}>
+          {ajInbound.map((r) => (
+            <div key={r.id} style={{ background: C.card, border: `1px solid ${C.teal}`, borderRadius: 12, padding: 16, display: "flex", alignItems: "center", gap: 14 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "1px 6px", borderRadius: 10 }}>AJ공급</span>AJ네트웍스 → {r.center}</div>
+                <div style={{ fontSize: 12, color: C.sub }}>{r.pallet_code} · {r.qty}장 · 발송 {fmtDT(r.sent_at)}</div>
+              </div>
+              <button onClick={() => confirmAjSupply(r)} style={btnTeal}>✓ 입고확인</button>
+            </div>
+          ))}
           {pending.map((s) => (
             <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, display: "flex", alignItems: "center", gap: 14 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -1080,7 +1091,7 @@ function Confirm({ ships, setStatus, caps = {} }) {
           ))}
         </div>
       )}
-      <Note>{caps.confirmOwn ? "확인하면 우리 장부에 즉시 반영돼요." : "반납 입고확인을 누르면 그 수량만큼 해당 거래처 수불(미회수)이 정리돼요."}</Note>
+      <Note>{caps.confirmOwn ? "확인하면 우리 장부에 즉시 반영돼요." : "입고확인하면 센터/거래처 재고에 즉시 반영돼요. (반납·센터이동 도착·AJ공급 받음)"}</Note>
     </>
   );
 }
@@ -1315,7 +1326,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
           {/* 우리 센터 입고 대기 (공급 발송분) */}
           {inbound.length > 0 && (
             <>
-              <h3 style={{ margin: "16px 0 10px", fontSize: 14, fontWeight: 600 }}>우리 센터 입고 대기 <span style={{ color: C.hint, fontWeight: 400 }}>{inbound.length}</span></h3>
+              <h3 style={{ margin: "16px 0 10px", fontSize: 14, fontWeight: 600 }}>센터 입고 대기 <span style={{ color: C.hint, fontWeight: 400 }}>{inbound.length}</span> <span style={{ color: C.hint, fontWeight: 400, fontSize: 11 }}>· 입고확인 메뉴에서도 처리 가능</span></h3>
               <div style={{ display: "grid", gap: 8 }}>
                 {inbound.map((r) => (
                   <div key={r.id} style={{ border: `1px solid ${C.teal}`, background: C.tealBg, borderRadius: 8, padding: "10px 12px" }}>
