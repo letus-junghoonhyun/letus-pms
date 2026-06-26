@@ -18,9 +18,11 @@ const daysSince = (d) => Math.max(0, Math.round((Date.now() - new Date(d)) / 864
 const isReturn = (s) => s.direction === "반납";
 // 미회수: 우리가 거래처로 보낸(정방향) 것 중 아직 안 돌아온 것만. 반납은 제외.
 const isUnrecovered = (s) => !isReturn(s) && (s.status === "출고완료" || s.status === "입고확인") && daysSince(s.depart_at) >= 7;
-const DirBadge = ({ s }) => isReturn(s)
-  ? <span style={{ fontSize: 10, color: "#854F0B", background: "#FAEEDA", padding: "1px 6px", borderRadius: 10 }}>반납</span>
-  : <span style={{ fontSize: 10, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10 }}>출고</span>;
+const DirBadge = ({ s }) => isMove(s)
+  ? <span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "1px 6px", borderRadius: 10 }}>센터이동</span>
+  : isReturn(s)
+    ? <span style={{ fontSize: 10, color: "#854F0B", background: "#FAEEDA", padding: "1px 6px", borderRadius: 10 }}>반납</span>
+    : <span style={{ fontSize: 10, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10 }}>출고</span>;
 const won = (n) => "₩" + (n || 0).toLocaleString();
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Date.now() + Math.random());
 
@@ -81,17 +83,21 @@ const availableToRecover = (ships, ajReqs, partnerCode, palletCode) => {
 // 센터 보유 재고(장부) = 오프닝 − 이 센터에서 정방향 출고(나감) + 이 센터로 반납 입고확인 + AJ공급 완료 − 센터→AJ 회수 완료
 const centerStock = (ships, ajReqs, center, palletCode) => {
   let q = center === OPENING_CENTER ? OPENING_QTY : 0;
-  q -= sum(ships.filter((s) => !isReturn(s) && s.center === center && s.pallet_code === palletCode && !s.canceled && ["출고완료", "입고확인"].includes(s.status)));
+  q -= sum(ships.filter((s) => !isReturn(s) && !isMove(s) && s.center === center && s.pallet_code === palletCode && !s.canceled && ["출고완료", "입고확인"].includes(s.status)));
   q += sum(ships.filter((s) => isReturn(s) && s.center === center && s.pallet_code === palletCode && s.status === "입고확인"));
+  // 센터 이동: 출발센터 −, 도착센터 +
+  q -= sum(ships.filter((s) => isMove(s) && s.center === center && s.pallet_code === palletCode && !s.canceled));
+  q += sum(ships.filter((s) => isMove(s) && s.to_center === center && s.pallet_code === palletCode && !s.canceled));
   q += sum(ajReqs.filter((r) => r.type === "공급" && r.center === center && r.pallet_code === palletCode && r.status === "완료"));
   q -= sum(ajReqs.filter((r) => r.type === "회수" && r.center === center && !r.partner_code && r.pallet_code === palletCode && r.status === "완료"));
   return q;
 };
 // 날짜·시간 포맷
 const fmtDT = (iso) => { if (!iso) return "—"; const d = new Date(iso); const p = (n) => String(n).padStart(2, "0"); return `${String(d.getFullYear()).slice(2)}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
-// 출고처 → 입고처 (방향 기준). 정방향: 센터→거래처 / 반납: 거래처→센터
-const fromOf = (s) => isReturn(s) ? s.to_partner_name : (s.center || "렌탈사");
-const toOf = (s) => isReturn(s) ? (s.center || "렌탈사") : s.to_partner_name;
+const isMove = (s) => s.direction === "이동";
+// 출고처 → 입고처 (방향 기준). 정방향: 센터→거래처 / 반납: 거래처→센터 / 이동: 센터→센터
+const fromOf = (s) => isMove(s) ? (s.center || "—") : isReturn(s) ? s.to_partner_name : (s.center || "렌탈사");
+const toOf = (s) => isMove(s) ? (s.to_center || "—") : isReturn(s) ? (s.center || "렌탈사") : s.to_partner_name;
 
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
@@ -421,6 +427,28 @@ function Shell({ session }) {
   const recoverToAj = (partner, pallet, qty) =>
     createAjRequest({ type: "회수", lines: [{ pallet, qty }], partner, note: "회수관리:AJ회수" });
 
+  // 센터 간 재고 이동 (출발센터 − / 도착센터 +)
+  const transferCenters = async (fromC, toC, lines) => {
+    const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
+    if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
+    if (fromC === toC) { alert("출발 센터와 도착 센터가 같아요."); return; }
+    const over = valid.find((l) => l.qty > centerStock(ships, ajReqs, fromC, l.pallet));
+    if (over) { alert(`${fromC} 재고 부족: ${over.pallet} 재고 ${centerStock(ships, ajReqs, fromC, over.pallet)}장, 요청 ${over.qty}장`); return; }
+    try {
+      const nowISO = new Date().toISOString();
+      const rows = [];
+      for (const l of valid) {
+        const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
+        if (e1) throw e1;
+        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "입고확인", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, confirmed_at: nowISO, created_by: session.user.id });
+      }
+      const { error: e2 } = await supabase.from("shipment").insert(rows);
+      if (e2) throw e2;
+      await supabase.from("movement").insert(rows.map((s) => ({ id: uid(), shipment_id: s.id, type: "이동", direction: "이동", source: "앱", pallet_code: s.pallet_code, qty: s.qty, to_partner: null, to_partner_name: toC, created_by: session.user.id })));
+      setFlash(rows[0].slip_no + (rows.length > 1 ? ` 외 ${rows.length - 1}건` : "")); setNav("현황"); loadAll();
+    } catch (e) { alert("센터 이동 실패: " + (e.message || e)); }
+  };
+
   // 단가 편집 (관리자·정산담당)
   const setPrice = async (code, price) => {
     try {
@@ -590,7 +618,7 @@ function Shell({ session }) {
         ) : (
           <>
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
-            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} />}
+            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} onTransfer={transferCenters} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, recoverToCenter, recoverToAj }} />}
@@ -816,22 +844,30 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
 const qtysToLines = (qtys) => Object.entries(qtys).map(([pallet, qty]) => ({ pallet, qty: qty || 0 })).filter((l) => l.qty > 0);
 const qtysTotal = (qtys) => Object.values(qtys).reduce((a, n) => a + (n || 0), 0);
 
-function Outbound({ partners, palletTypes, ships = [], ajReqs = [], onRegister }) {
+function Outbound({ partners, palletTypes, ships = [], ajReqs = [], onRegister, onTransfer }) {
   const today = new Date().toISOString().slice(0, 10);
   const [dir, setDir] = useState("출고");
   const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
   const [qtys, setQtys] = useState({});
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
-  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(CENTERS[0]);
+  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(CENTERS[0]); const [toCenter, setToCenter] = useState(CENTERS[1]);
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
-  const isRet = dir === "반납";
+  const isRet = dir === "반납"; const isMv = dir === "이동";
   const total = qtysTotal(qtys);
   const reset = () => { setQtys({}); setNote(""); setDate(today); };
-  // 출고(정방향)는 선택 센터의 재고 한도 내에서만. 반납(거래처→센터)은 한도 없음.
+  // 출고/이동은 출발 센터 재고 한도 내. 반납(거래처→센터)은 한도 없음.
   const stockOf = (code) => centerStock(ships, ajReqs, center, code);
-  // 센터·방향 바뀌면 수량 초기화(이전 입력이 새 한도를 넘지 않도록)
   useEffect(() => { setQtys({}); }, [center, dir]);
+  const themeColor = isRet ? C.amber : isMv ? "#5b3aa6" : C.teal;
+  const themeBg = isRet ? C.amberBg : isMv ? "#efe8ff" : C.tealBg;
+  const canSubmit = total > 0 && !busy && (isMv ? center !== toCenter : !!sel);
+  const submit = async () => {
+    setBusy(true);
+    if (isMv) await onTransfer(center, toCenter, qtysToLines(qtys));
+    else await onRegister(sel, qtysToLines(qtys), date, note, dir, center);
+    setBusy(false); reset();
+  };
 
   return (
     <>
@@ -839,54 +875,77 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], onRegister }
       <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>방향</div>
         <div style={{ display: "flex", gap: 6, marginBottom: 18, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
-          {[["출고", "출고 (우리→거래처)"], ["반납", "반납 (거래처→우리)"]].map(([v, label]) => (
-            <button key={v} onClick={() => setDir(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: dir === v ? (v === "반납" ? C.amber : C.teal) : "transparent", color: dir === v ? "#fff" : C.sub }}>{label}</button>
+          {[["출고", "출고"], ["반납", "반납"], ["이동", "센터이동"]].map(([v, label]) => (
+            <button key={v} onClick={() => setDir(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: dir === v ? (v === "반납" ? C.amber : v === "이동" ? "#5b3aa6" : C.teal) : "transparent", color: dir === v ? "#fff" : C.sub }}>{label}</button>
           ))}
         </div>
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>거래처 <span style={{ color: C.hint, fontSize: 11 }}>· 검색</span></div>
-        {!sel ? (
-          <div style={{ position: "relative", marginBottom: 18 }}>
-            <input value={q} onChange={(e) => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} placeholder="예: 쿠팡, 시공팀, 이케아…" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
-            {open && (
-              <div style={{ position: "absolute", top: 44, left: 0, right: 0, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, zIndex: 5, maxHeight: 240, overflow: "auto" }}>
-                {matches.length === 0 && <div style={{ padding: "10px 12px", fontSize: 13, color: C.hint }}>일치하는 거래처 없음</div>}
-                {matches.map((p) => (
-                  <button key={p.code} onClick={() => pick(p)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "10px 12px", border: "none", borderBottom: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", textAlign: "left" }}>
-                    <span style={{ fontSize: 13 }}>{p.name}</span>
-                    <TypeBadge t={p.type} />
-                  </button>
-                ))}
-              </div>
-            )}
+
+        {isMv ? (
+          <div style={{ display: "flex", gap: 10, marginBottom: 18, alignItems: "flex-end" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출발 센터</div>
+              <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }}>{CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+            </div>
+            <div style={{ paddingBottom: 10, color: C.hint }}>→</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>도착 센터</div>
+              <select value={toCenter} onChange={(e) => setToCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${center === toCenter ? C.red : C.border}`, borderRadius: 8 }}>{CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+            </div>
           </div>
         ) : (
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.teal}`, background: C.tealBg, borderRadius: 8, padding: "10px 12px", marginBottom: 18 }}>
-            <span style={{ fontSize: 14, color: C.tealDk, fontWeight: 600 }}>{sel.name} <span style={{ fontSize: 11, fontWeight: 400 }}>· {sel.type}</span></span>
-            <button onClick={() => setSel(null)} style={{ background: "none", border: "none", cursor: "pointer", color: C.tealDk, fontSize: 16 }}>✕</button>
+          <>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>거래처 <span style={{ color: C.hint, fontSize: 11 }}>· 검색</span></div>
+            {!sel ? (
+              <div style={{ position: "relative", marginBottom: 18 }}>
+                <input value={q} onChange={(e) => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} placeholder="예: 쿠팡, 시공팀, 이케아…" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+                {open && (
+                  <div style={{ position: "absolute", top: 44, left: 0, right: 0, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, zIndex: 5, maxHeight: 240, overflow: "auto" }}>
+                    {matches.length === 0 && <div style={{ padding: "10px 12px", fontSize: 13, color: C.hint }}>일치하는 거래처 없음</div>}
+                    {matches.map((p) => (
+                      <button key={p.code} onClick={() => pick(p)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "10px 12px", border: "none", borderBottom: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", textAlign: "left" }}>
+                        <span style={{ fontSize: 13 }}>{p.name}</span>
+                        <TypeBadge t={p.type} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.teal}`, background: C.tealBg, borderRadius: 8, padding: "10px 12px", marginBottom: 18 }}>
+                <span style={{ fontSize: 14, color: C.tealDk, fontWeight: 600 }}>{sel.name} <span style={{ fontSize: 11, fontWeight: 400 }}>· {sel.type}</span></span>
+                <button onClick={() => setSel(null)} style={{ background: "none", border: "none", cursor: "pointer", color: C.tealDk, fontSize: 16 }}>✕</button>
+              </div>
+            )}
+
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납 받는 센터" : "출고하는 센터"}</div>
+            <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
+              {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </>
+        )}
+
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : "센터 재고 한도 내"}</span></div>
+        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={themeColor} bg={themeBg} maxOf={isRet ? undefined : stockOf} maxLabel="재고" />
+        {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
+
+        {!isMv && (
+          <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 140 }}>
+              <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납일자" : "출고일자"}</div>
+              <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+            </div>
           </div>
         )}
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납 받는 센터" : "출고하는 센터"}</div>
-        <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
-          {CENTERS.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
+        {!isMv && (
+          <>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
+          </>
+        )}
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : "센터 재고 한도 내"}</span></div>
-        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isRet ? C.amber : C.teal} bg={isRet ? C.amberBg : C.tealBg} maxOf={isRet ? undefined : stockOf} maxLabel="재고" />
-        {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
-
-        <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
-          <div style={{ flex: 1, minWidth: 140 }}>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납일자" : "출고일자"}</div>
-            <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
-          </div>
-        </div>
-
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
-        <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
-
-        <button disabled={!sel || total === 0 || busy} onClick={async () => { setBusy(true); await onRegister(sel, qtysToLines(qtys), date, note, dir, center); setBusy(false); reset(); }} style={{ width: "100%", background: (!sel || total === 0 || busy) ? "#c7cad1" : (isRet ? C.amber : C.teal), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isRet ? "반납 등록" : "출고 등록"}</button>
-        <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
+        <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : themeColor, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : isRet ? "반납 등록" : isMv ? "센터 이동" : "출고 등록"}</button>
+        <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : isMv ? "센터 간 재고를 옮겨요 (출발 −, 도착 +)" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
       </div>
     </>
   );
