@@ -753,7 +753,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                 const label = st === "완료" ? "AJ완료" : st === "발송" ? "발송됨" : "AJ요청";
                 const sty = st === "완료" ? { bg: C.greenBg, fg: C.green } : st === "발송" ? { bg: C.blueBg, fg: C.blue } : { bg: C.amberBg, fg: C.amber };
                 return (
-                  <tr key={s.id} style={{ borderTop: `1px solid ${C.border}`, background: "#faf7ff" }}>
+                  <tr key={s.id} style={{ borderTop: `1px solid ${C.border}` }}>
                     <Td><span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "1px 6px", borderRadius: 10 }}>{isRec ? "AJ회수" : "AJ공급"}</span></Td>
                     <Td><span style={{ fontSize: 11, padding: "2px 9px", borderRadius: 20, background: sty.bg, color: sty.fg }}>{label}</span></Td>
                     <Td c={C.hint}>AJ</Td><Td>{s.pallet_code}</Td><Td r>{s.qty}</Td>
