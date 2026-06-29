@@ -947,37 +947,81 @@ const qtysToLines = (qtys) => Object.entries(qtys).map(([pallet, qty]) => ({ pal
 const qtysTotal = (qtys) => Object.values(qtys).reduce((a, n) => a + (n || 0), 0);
 
 // 현장 사진 촬영·업로드 (Supabase Storage 'pallet-photos')
+// Storage 업로드 (File/Blob 배열 → URL 배열)
+async function uploadPhotos(files) {
+  const urls = [];
+  for (const f of files) {
+    const path = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+    const { error } = await supabase.storage.from("pallet-photos").upload(path, f, { contentType: f.type || "image/jpeg" });
+    if (error) throw error;
+    urls.push(supabase.storage.from("pallet-photos").getPublicUrl(path).data.publicUrl);
+  }
+  return urls;
+}
+
 function PhotoCapture({ photos = [], setPhotos, label = "현장 사진", hint = "차량 좌/우 + 차량번호", color = C.teal }) {
   const [busy, setBusy] = useState(false);
-  const onFiles = async (e) => {
-    const files = Array.from(e.target.files || []); if (!files.length) return;
+  const [cam, setCam] = useState(false);
+  const addFiles = async (files) => {
+    if (!files.length) return;
     setBusy(true);
-    try {
-      const urls = [];
-      for (const f of files) {
-        const path = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
-        const { error } = await supabase.storage.from("pallet-photos").upload(path, f, { contentType: f.type || "image/jpeg" });
-        if (error) throw error;
-        urls.push(supabase.storage.from("pallet-photos").getPublicUrl(path).data.publicUrl);
-      }
-      setPhotos([...(photos || []), ...urls]);
-    } catch (err) { alert("사진 업로드 실패: " + (err.message || err) + "\n(pallet-photos 버킷이 생성됐는지 확인)"); }
-    setBusy(false); e.target.value = "";
+    try { const urls = await uploadPhotos(files); setPhotos((prev) => [...(prev || []), ...urls]); }
+    catch (err) { alert("사진 업로드 실패: " + (err.message || err) + "\n(pallet-photos 버킷이 생성됐는지 확인)"); }
+    setBusy(false);
   };
+  const onPick = (e) => { addFiles(Array.from(e.target.files || [])); e.target.value = ""; };
   return (
     <div>
-      <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{label} <span style={{ color: C.hint, fontSize: 11 }}>· {hint}</span>{(photos || []).length > 0 && <span style={{ color: color, fontSize: 11, fontWeight: 600 }}> · 촬영 {photos.length}장</span>}</div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 4 }}>
+      <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{label} <span style={{ color: C.hint, fontSize: 11 }}>· {hint}</span>{(photos || []).length > 0 && <span style={{ color, fontSize: 11, fontWeight: 600 }}> · {photos.length}장</span>}</div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
         {(photos || []).map((u, i) => (
           <div key={i} style={{ position: "relative" }}>
             <img src={u} alt="" style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.border}` }} />
-            <button onClick={() => setPhotos(photos.filter((_, j) => j !== i))} style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: "none", background: C.red, color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: 1 }}>✕</button>
+            <button type="button" onClick={() => setPhotos((photos || []).filter((_, j) => j !== i))} style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: "none", background: C.red, color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: 1 }}>✕</button>
           </div>
         ))}
-        <label style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center", width: 60, height: 60, borderRadius: 8, border: `1px dashed ${color}`, color, cursor: "pointer", fontSize: 22, background: "#fff" }}>
-          {busy ? "…" : "📷"}
-          <input type="file" accept="image/*" capture="environment" multiple onChange={onFiles} style={{ display: "none" }} />
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button type="button" onClick={() => setCam(true)} style={{ fontSize: 13, padding: "8px 14px", borderRadius: 8, border: `1px solid ${color}`, background: "#fff", color, cursor: "pointer" }}>📷 촬영</button>
+        <label style={{ fontSize: 13, padding: "8px 14px", borderRadius: 8, border: `1px dashed ${C.border}`, background: "#fff", color: C.sub, cursor: "pointer" }}>
+          {busy ? "업로드 중…" : "🖼 첨부"}
+          <input type="file" accept="image/*" multiple onChange={onPick} style={{ display: "none" }} />
         </label>
+      </div>
+      {cam && <CameraModal color={color} onShot={(blob) => addFiles([new File([blob], "shot.jpg", { type: "image/jpeg" })])} onClose={() => setCam(false)} count={(photos || []).length} />}
+    </div>
+  );
+}
+
+// 라이브 카메라 — 촬영 버튼으로 연속 촬영, 종료까지 계속 업로드
+function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
+  const videoRef = useRef(null); const streamRef = useRef(null);
+  const [err, setErr] = useState(""); const [shot, setShot] = useState(0); const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    navigator.mediaDevices?.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false })
+      .then((s) => { if (!active) { s.getTracks().forEach((t) => t.stop()); return; } streamRef.current = s; if (videoRef.current) { videoRef.current.srcObject = s; } })
+      .catch((e) => setErr("카메라를 열 수 없어요: " + (e.message || e) + " — '첨부'로 올려주세요."));
+    return () => { active = false; if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop()); };
+  }, []);
+  const snap = async () => {
+    const v = videoRef.current; if (!v || !v.videoWidth) return;
+    const cv = document.createElement("canvas"); cv.width = v.videoWidth; cv.height = v.videoHeight;
+    cv.getContext("2d").drawImage(v, 0, 0);
+    setBusy(true);
+    await new Promise((res) => cv.toBlob(async (b) => { if (b) { await onShot(b); setShot((c) => c + 1); } res(); }, "image/jpeg", 0.85));
+    setBusy(false);
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 80, display: "flex", flexDirection: "column" }}>
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+        {err ? <div style={{ color: "#fff", fontSize: 14, padding: 24, textAlign: "center" }}>{err}</div>
+          : <video ref={videoRef} autoPlay playsInline muted style={{ maxWidth: "100%", maxHeight: "100%" }} />}
+      </div>
+      <div style={{ padding: "16px 20px", background: "#111", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <span style={{ color: "#fff", fontSize: 13 }}>촬영 {count + shot}장</span>
+        <button type="button" onClick={snap} disabled={!!err || busy} style={{ width: 64, height: 64, borderRadius: 32, border: "4px solid #fff", background: busy ? "#888" : color, cursor: "pointer", fontSize: 22 }}>📷</button>
+        <button type="button" onClick={onClose} style={{ fontSize: 14, padding: "10px 16px", borderRadius: 8, border: "1px solid #555", background: "transparent", color: "#fff", cursor: "pointer" }}>촬영 종료</button>
       </div>
     </div>
   );
