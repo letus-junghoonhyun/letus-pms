@@ -380,7 +380,8 @@ function Shell({ session }) {
         to_partner: partner.code, to_partner_name: partner.name, created_by: session.user.id,
       }));
       await supabase.from("movement").insert(mvRows);
-      setFlash({ slip: shipRows[0].slip_no + (shipRows.length > 1 ? ` 외 ${shipRows.length - 1}건` : ""), batchId }); setNav("현황"); loadAll();
+      setFlash({ slip: shipRows[0].slip_no + (shipRows.length > 1 ? ` 외 ${shipRows.length - 1}건` : ""), batchId }); loadAll();
+      return shipRows;
     } catch (e) { alert((direction === "반납" ? "반납" : "출고") + " 등록 실패: " + (e.message || e)); }
   };
 
@@ -464,7 +465,8 @@ function Shell({ session }) {
       const { error: e2 } = await supabase.from("shipment").insert(rows);
       if (e2) throw e2;
       await supabase.from("movement").insert(rows.map((s) => ({ id: uid(), shipment_id: s.id, type: "이동", direction: "이동", source: "앱", pallet_code: s.pallet_code, qty: s.qty, to_partner: null, to_partner_name: toC, created_by: session.user.id })));
-      setFlash({ slip: rows[0].slip_no + (rows.length > 1 ? ` 외 ${rows.length - 1}건` : ""), batchId }); setNav("현황"); loadAll();
+      setFlash({ slip: rows[0].slip_no + (rows.length > 1 ? ` 외 ${rows.length - 1}건` : ""), batchId }); loadAll();
+      return rows;
     } catch (e) { alert("센터 이동 실패: " + (e.message || e)); }
   };
 
@@ -655,7 +657,7 @@ function Shell({ session }) {
         ) : (
           <>
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply }} />}
-            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} />}
+            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} setNav={setNav} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps, ajReqs, confirmAjSupply }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
@@ -1029,14 +1031,14 @@ function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
   );
 }
 
-function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CENTERS, myCenters = CENTERS, onRegister, onTransfer }) {
+function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CENTERS, myCenters = CENTERS, onRegister, onTransfer, setNav }) {
   const today = new Date().toISOString().slice(0, 10);
   const [dir, setDir] = useState("출고");
   const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
   const [qtys, setQtys] = useState({});
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
   const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(myCenters[0] || centers[0]); const [toCenter, setToCenter] = useState(centers.find((c) => c !== (myCenters[0] || centers[0])) || centers[0]);
-  const [photos, setPhotos] = useState([]); const [vehicleNo, setVehicleNo] = useState("");
+  const [photos, setPhotos] = useState([]); const [vehicleNo, setVehicleNo] = useState(""); const [slipRows, setSlipRows] = useState(null);
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
   const isRet = dir === "반납"; const isMv = dir === "이동";
@@ -1050,9 +1052,10 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const canSubmit = total > 0 && !busy && (isMv ? center !== toCenter : !!sel);
   const submit = async () => {
     setBusy(true);
-    if (isMv) await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note);
-    else await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo);
+    const rows = isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note)
+      : await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo);
     setBusy(false); reset();
+    if (rows && rows.length) setSlipRows(rows); // 등록 직후 전표 바로 출력
   };
 
   return (
@@ -1134,6 +1137,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
         <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : themeColor, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : isRet ? "반납 등록" : isMv ? "센터 이동" : "출고 등록"}</button>
         <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : isMv ? "센터 간 재고를 옮겨요 (출발 −, 도착 +)" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
       </div>
+      {slipRows && <SlipPrint rows={slipRows} onClose={() => { setSlipRows(null); setNav && setNav("현황"); }} />}
     </>
   );
 }
