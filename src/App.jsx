@@ -651,7 +651,7 @@ function Shell({ session }) {
           </div>
         ) : (
           <>
-            {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData }} />}
+            {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps, ajReqs, confirmAjSupply }} />}
@@ -692,7 +692,7 @@ function Tabs({ tabs, tab, setTab, count }) {
   );
 }
 
-function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment, resetData }) {
+function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment, resetData, confirmAjSupply }) {
   const [tab, setTab] = useState("전체");
   const [edit, setEdit] = useState(null);
   const [from, setFrom] = useState(""); const [to, setTo] = useState("");
@@ -706,7 +706,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
   const byTab = (s) => tab === "전체" ? true : tab === "미회수" ? isUnrecovered(s) : s.status === tab;
   // AJ 요청(공급/회수)도 수불 흐름이므로 같이 표시 — 가짜 행으로 변환
   const ajRows = ajReqs.map((r) => ({
-    _aj: true, id: "aj_" + r.id, ajType: r.type, status: r.status, pallet_code: r.pallet_code, qty: r.qty,
+    _aj: true, _raw: r, id: "aj_" + r.id, ajType: r.type, status: r.status, pallet_code: r.pallet_code, qty: r.qty,
     from: r.type === "회수" ? (r.partner_name || r.center || "—") : "AJ네트웍스",
     to: r.type === "회수" ? "AJ네트웍스" : (r.center || "—"),
     depart_at: r.requested_at, confirmed_at: r.completed_at, slip_no: "AJ",
@@ -752,7 +752,6 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                 const st = s.status; // 요청 / 발송 / 완료
                 const label = st === "완료" ? "AJ완료" : st === "발송" ? "발송됨" : "AJ요청";
                 const sty = st === "완료" ? { bg: C.greenBg, fg: C.green } : st === "발송" ? { bg: C.blueBg, fg: C.blue } : { bg: C.amberBg, fg: C.amber };
-                const act = st === "완료" ? "✓" : st === "발송" ? "센터 입고대기" : "AJ 처리 대기";
                 return (
                   <tr key={s.id} style={{ borderTop: `1px solid ${C.border}`, background: "#faf7ff" }}>
                     <Td><span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "1px 6px", borderRadius: 10 }}>{isRec ? "AJ회수" : "AJ공급"}</span></Td>
@@ -762,7 +761,11 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                     <Td c={C.sub}>{fmtDT(s.depart_at)}</Td>
                     <Td c={s.confirmed_at ? C.text : C.hint}>{fmtDT(s.confirmed_at)}</Td>
                     <Td c={C.hint}>—</Td>
-                    <Td><span style={{ color: C.hint, fontSize: 11 }}>{act}</span></Td>
+                    <Td>
+                      {st === "완료" ? <span style={{ color: C.green, fontSize: 11 }}>✓ 완료</span>
+                        : (st === "발송" && !isRec && caps.aj) ? <button onClick={() => confirmAjSupply(s._raw)} style={btnGhost}>입고확인</button>
+                        : <span style={{ color: C.hint, fontSize: 11 }}>{st === "발송" ? "센터 입고대기" : "AJ 처리 대기"}</span>}
+                    </Td>
                   </tr>
                 );
               }
