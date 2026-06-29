@@ -349,7 +349,7 @@ function Shell({ session }) {
   };
 
   // lines: [{ pallet, qty }] — 여러 파렛트 종류를 한 번에 등록(혼합). 전표번호는 유형마다 고유 발급.
-  const register = async (partner, lines, departDate, note, direction = "출고", center = null) => {
+  const register = async (partner, lines, departDate, note, direction = "출고", center = null, photos = []) => {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     // 정방향 출고는 센터 재고 한도 초과 불가
@@ -358,6 +358,7 @@ function Shell({ session }) {
       if (over) { alert(`${center} 재고 부족: ${over.pallet} 재고 ${centerStock(ships, ajReqs, center, over.pallet)}장, 요청 ${over.qty}장`); return; }
     }
     try {
+      const batchId = uid();
       // 선택한 날짜 + 실제 처리 시각(시:분:초)을 반영
       const nowD = new Date();
       let depart_at = nowD.toISOString();
@@ -369,7 +370,7 @@ function Shell({ session }) {
         shipRows.push({
           id: uid(), slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
           pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction, center,
-          depart_at, note: note || null, created_by: session.user.id,
+          depart_at, note: note || null, batch_id: batchId, out_photos: photos.length ? photos : null, created_by: session.user.id,
         });
       }
       const { error: e2 } = await supabase.from("shipment").insert(shipRows);
@@ -379,7 +380,7 @@ function Shell({ session }) {
         to_partner: partner.code, to_partner_name: partner.name, created_by: session.user.id,
       }));
       await supabase.from("movement").insert(mvRows);
-      setFlash(shipRows[0].slip_no + (shipRows.length > 1 ? ` 외 ${shipRows.length - 1}건` : "")); setNav("현황"); loadAll();
+      setFlash({ slip: shipRows[0].slip_no + (shipRows.length > 1 ? ` 외 ${shipRows.length - 1}건` : ""), batchId }); setNav("현황"); loadAll();
     } catch (e) { alert((direction === "반납" ? "반납" : "출고") + " 등록 실패: " + (e.message || e)); }
   };
 
@@ -434,7 +435,7 @@ function Shell({ session }) {
       const { error: e2 } = await supabase.from("shipment").insert({
         id, slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
         pallet_code: pallet, qty, status: "입고확인", direction: "반납", center,
-        depart_at: nowISO, confirmed_at: nowISO, note: "회수관리:센터반납", created_by: session.user.id,
+        depart_at: nowISO, confirmed_at: nowISO, note: "회수관리:센터반납", batch_id: id, created_by: session.user.id,
       });
       if (e2) throw e2;
       await supabase.from("movement").insert({ id: uid(), shipment_id: id, type: "반납", direction: "반납", source: "앱", pallet_code: pallet, qty, to_partner: partner.code, to_partner_name: partner.name, created_by: session.user.id });
@@ -452,17 +453,18 @@ function Shell({ session }) {
     const over = valid.find((l) => l.qty > centerStock(ships, ajReqs, fromC, l.pallet));
     if (over) { alert(`${fromC} 재고 부족: ${over.pallet} 재고 ${centerStock(ships, ajReqs, fromC, over.pallet)}장, 요청 ${over.qty}장`); return; }
     try {
+      const batchId = uid();
       const nowISO = new Date().toISOString();
       const rows = [];
       for (const l of valid) {
         const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
         if (e1) throw e1;
-        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, created_by: session.user.id });
+        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, batch_id: batchId, created_by: session.user.id });
       }
       const { error: e2 } = await supabase.from("shipment").insert(rows);
       if (e2) throw e2;
       await supabase.from("movement").insert(rows.map((s) => ({ id: uid(), shipment_id: s.id, type: "이동", direction: "이동", source: "앱", pallet_code: s.pallet_code, qty: s.qty, to_partner: null, to_partner_name: toC, created_by: session.user.id })));
-      setFlash(rows[0].slip_no + (rows.length > 1 ? ` 외 ${rows.length - 1}건` : "")); setNav("현황"); loadAll();
+      setFlash({ slip: rows[0].slip_no + (rows.length > 1 ? ` 외 ${rows.length - 1}건` : ""), batchId }); setNav("현황"); loadAll();
     } catch (e) { alert("센터 이동 실패: " + (e.message || e)); }
   };
 
@@ -506,10 +508,11 @@ function Shell({ session }) {
     } catch (e) { alert("출고 취소 실패: " + (e.message || e)); }
   };
 
-  const setStatus = async (s, newStatus, mvType) => {
+  const setStatus = async (s, newStatus, mvType, inPhotos) => {
     try {
       const patch = { status: newStatus };
       if (newStatus === "입고확인" && !s.confirmed_at) patch.confirmed_at = new Date().toISOString();
+      if (inPhotos && inPhotos.length) patch.in_photos = inPhotos;
       const { error } = await supabase.from("shipment").update(patch).eq("id", s.id);
       if (error) throw error;
       if (mvType) await supabase.from("movement").insert({
@@ -695,6 +698,7 @@ function Tabs({ tabs, tab, setTab, count }) {
 function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment, resetData, confirmAjSupply }) {
   const [tab, setTab] = useState("전체");
   const [edit, setEdit] = useState(null);
+  const [slipBatch, setSlipBatch] = useState(null);
   const [from, setFrom] = useState(""); const [to, setTo] = useState("");
   const tabs = ["전체", "출고완료", "입고확인", "미회수"];
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -725,7 +729,10 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
           {caps.users && <button onClick={resetData} style={{ fontSize: 12, padding: "8px 12px", borderRadius: 8, border: `1px solid ${C.red}`, background: "#fff", color: C.red, cursor: "pointer" }} title="테스트용 — 출고/반납 데이터 전체 삭제">🧪 초기화</button>}
           {caps.outbound && <button onClick={() => setNav("출고")} style={btnTeal}>+ 출고 등록</button>}
         </div>} />
-      {flash && <div style={{ background: C.greenBg, color: C.green, fontSize: 13, padding: "9px 14px", borderRadius: 8, marginBottom: 14 }}>✓ 출고 등록 완료 — 전표 {flash} 발행</div>}
+      {flash && <div style={{ background: C.greenBg, color: C.green, fontSize: 13, padding: "9px 14px", borderRadius: 8, marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+        <span>✓ 등록 완료 — 전표 {flash.slip} 발행</span>
+        {flash.batchId && <button onClick={() => setSlipBatch(flash.batchId)} style={{ ...btnTealSm, padding: "6px 12px" }}>🖨 전표 출력</button>}
+      </div>}
       <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
         <Metric label="금일 출고" value={today} unit="장" tone="plain" />
         <Metric label="미회수 7일↑" value={unrec} unit="장" tone="danger" />
@@ -785,6 +792,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                       {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnGhost}>입고확인</button>}
                       {s.status === "출고완료" && caps.confirmOwn && isReturn(s) && <span style={{ color: C.hint, fontSize: 11 }}>센터 확인 대기</span>}
                       {s.status === "입고확인" && <span style={{ color: C.green, fontSize: 11 }}>✓ 완료</span>}
+                      {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={{ ...btnGhost, color: C.sub }} title="전표 출력">🖨</button>}
                       {caps.operate && s.status === "출고완료" && <button onClick={() => setEdit(s)} style={{ ...btnGhost, color: C.sub }} title="수정·취소">⋯</button>}
                     </div>
                   </Td>
@@ -797,9 +805,61 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
       </div>
       <Note>날짜 범위로 조회할 수 있어요. 출고처→입고처로 흐름이, 출고일시·입고확인 시각이 함께 보입니다. <b>⋯</b> 버튼으로 출고완료 건을 수정·취소할 수 있어요(이력 보존).</Note>
       {edit && <EditShipmentModal s={edit} palletTypes={palletTypes} onClose={() => setEdit(null)} onSave={editShipment} onCancel={cancelShipment} />}
+      {slipBatch && <SlipPrint rows={ships.filter((s) => (s.batch_id || s.id) === slipBatch)} onClose={() => setSlipBatch(null)} />}
     </>
   );
 }
+
+// 파렛트 이동전표 출력 (AJ 양식 4분할) — window.print()
+function SlipPrint({ rows, onClose }) {
+  if (!rows.length) return null;
+  const h = rows[0];
+  const dateOf = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${d.getFullYear()}년 ${String(d.getMonth() + 1).padStart(2, "0")}월 ${String(d.getDate()).padStart(2, "0")}일`; };
+  const from = fromOf(h), to = toOf(h);
+  const copies = ["발송처용", "도착처용", "운송회사용", "보관용"];
+  const Slip = ({ tag }) => (
+    <div style={{ border: "1.5px solid #000", padding: 10, width: 250, fontSize: 11, color: "#000", fontFamily: "sans-serif" }}>
+      <div style={{ textAlign: "center", fontWeight: 700, fontSize: 15 }}>파렛트 이동전표</div>
+      <div style={{ textAlign: "center", fontSize: 11, marginBottom: 6 }}>({tag})</div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+        <tbody>
+          <tr><td style={cell}>전표번호</td><td style={cell} colSpan={3}>{h.slip_no}</td></tr>
+          <tr><td style={cell}>발송일</td><td style={cell} colSpan={3}>{dateOf(h.depart_at)}</td></tr>
+          <tr><td style={cell}>발송처</td><td style={cell} colSpan={3}>{from}</td></tr>
+          <tr><td style={cell}>도착처</td><td style={cell} colSpan={3}>{to}</td></tr>
+          <tr><td style={cellH}>유형</td><td style={cellH}>수량</td><td style={cellH}>유형</td><td style={cellH}>수량</td></tr>
+          {Array.from({ length: Math.ceil(rows.length / 2) }).map((_, i) => (
+            <tr key={i}>
+              <td style={cell}>{rows[i * 2]?.pallet_code || ""}</td><td style={cell}>{rows[i * 2]?.qty ?? ""}</td>
+              <td style={cell}>{rows[i * 2 + 1]?.pallet_code || ""}</td><td style={cell}>{rows[i * 2 + 1]?.qty ?? ""}</td>
+            </tr>
+          ))}
+          <tr><td style={cell}>비고</td><td style={cell} colSpan={3}>{h.note || ""}</td></tr>
+          <tr><td style={cell}>담당</td><td style={cell} colSpan={3}>(인)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  );
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16, overflow: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, padding: 20, maxWidth: "95vw", maxHeight: "92vh", overflow: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }} className="no-print">
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>파렛트 이동전표</h3>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => window.print()} style={btnTeal}>🖨 인쇄 / PDF</button>
+            <button onClick={onClose} style={btnGhost}>닫기</button>
+          </div>
+        </div>
+        <div id="slip-print" style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+          {copies.map((t) => <Slip key={t} tag={t} />)}
+        </div>
+        <style>{`@media print { body * { visibility: hidden !important; } #slip-print, #slip-print * { visibility: visible !important; } #slip-print { position: absolute; left: 0; top: 0; } .no-print { display: none !important; } }`}</style>
+      </div>
+    </div>
+  );
+}
+const cell = { border: "1px solid #000", padding: "3px 5px", textAlign: "center" };
+const cellH = { border: "1px solid #000", padding: "3px 5px", textAlign: "center", fontWeight: 700, background: "#f0f0f0" };
 
 function EditShipmentModal({ s, palletTypes, onClose, onSave, onCancel }) {
   const [pallet, setPallet] = useState(s.pallet_code);
@@ -885,6 +945,43 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
 const qtysToLines = (qtys) => Object.entries(qtys).map(([pallet, qty]) => ({ pallet, qty: qty || 0 })).filter((l) => l.qty > 0);
 const qtysTotal = (qtys) => Object.values(qtys).reduce((a, n) => a + (n || 0), 0);
 
+// 현장 사진 촬영·업로드 (Supabase Storage 'pallet-photos')
+function PhotoCapture({ photos = [], setPhotos, label = "현장 사진", hint = "차량 좌/우 + 차량번호", color = C.teal }) {
+  const [busy, setBusy] = useState(false);
+  const onFiles = async (e) => {
+    const files = Array.from(e.target.files || []); if (!files.length) return;
+    setBusy(true);
+    try {
+      const urls = [];
+      for (const f of files) {
+        const path = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}.jpg`;
+        const { error } = await supabase.storage.from("pallet-photos").upload(path, f, { contentType: f.type || "image/jpeg" });
+        if (error) throw error;
+        urls.push(supabase.storage.from("pallet-photos").getPublicUrl(path).data.publicUrl);
+      }
+      setPhotos([...(photos || []), ...urls]);
+    } catch (err) { alert("사진 업로드 실패: " + (err.message || err) + "\n(pallet-photos 버킷이 생성됐는지 확인)"); }
+    setBusy(false); e.target.value = "";
+  };
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{label} <span style={{ color: C.hint, fontSize: 11 }}>· {hint}</span></div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 4 }}>
+        {(photos || []).map((u, i) => (
+          <div key={i} style={{ position: "relative" }}>
+            <img src={u} alt="" style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.border}` }} />
+            <button onClick={() => setPhotos(photos.filter((_, j) => j !== i))} style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: "none", background: C.red, color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: 1 }}>✕</button>
+          </div>
+        ))}
+        <label style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center", width: 60, height: 60, borderRadius: 8, border: `1px dashed ${color}`, color, cursor: "pointer", fontSize: 22, background: "#fff" }}>
+          {busy ? "…" : "📷"}
+          <input type="file" accept="image/*" capture="environment" multiple onChange={onFiles} style={{ display: "none" }} />
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CENTERS, myCenters = CENTERS, onRegister, onTransfer }) {
   const today = new Date().toISOString().slice(0, 10);
   const [dir, setDir] = useState("출고");
@@ -892,11 +989,12 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const [qtys, setQtys] = useState({});
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
   const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(myCenters[0] || centers[0]); const [toCenter, setToCenter] = useState(centers.find((c) => c !== (myCenters[0] || centers[0])) || centers[0]);
+  const [photos, setPhotos] = useState([]);
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
   const isRet = dir === "반납"; const isMv = dir === "이동";
   const total = qtysTotal(qtys);
-  const reset = () => { setQtys({}); setNote(""); setDate(today); };
+  const reset = () => { setQtys({}); setNote(""); setDate(today); setPhotos([]); };
   // 출고/이동은 출발 센터 재고 한도 내. 반납(거래처→센터)은 한도 없음.
   const stockOf = (code) => centerStock(ships, ajReqs, center, code);
   useEffect(() => { setQtys({}); }, [center, dir]);
@@ -906,7 +1004,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const submit = async () => {
     setBusy(true);
     if (isMv) await onTransfer(center, toCenter, qtysToLines(qtys));
-    else await onRegister(sel, qtysToLines(qtys), date, note, dir, center);
+    else await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos);
     setBusy(false); reset();
   };
 
@@ -982,6 +1080,8 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
           <>
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
             <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
+
+            <div style={{ marginBottom: 18 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label={isRet ? "반납 현장 사진" : "출고 현장 사진"} color={themeColor} /></div>
           </>
         )}
 
@@ -1083,19 +1183,32 @@ function Confirm({ ships, setStatus, caps = {}, ajReqs = [], confirmAjSupply }) 
               <button onClick={() => confirmAjSupply(r)} style={btnTeal}>✓ 입고확인</button>
             </div>
           ))}
-          {pending.map((s) => (
-            <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, display: "flex", alignItems: "center", gap: 14 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{fromOf(s)} → {toOf(s)}</div>
-                <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.note ? ` · ${s.note}` : ""}</div>
-              </div>
-              <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnTeal}>✓ 입고확인</button>
-            </div>
-          ))}
+          {pending.map((s) => <ConfirmCard key={s.id} s={s} setStatus={setStatus} />)}
         </div>
       )}
-      <Note>{caps.confirmOwn ? "확인하면 우리 장부에 즉시 반영돼요." : "입고확인하면 센터/거래처 재고에 즉시 반영돼요. (반납·센터이동 도착·AJ공급 받음)"}</Note>
+      <Note>{caps.confirmOwn ? "확인하면 우리 장부에 즉시 반영돼요. 받은 파렛트 사진을 함께 남기면 증빙이 돼요." : "입고확인하면 센터/거래처 재고에 즉시 반영돼요. 사진을 남기면 증빙이 됩니다."}</Note>
     </>
+  );
+}
+
+// 입고확인 카드 — 사진 촬영(선택) 후 확인
+function ConfirmCard({ s, setStatus }) {
+  const [photos, setPhotos] = useState([]);
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{fromOf(s)} → {toOf(s)}</div>
+          <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.note ? ` · ${s.note}` : ""}</div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+          <button onClick={() => setOpen((o) => !o)} style={{ ...btnGhost, color: photos.length ? C.tealDk : C.sub }}>📷{photos.length ? ` ${photos.length}` : ""}</button>
+          <button onClick={() => setStatus(s, "입고확인", "입고확인", photos)} style={btnTeal}>✓ 입고확인</button>
+        </div>
+      </div>
+      {open && <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}><PhotoCapture photos={photos} setPhotos={setPhotos} label="입고 사진" hint="받은 파렛트 / 차량" /></div>}
+    </div>
   );
 }
 
