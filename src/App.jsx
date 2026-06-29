@@ -349,7 +349,7 @@ function Shell({ session }) {
   };
 
   // lines: [{ pallet, qty }] — 여러 파렛트 종류를 한 번에 등록(혼합). 전표번호는 유형마다 고유 발급.
-  const register = async (partner, lines, departDate, note, direction = "출고", center = null, photos = []) => {
+  const register = async (partner, lines, departDate, note, direction = "출고", center = null, photos = [], vehicleNo = null) => {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     // 정방향 출고는 센터 재고 한도 초과 불가
@@ -370,7 +370,7 @@ function Shell({ session }) {
         shipRows.push({
           id: uid(), slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
           pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction, center,
-          depart_at, note: note || null, batch_id: batchId, out_photos: photos.length ? photos : null, created_by: session.user.id,
+          depart_at, note: note || null, vehicle_no: vehicleNo || null, batch_id: batchId, out_photos: photos.length ? photos : null, created_by: session.user.id,
         });
       }
       const { error: e2 } = await supabase.from("shipment").insert(shipRows);
@@ -827,6 +827,7 @@ function SlipPrint({ rows, onClose }) {
           <tr><td style={cell}>발송일</td><td style={cell} colSpan={3}>{dateOf(h.depart_at)}</td></tr>
           <tr><td style={cell}>발송처</td><td style={cell} colSpan={3}>{from}</td></tr>
           <tr><td style={cell}>도착처</td><td style={cell} colSpan={3}>{to}</td></tr>
+          <tr><td style={cell}>차량번호</td><td style={cell} colSpan={3}>{h.vehicle_no || ""}</td></tr>
           <tr><td style={cellH}>유형</td><td style={cellH}>수량</td><td style={cellH}>유형</td><td style={cellH}>수량</td></tr>
           {Array.from({ length: Math.ceil(rows.length / 2) }).map((_, i) => (
             <tr key={i}>
@@ -965,7 +966,7 @@ function PhotoCapture({ photos = [], setPhotos, label = "현장 사진", hint = 
   };
   return (
     <div>
-      <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{label} <span style={{ color: C.hint, fontSize: 11 }}>· {hint}</span></div>
+      <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{label} <span style={{ color: C.hint, fontSize: 11 }}>· {hint}</span>{(photos || []).length > 0 && <span style={{ color: color, fontSize: 11, fontWeight: 600 }}> · 촬영 {photos.length}장</span>}</div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 4 }}>
         {(photos || []).map((u, i) => (
           <div key={i} style={{ position: "relative" }}>
@@ -989,12 +990,12 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const [qtys, setQtys] = useState({});
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
   const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(myCenters[0] || centers[0]); const [toCenter, setToCenter] = useState(centers.find((c) => c !== (myCenters[0] || centers[0])) || centers[0]);
-  const [photos, setPhotos] = useState([]);
+  const [photos, setPhotos] = useState([]); const [vehicleNo, setVehicleNo] = useState("");
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
   const isRet = dir === "반납"; const isMv = dir === "이동";
   const total = qtysTotal(qtys);
-  const reset = () => { setQtys({}); setNote(""); setDate(today); setPhotos([]); };
+  const reset = () => { setQtys({}); setNote(""); setDate(today); setPhotos([]); setVehicleNo(""); };
   // 출고/이동은 출발 센터 재고 한도 내. 반납(거래처→센터)은 한도 없음.
   const stockOf = (code) => centerStock(ships, ajReqs, center, code);
   useEffect(() => { setQtys({}); }, [center, dir]);
@@ -1004,7 +1005,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const submit = async () => {
     setBusy(true);
     if (isMv) await onTransfer(center, toCenter, qtysToLines(qtys));
-    else await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos);
+    else await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo);
     setBusy(false); reset();
   };
 
@@ -1078,8 +1079,11 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
 
         {!isMv && (
           <>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>차량번호</div>
+            <input value={vehicleNo} onChange={(e) => setVehicleNo(e.target.value)} placeholder="예: 12가 3456" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }} />
+
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
-            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
             <div style={{ marginBottom: 18 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label={isRet ? "반납 현장 사진" : "출고 현장 사진"} color={themeColor} /></div>
           </>
