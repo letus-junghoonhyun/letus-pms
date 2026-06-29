@@ -962,6 +962,7 @@ async function uploadPhotos(files) {
 function PhotoCapture({ photos = [], setPhotos, label = "현장 사진", hint = "차량 좌/우 + 차량번호", color = C.teal }) {
   const [busy, setBusy] = useState(false);
   const [cam, setCam] = useState(false);
+  const [view, setView] = useState(null);
   const addFiles = async (files) => {
     if (!files.length) return;
     setBusy(true);
@@ -976,11 +977,12 @@ function PhotoCapture({ photos = [], setPhotos, label = "현장 사진", hint = 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
         {(photos || []).map((u, i) => (
           <div key={i} style={{ position: "relative" }}>
-            <img src={u} alt="" style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.border}` }} />
-            <button type="button" onClick={() => setPhotos((photos || []).filter((_, j) => j !== i))} style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: "none", background: C.red, color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: 1 }}>✕</button>
+            <img src={u} alt="" onClick={() => setView(u)} style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.border}`, cursor: "zoom-in" }} />
+            <button type="button" onClick={(e) => { e.stopPropagation(); setPhotos((photos || []).filter((_, j) => j !== i)); }} style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: "none", background: C.red, color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: 1 }}>✕</button>
           </div>
         ))}
       </div>
+      {view && <div onClick={() => setView(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 90, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, cursor: "zoom-out" }}><img src={view} alt="" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} /></div>}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button type="button" onClick={() => setCam(true)} style={{ fontSize: 13, padding: "8px 14px", borderRadius: 8, border: `1px solid ${color}`, background: "#fff", color, cursor: "pointer" }}>📷 촬영</button>
         <label style={{ fontSize: 13, padding: "8px 14px", borderRadius: 8, border: `1px dashed ${C.border}`, background: "#fff", color: C.sub, cursor: "pointer" }}>
@@ -996,7 +998,7 @@ function PhotoCapture({ photos = [], setPhotos, label = "현장 사진", hint = 
 // 라이브 카메라 — 촬영 버튼으로 연속 촬영, 종료까지 계속 업로드
 function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
   const videoRef = useRef(null); const streamRef = useRef(null);
-  const [err, setErr] = useState(""); const [shot, setShot] = useState(0); const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
   useEffect(() => {
     let active = true;
     navigator.mediaDevices?.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false })
@@ -1009,7 +1011,7 @@ function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
     const cv = document.createElement("canvas"); cv.width = v.videoWidth; cv.height = v.videoHeight;
     cv.getContext("2d").drawImage(v, 0, 0);
     setBusy(true);
-    await new Promise((res) => cv.toBlob(async (b) => { if (b) { await onShot(b); setShot((c) => c + 1); } res(); }, "image/jpeg", 0.85));
+    await new Promise((res) => cv.toBlob(async (b) => { if (b) { await onShot(b); } res(); }, "image/jpeg", 0.85));
     setBusy(false);
   };
   return (
@@ -1019,7 +1021,7 @@ function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
           : <video ref={videoRef} autoPlay playsInline muted style={{ maxWidth: "100%", maxHeight: "100%" }} />}
       </div>
       <div style={{ padding: "16px 20px", background: "#111", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <span style={{ color: "#fff", fontSize: 13 }}>촬영 {count + shot}장</span>
+        <span style={{ color: "#fff", fontSize: 13 }}>촬영 {count}장</span>
         <button type="button" onClick={snap} disabled={!!err || busy} style={{ width: 64, height: 64, borderRadius: 32, border: "4px solid #fff", background: busy ? "#888" : color, cursor: "pointer", fontSize: 22 }}>📷</button>
         <button type="button" onClick={onClose} style={{ fontSize: 14, padding: "10px 16px", borderRadius: 8, border: "1px solid #555", background: "transparent", color: "#fff", cursor: "pointer" }}>촬영 종료</button>
       </div>
