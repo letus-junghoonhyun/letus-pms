@@ -35,31 +35,31 @@ const ST = {
 };
 const Pill = ({ status }) => {
   const s = ST[status] ?? { bg: C.page, fg: C.sub };
-  return <span style={{ fontSize: 11, padding: "2px 9px", borderRadius: 20, background: s.bg, color: s.fg, whiteSpace: "nowrap" }}>{status}</span>;
+  return <span style={{ fontSize: 12.5, padding: "3px 10px", borderRadius: 20, background: s.bg, color: s.fg, whiteSpace: "nowrap" }}>{status}</span>;
 };
 const Metric = ({ label, value, unit, tone }) => {
   const m = { danger: { bg: C.redBg, fg: C.red }, warn: { bg: C.amberBg, fg: C.amber }, info: { bg: C.blueBg, fg: C.blue }, success: { bg: C.greenBg, fg: C.green }, plain: { bg: "#eef0f3", fg: C.text } }[tone] ?? {};
   return (
-    <div style={{ background: m.bg, borderRadius: 10, padding: "12px 14px", flex: 1, minWidth: 0 }}>
-      <div style={{ fontSize: 12, color: tone === "plain" ? C.sub : m.fg }}>{label}</div>
-      <div style={{ fontSize: 21, fontWeight: 500, marginTop: 2, color: m.fg }}>{value}{unit && <span style={{ fontSize: 12, color: tone === "plain" ? C.hint : m.fg }}> {unit}</span>}</div>
+    <div style={{ background: m.bg, borderRadius: 10, padding: "13px 16px", flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 13.5, color: tone === "plain" ? C.sub : m.fg }}>{label}</div>
+      <div style={{ fontSize: 25, fontWeight: 600, marginTop: 3, color: m.fg }}>{value}{unit && <span style={{ fontSize: 13, color: tone === "plain" ? C.hint : m.fg }}> {unit}</span>}</div>
     </div>
   );
 };
 const Head = ({ title, sub, action }) => (
   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
-    <div><h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>{title}</h2><p style={{ margin: "2px 0 0", fontSize: 12, color: C.hint }}>{sub}</p></div>
+    <div><h2 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>{title}</h2><p style={{ margin: "3px 0 0", fontSize: 13, color: C.hint }}>{sub}</p></div>
     {action}
   </div>
 );
-const Note = ({ children }) => <p style={{ fontSize: 11, color: C.hint, marginTop: 14, lineHeight: 1.6 }}>{children}</p>;
+const Note = ({ children }) => <p style={{ fontSize: 12.5, color: C.hint, marginTop: 14, lineHeight: 1.6 }}>{children}</p>;
 const tbl = { width: "100%", borderCollapse: "collapse" };
-const btnTeal = { fontSize: 12, padding: "8px 14px", borderRadius: 8, border: "none", background: C.teal, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 };
-const btnTealSm = { fontSize: 11, padding: "5px 10px", borderRadius: 7, border: "none", background: C.teal, color: "#fff", cursor: "pointer" };
-const btnGhost = { fontSize: 11, padding: "5px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", color: C.text };
-const btnGreen = { fontSize: 12, padding: "8px 14px", borderRadius: 8, border: "none", background: C.green, color: "#fff", cursor: "pointer" };
-const Td = ({ children, r, b, c }) => <td style={{ padding: "11px 6px", fontSize: 12, textAlign: r ? "right" : "left", fontWeight: b ? 600 : 400, color: c ?? C.text }}>{children}</td>;
-const Th = ({ children, r }) => <th style={{ fontSize: 11, color: C.hint, fontWeight: 400, textAlign: r ? "right" : "left", padding: "9px 6px" }}>{children}</th>;
+const btnTeal = { fontSize: 13.5, padding: "9px 15px", borderRadius: 8, border: "none", background: C.teal, color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 };
+const btnTealSm = { fontSize: 12.5, padding: "6px 12px", borderRadius: 7, border: "none", background: C.teal, color: "#fff", cursor: "pointer" };
+const btnGhost = { fontSize: 12.5, padding: "6px 12px", borderRadius: 7, border: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", color: C.text };
+const btnGreen = { fontSize: 13.5, padding: "9px 15px", borderRadius: 8, border: "none", background: C.green, color: "#fff", cursor: "pointer" };
+const Td = ({ children, r, b, c }) => <td style={{ padding: "12px 7px", fontSize: 13.5, textAlign: r ? "right" : "left", fontWeight: b ? 600 : 400, color: c ?? C.text }}>{children}</td>;
+const Th = ({ children, r }) => <th style={{ fontSize: 12.5, color: C.hint, fontWeight: 400, textAlign: r ? "right" : "left", padding: "10px 7px" }}>{children}</th>;
 const TYPE_BADGE = { 시공팀: { bg: C.blueBg, fg: C.blue }, 센터: { bg: C.amberBg, fg: C.amber }, 업체: { bg: "#eef0f3", fg: C.sub } };
 const TypeBadge = ({ t }) => { const b = TYPE_BADGE[t] || TYPE_BADGE.업체; return <span style={{ fontSize: 11, color: b.fg, background: b.bg, padding: "2px 8px", borderRadius: 20 }}>{t}</span>; };
 
@@ -543,7 +543,7 @@ function Shell({ session, initialConfirm }) {
     } catch (e) { alert("출고 취소 실패: " + (e.message || e)); }
   };
 
-  const setStatus = async (s, newStatus, mvType, inPhotos, inSign) => {
+  const setStatus = async (s, newStatus, mvType, inPhotos, inSign, receivedQty) => {
     try {
       const patch = { status: newStatus };
       if (newStatus === "입고확인") {
@@ -551,6 +551,7 @@ function Shell({ session, initialConfirm }) {
         patch.receiver_name = me.name || (session.user.email || "").split("@")[0] || null; // 입고확인한 담당자 자동 기록
         patch.receiver_phone = me.phone || null;
         if (inSign) patch.in_sign_url = inSign;
+        if (receivedQty != null) { patch.received_qty = receivedQty; patch.discrepancy = receivedQty !== s.qty; }
       }
       if (inPhotos && inPhotos.length) patch.in_photos = inPhotos;
       const { error } = await supabase.from("shipment").update(patch).eq("id", s.id);
@@ -578,6 +579,13 @@ function Shell({ session, initialConfirm }) {
       await loadAll();
       alert("초기화 완료 — 출고/반납 데이터가 모두 삭제됐어요.");
     } catch (e) { alert("초기화 실패: " + (e.message || e)); }
+  };
+
+  // 수량상이 확인(해결) — 보낸 쪽이 확인하면 플래그 해제
+  const resolveDiscrepancy = async (s) => {
+    if (!window.confirm(`${s.to_partner_name} ${s.pallet_code} 수량상이(보낸 ${s.qty} / 받은 ${s.received_qty})를 확인 처리할까요?`)) return;
+    try { const { error } = await supabase.from("shipment").update({ discrepancy: false }).eq("id", s.id); if (error) throw error; await loadAll(); }
+    catch (e) { alert("처리 실패: " + (e.message || e)); }
   };
 
   const addPartner = async (name, type) => {
@@ -722,7 +730,7 @@ function Shell({ session, initialConfirm }) {
           <QuickConfirm rows={ships.filter((s) => (s.batch_id || s.id) === focusBatch)} setStatus={setStatus} onClose={() => { setFocusBatch(null); window.history.replaceState({}, "", window.location.pathname); }} />
         ) : (
           <>
-            {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply }} />}
+            {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply, resolveDiscrepancy }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} setNav={setNav} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps, ajReqs, confirmAjSupply }} />}
@@ -758,7 +766,7 @@ function Tabs({ tabs, tab, setTab, count }) {
   );
 }
 
-function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment, resetData, confirmAjSupply }) {
+function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, palletTypes = [], editShipment, cancelShipment, resetData, confirmAjSupply, resolveDiscrepancy }) {
   const [tab, setTab] = useState("전체");
   const [edit, setEdit] = useState(null);
   const [slipBatch, setSlipBatch] = useState(null);
@@ -768,6 +776,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
   const today = ships.filter((s) => (s.depart_at || "").slice(0, 10) === todayStr).reduce((a, s) => a + s.qty, 0);
   const unrec = ships.filter(isUnrecovered).reduce((a, s) => a + s.qty, 0);
   const waiting = ships.filter((s) => s.status === "출고완료").length;
+  const discCount = ships.filter((s) => s.discrepancy).length;
   // 날짜 범위 필터(출고/반납일 기준)
   const inRange = (s) => { const d = (s.depart_at || "").slice(0, 10); if (from && d < from) return false; if (to && d > to) return false; return true; };
   const byTab = (s) => tab === "전체" ? true : tab === "미회수" ? isUnrecovered(s) : s.status === tab;
@@ -800,7 +809,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
         <Metric label="금일 출고" value={today} unit="장" tone="plain" />
         <Metric label="미회수 7일↑" value={unrec} unit="장" tone="danger" />
         <Metric label="입고확인 대기" value={waiting} unit="건" tone="warn" />
-        <Metric label="총 건수" value={ships.length} unit="건" tone="plain" />
+        <Metric label="수량상이" value={discCount} unit="건" tone={discCount ? "danger" : "plain"} />
       </div>
       {/* 날짜 조회 */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
@@ -854,7 +863,9 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                       {/* 입고확인: 협력업체는 본인 정방향만, 내부는 전체(반납 입고확인 포함). 회수·반납은 회수 관리에서 처리 */}
                       {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setNav("확인")} style={btnGhost} title="입고확인 화면에서 사진·서명 후 확인">입고확인</button>}
                       {s.status === "출고완료" && caps.confirmOwn && isReturn(s) && <span style={{ color: C.hint, fontSize: 11 }}>센터 확인 대기</span>}
-                      {s.status === "입고확인" && <span style={{ color: C.green, fontSize: 11 }}>✓ 완료</span>}
+                      {s.status === "입고확인" && !s.discrepancy && <span style={{ color: C.green, fontSize: 12 }}>✓ 완료</span>}
+                      {s.discrepancy && <span style={{ fontSize: 11, color: C.amber, background: C.amberBg, padding: "2px 8px", borderRadius: 10 }}>⚠ 수량상이 보낸{s.qty}/받{s.received_qty}</span>}
+                      {s.discrepancy && caps.operate && <button onClick={() => resolveDiscrepancy(s)} style={btnTealSm}>확인</button>}
                       {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={{ ...btnGhost, color: C.sub }} title="전표 출력">🖨</button>}
                       {caps.operate && s.status === "출고완료" && <button onClick={() => setEdit(s)} style={{ ...btnGhost, color: C.sub }} title="수정·취소">⋯</button>}
                     </div>
@@ -902,7 +913,9 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
                 {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setNav("확인")} style={btnTealSm}>입고확인</button>}
                 {s.status === "출고완료" && caps.confirmOwn && isReturn(s) && <span style={{ color: C.hint, fontSize: 12 }}>센터 확인 대기</span>}
-                {s.status === "입고확인" && <span style={{ color: C.green, fontSize: 12 }}>✓ 완료</span>}
+                {s.status === "입고확인" && !s.discrepancy && <span style={{ color: C.green, fontSize: 12 }}>✓ 완료</span>}
+                {s.discrepancy && <span style={{ fontSize: 12, color: C.amber, background: C.amberBg, padding: "3px 9px", borderRadius: 10 }}>⚠ 수량상이 보낸{s.qty}/받{s.received_qty}</span>}
+                {s.discrepancy && caps.operate && <button onClick={() => resolveDiscrepancy(s)} style={btnTealSm}>확인</button>}
                 {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={btnGhost}>🖨 전표</button>}
                 {caps.operate && s.status === "출고완료" && <button onClick={() => setEdit(s)} style={btnGhost}>수정·취소</button>}
               </div>
@@ -1480,21 +1493,31 @@ function QuickConfirm({ rows, setStatus, onClose }) {
 function ConfirmCard({ s, setStatus }) {
   const [photos, setPhotos] = useState([]);
   const [sign, setSign] = useState(null);
+  const [recv, setRecv] = useState(s.qty);
+  const mismatch = Number(recv) !== s.qty;
   const confirm = () => {
     if (!photos.length) { alert("입고 사진을 촬영/첨부한 후 확인해주세요."); return; }
     if (!sign) { alert("인수자 서명을 완료한 후 확인해주세요. (사인 후 손을 떼면 자동 저장돼요)"); return; }
-    setStatus(s, "입고확인", "입고확인", photos, sign);
+    if (mismatch && !window.confirm(`보낸 수량 ${s.qty}장과 받은 수량 ${recv}장이 달라요.\n수량상이로 등록하고 보낸 쪽에 확인 요청할까요?`)) return;
+    setStatus(s, "입고확인", "입고확인", photos, sign, Number(recv));
   };
   return (
-    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
+    <div style={{ background: C.card, border: `1px solid ${mismatch ? C.amber : C.border}`, borderRadius: 12, padding: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{fromOf(s)} → {toOf(s)}</div>
-          <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.vehicle_no ? ` · 🚚${s.vehicle_no}` : ""}{s.note ? ` · ${s.note}` : ""}</div>
+          <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{fromOf(s)} → {toOf(s)}</div>
+          <div style={{ fontSize: 13, color: C.sub }}>{s.slip_no} · {s.pallet_code} · 보낸 {s.qty}장{s.vehicle_no ? ` · 🚚${s.vehicle_no}` : ""}{s.note ? ` · ${s.note}` : ""}</div>
         </div>
         <button onClick={confirm} style={btnTeal}>✓ 입고확인</button>
       </div>
       <div style={{ display: "grid", gap: 14, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+        <div>
+          <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>실제 받은 수량 <span style={{ color: C.hint, fontSize: 11 }}>· 보낸 {s.qty}장</span></div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <input type="number" value={recv} onChange={(e) => setRecv(Math.max(0, parseInt(e.target.value) || 0))} style={{ width: 110, boxSizing: "border-box", fontSize: 16, fontWeight: 600, padding: "9px 12px", border: `1px solid ${mismatch ? C.amber : C.border}`, borderRadius: 8, textAlign: "center" }} />
+            {mismatch && <span style={{ fontSize: 12, color: C.amber, fontWeight: 600 }}>⚠ 수량상이 ({recv - s.qty > 0 ? "+" : ""}{recv - s.qty}) — 보낸 쪽에 확인 요청돼요</span>}
+          </div>
+        </div>
         <PhotoCapture photos={photos} setPhotos={setPhotos} label="입고 사진 (필수)" hint="받은 파렛트 / 차량" />
         <SignaturePad onSave={setSign} label="인수자 서명 (필수)" />
       </div>
