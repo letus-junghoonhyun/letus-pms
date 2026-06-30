@@ -813,40 +813,52 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
       </div>
       <Note>날짜 범위로 조회할 수 있어요. 출고처→입고처로 흐름이, 출고일시·입고확인 시각이 함께 보입니다. <b>⋯</b> 버튼으로 출고완료 건을 수정·취소할 수 있어요(이력 보존).</Note>
       {edit && <EditShipmentModal s={edit} palletTypes={palletTypes} onClose={() => setEdit(null)} onSave={editShipment} onCancel={cancelShipment} />}
-      {slipBatch && <SlipPrint rows={ships.filter((s) => (s.batch_id || s.id) === slipBatch)} onClose={() => setSlipBatch(null)} />}
+      {slipBatch && <SlipPrint rows={ships.filter((s) => (s.batch_id || s.id) === slipBatch)} palletTypes={palletTypes} onClose={() => setSlipBatch(null)} />}
     </>
   );
 }
 
 // 파렛트 이동전표 출력 (AJ 양식 4분할) — window.print()
-function SlipPrint({ rows, onClose }) {
+function SlipPrint({ rows, onClose, palletTypes = [] }) {
   if (!rows.length) return null;
   const h = rows[0];
-  const dateOf = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${d.getFullYear()}년 ${String(d.getMonth() + 1).padStart(2, "0")}월 ${String(d.getDate()).padStart(2, "0")}일`; };
+  const dateOf = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${String(d.getFullYear()).slice(2)}.${String(d.getMonth() + 1).padStart(2, "0")}.${String(d.getDate()).padStart(2, "0")}`; };
   const from = fromOf(h), to = toOf(h);
+  const usageOf = (code) => palletTypes.find((p) => p.code === code)?.usage || "";
+  const totalQty = rows.reduce((a, r) => a + (r.qty || 0), 0);
   const copies = ["발송처용", "도착처용", "운송회사용", "보관용"];
   const Slip = ({ tag }) => (
-    <div style={{ border: "1.5px solid #000", padding: 10, width: 250, fontSize: 11, color: "#000", fontFamily: "sans-serif" }}>
+    <div style={{ border: "1.5px solid #000", padding: 10, width: 268, fontSize: 11, color: "#000", fontFamily: "sans-serif" }}>
       <div style={{ textAlign: "center", fontWeight: 700, fontSize: 15 }}>파렛트 이동전표</div>
-      <div style={{ textAlign: "center", fontSize: 11, marginBottom: 6 }}>({tag})</div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, margin: "2px 1px 6px" }}>
+        <span>전표 {h.slip_no}</span><span>({tag})</span>
+      </div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
         <tbody>
-          <tr><td style={cell}>전표번호</td><td style={cell} colSpan={3}>{h.slip_no}</td></tr>
-          <tr><td style={cell}>발송일</td><td style={cell} colSpan={3}>{dateOf(h.depart_at)}</td></tr>
-          <tr><td style={cell}>발송처</td><td style={cell} colSpan={3}>{from}</td></tr>
-          <tr><td style={cell}>도착처</td><td style={cell} colSpan={3}>{to}</td></tr>
-          <tr><td style={cell}>차량번호</td><td style={cell} colSpan={3}>{h.vehicle_no || ""}</td></tr>
-          <tr><td style={cellH}>유형</td><td style={cellH}>수량</td><td style={cellH}>유형</td><td style={cellH}>수량</td></tr>
-          {Array.from({ length: Math.ceil(rows.length / 2) }).map((_, i) => (
-            <tr key={i}>
-              <td style={cell}>{rows[i * 2]?.pallet_code || ""}</td><td style={cell}>{rows[i * 2]?.qty ?? ""}</td>
-              <td style={cell}>{rows[i * 2 + 1]?.pallet_code || ""}</td><td style={cell}>{rows[i * 2 + 1]?.qty ?? ""}</td>
-            </tr>
+          <tr><td style={cellH}>발송일</td><td style={cell}>{dateOf(h.depart_at)}</td><td style={cellH}>도착일</td><td style={cell}> </td></tr>
+          <tr><td style={cellH}>발송처</td><td style={cell} colSpan={3}>{from}</td></tr>
+          <tr><td style={cellH}>도착처</td><td style={cell} colSpan={3}>{to}</td></tr>
+          <tr><td style={cellH}>차량/기사</td><td style={cell} colSpan={3}>{h.vehicle_no || ""}{h.vehicle_no ? " / " : ""}</td></tr>
+          <tr><td style={cellH}>유형</td><td style={cellH}>용도</td><td style={cellH} colSpan={2}>수량</td></tr>
+          {rows.map((r, i) => (
+            <tr key={i}><td style={cell}>{r.pallet_code}</td><td style={{ ...cell, fontSize: 10 }}>{usageOf(r.pallet_code)}</td><td style={cell} colSpan={2}>{r.qty}</td></tr>
           ))}
-          <tr><td style={cell}>비고</td><td style={cell} colSpan={3}>{h.note || ""}</td></tr>
-          <tr><td style={cell}>담당자</td><td style={cell} colSpan={3}>{h.operator_name || ""}{h.operator_phone ? ` (${h.operator_phone})` : ""} (인)</td></tr>
+          <tr><td style={cellH} colSpan={2}>합계</td><td style={{ ...cell, fontWeight: 700 }} colSpan={2}>{totalQty} 장</td></tr>
+          <tr><td style={cellH}>상태</td><td style={cell} colSpan={3}>☐ 정상   ☐ 파손   ☐ 수량상이</td></tr>
+          <tr><td style={cellH}>비고</td><td style={cell} colSpan={3}>{h.note || ""}</td></tr>
         </tbody>
       </table>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, marginTop: 4 }}>
+        <tbody>
+          <tr><td style={cellH}>출고확인</td><td style={cellH}>운송(기사)</td><td style={cellH}>인수확인</td></tr>
+          <tr>
+            <td style={{ ...cell, height: 30, verticalAlign: "bottom", fontSize: 9 }}>{h.operator_name || ""} (인)</td>
+            <td style={{ ...cell, height: 30, verticalAlign: "bottom" }}>(인)</td>
+            <td style={{ ...cell, height: 30, verticalAlign: "bottom" }}>(인)</td>
+          </tr>
+        </tbody>
+      </table>
+      {h.operator_phone && <div style={{ fontSize: 9, color: "#444", marginTop: 3 }}>출고담당 연락처: {h.operator_phone}</div>}
     </div>
   );
   return (
@@ -1143,7 +1155,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
         <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : themeColor, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : isRet ? "반납 등록" : isMv ? "센터 이동" : "출고 등록"}</button>
         <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : isMv ? "센터 간 재고를 옮겨요 (출발 −, 도착 +)" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
       </div>
-      {slipRows && <SlipPrint rows={slipRows} onClose={() => { setSlipRows(null); setNav && setNav("현황"); }} />}
+      {slipRows && <SlipPrint rows={slipRows} palletTypes={palletTypes} onClose={() => { setSlipRows(null); setNav && setNav("현황"); }} />}
     </>
   );
 }
