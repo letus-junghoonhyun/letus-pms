@@ -581,11 +581,14 @@ function Shell({ session, initialConfirm }) {
     } catch (e) { alert("초기화 실패: " + (e.message || e)); }
   };
 
-  // 수량상이 확인(해결) — 보낸 쪽이 확인하면 플래그 해제
-  const resolveDiscrepancy = async (s) => {
-    if (!window.confirm(`${s.to_partner_name} ${s.pallet_code} 수량상이(보낸 ${s.qty} / 받은 ${s.received_qty})를 확인 처리할까요?`)) return;
-    try { const { error } = await supabase.from("shipment").update({ discrepancy: false }).eq("id", s.id); if (error) throw error; await loadAll(); }
-    catch (e) { alert("처리 실패: " + (e.message || e)); }
+  // 수량상이 해결 — 협의된 최종 수량으로 확정 + 플래그 해제
+  const resolveDiscrepancy = async (s, finalQty) => {
+    try {
+      const { error } = await supabase.from("shipment").update({ qty: finalQty, received_qty: finalQty, discrepancy: false }).eq("id", s.id);
+      if (error) throw error;
+      await supabase.from("movement").insert({ id: uid(), shipment_id: s.id, type: "조정", source: "앱", pallet_code: s.pallet_code, qty: finalQty, to_partner: s.to_partner, to_partner_name: s.to_partner_name, created_by: session.user.id });
+      await loadAll();
+    } catch (e) { alert("처리 실패: " + (e.message || e)); }
   };
 
   const addPartner = async (name, type) => {
@@ -770,6 +773,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
   const [tab, setTab] = useState("전체");
   const [edit, setEdit] = useState(null);
   const [slipBatch, setSlipBatch] = useState(null);
+  const [disc, setDisc] = useState(null);
   const [from, setFrom] = useState(""); const [to, setTo] = useState("");
   const tabs = ["전체", "출고완료", "입고확인", "미회수"];
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -864,8 +868,8 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                       {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setNav("확인")} style={btnGhost} title="입고확인 화면에서 사진·서명 후 확인">입고확인</button>}
                       {s.status === "출고완료" && caps.confirmOwn && isReturn(s) && <span style={{ color: C.hint, fontSize: 11 }}>센터 확인 대기</span>}
                       {s.status === "입고확인" && !s.discrepancy && <span style={{ color: C.green, fontSize: 12 }}>✓ 완료</span>}
-                      {s.discrepancy && <span style={{ fontSize: 11, color: C.amber, background: C.amberBg, padding: "2px 8px", borderRadius: 10 }}>⚠ 수량상이 보낸{s.qty}/받{s.received_qty}</span>}
-                      {s.discrepancy && caps.operate && <button onClick={() => resolveDiscrepancy(s)} style={btnTealSm}>확인</button>}
+                      {s.discrepancy && <span style={{ fontSize: 11, color: C.amber, background: C.amberBg, padding: "2px 8px", borderRadius: 10 }}>⚠ 출고{s.qty}/입고{s.received_qty}</span>}
+                      {s.discrepancy && caps.operate && <button onClick={() => setDisc(s)} style={btnTealSm}>해결</button>}
                       {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={{ ...btnGhost, color: C.sub }} title="전표 출력">🖨</button>}
                       {caps.operate && s.status === "출고완료" && <button onClick={() => setEdit(s)} style={{ ...btnGhost, color: C.sub }} title="수정·취소">⋯</button>}
                     </div>
@@ -914,8 +918,8 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                 {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setNav("확인")} style={btnTealSm}>입고확인</button>}
                 {s.status === "출고완료" && caps.confirmOwn && isReturn(s) && <span style={{ color: C.hint, fontSize: 12 }}>센터 확인 대기</span>}
                 {s.status === "입고확인" && !s.discrepancy && <span style={{ color: C.green, fontSize: 12 }}>✓ 완료</span>}
-                {s.discrepancy && <span style={{ fontSize: 12, color: C.amber, background: C.amberBg, padding: "3px 9px", borderRadius: 10 }}>⚠ 수량상이 보낸{s.qty}/받{s.received_qty}</span>}
-                {s.discrepancy && caps.operate && <button onClick={() => resolveDiscrepancy(s)} style={btnTealSm}>확인</button>}
+                {s.discrepancy && <span style={{ fontSize: 12, color: C.amber, background: C.amberBg, padding: "3px 9px", borderRadius: 10 }}>⚠ 출고{s.qty}/입고{s.received_qty}</span>}
+                {s.discrepancy && caps.operate && <button onClick={() => setDisc(s)} style={btnTealSm}>해결</button>}
                 {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={btnGhost}>🖨 전표</button>}
                 {caps.operate && s.status === "출고완료" && <button onClick={() => setEdit(s)} style={btnGhost}>수정·취소</button>}
               </div>
@@ -927,7 +931,60 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
       <Note>날짜 범위로 조회할 수 있어요. 출고처→입고처 흐름, 출고·입고 시각이 함께 보입니다.</Note>
       {edit && <EditShipmentModal s={edit} palletTypes={palletTypes} onClose={() => setEdit(null)} onSave={editShipment} onCancel={cancelShipment} />}
       {slipBatch && <SlipPrint rows={ships.filter((s) => (s.batch_id || s.id) === slipBatch)} palletTypes={palletTypes} onClose={() => setSlipBatch(null)} />}
+      {disc && <DiscrepancyModal s={disc} onClose={() => setDisc(null)} onResolve={resolveDiscrepancy} />}
     </>
+  );
+}
+
+// 수량상이 해결 모달 — 사진 비교 + 담당자 연락 + 최종 수량 확정
+function DiscrepancyModal({ s, onClose, onResolve }) {
+  const [busy, setBusy] = useState(false);
+  const [view, setView] = useState(null);
+  const out = s.out_photos || []; const inp = s.in_photos || [];
+  const resolve = async (q) => { setBusy(true); await onResolve(s, q); setBusy(false); onClose(); };
+  const Thumbs = ({ list, label }) => (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>{label} {list.length === 0 && <span style={{ color: C.hint }}>· 없음</span>}</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {list.map((u, i) => <img key={i} src={u} alt="" onClick={() => setView(u)} style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.border}`, cursor: "zoom-in" }} />)}
+      </div>
+    </div>
+  );
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 14, padding: 22, width: "100%", maxWidth: 460, maxHeight: "92vh", overflow: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <h3 style={{ margin: 0, fontSize: 17, fontWeight: 600 }}>수량상이 해결</h3>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, color: C.sub, cursor: "pointer" }}>✕</button>
+        </div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 14 }}>{s.to_partner_name} · {s.slip_no} · {s.pallet_code}</div>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+          <div style={{ flex: 1, background: C.tealBg, borderRadius: 10, padding: "12px 14px", textAlign: "center" }}><div style={{ fontSize: 12, color: C.tealDk }}>출고 수량</div><div style={{ fontSize: 24, fontWeight: 700, color: C.tealDk }}>{s.qty}</div></div>
+          <div style={{ flex: 1, background: C.amberBg, borderRadius: 10, padding: "12px 14px", textAlign: "center" }}><div style={{ fontSize: 12, color: C.amber }}>입고 수량</div><div style={{ fontSize: 24, fontWeight: 700, color: C.amber }}>{s.received_qty}</div></div>
+          <div style={{ flex: 1, background: C.page, borderRadius: 10, padding: "12px 14px", textAlign: "center" }}><div style={{ fontSize: 12, color: C.sub }}>차이</div><div style={{ fontSize: 24, fontWeight: 700, color: C.red }}>{s.received_qty - s.qty > 0 ? "+" : ""}{s.received_qty - s.qty}</div></div>
+        </div>
+
+        {/* 입고담당자 연락 */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", marginBottom: 16 }}>
+          <div style={{ fontSize: 13 }}><b>입고담당</b> {s.receiver_name || "—"}<div style={{ fontSize: 12, color: C.sub }}>{s.receiver_phone || "연락처 없음"}</div></div>
+          {s.receiver_phone && <a href={`tel:${s.receiver_phone}`} style={{ ...btnTeal, textDecoration: "none" }}>📞 연락</a>}
+        </div>
+
+        {/* 사진 비교 */}
+        <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
+          <Thumbs list={out} label="출고 사진" />
+          <Thumbs list={inp} label="입고 사진" />
+        </div>
+
+        <div style={{ fontSize: 12, color: C.hint, marginBottom: 10, lineHeight: 1.6 }}>사진 비교·통화로 협의 후, 맞는 수량으로 확정하세요. 확정 수량이 최종 재고에 반영돼요.</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => resolve(s.qty)} disabled={busy} style={{ flex: 1, fontSize: 14, padding: "12px", borderRadius: 8, border: "none", background: busy ? "#c7cad1" : C.teal, color: "#fff", cursor: "pointer" }}>출고 {s.qty}장으로 확정</button>
+          <button onClick={() => resolve(s.received_qty)} disabled={busy} style={{ flex: 1, fontSize: 14, padding: "12px", borderRadius: 8, border: "none", background: busy ? "#c7cad1" : C.amber, color: "#fff", cursor: "pointer" }}>입고 {s.received_qty}장으로 확정</button>
+        </div>
+      </div>
+      {view && <div onClick={(e) => { e.stopPropagation(); setView(null); }} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, cursor: "zoom-out" }}><img src={view} alt="" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} /></div>}
+    </div>
   );
 }
 
