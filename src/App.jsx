@@ -456,7 +456,7 @@ function Shell({ session, initialConfirm }) {
     createAjRequest({ type: "회수", lines: [{ pallet, qty }], partner, note: "회수관리:AJ회수" });
 
   // 센터 간 재고 이동 (출발센터 − / 도착센터 +)
-  const transferCenters = async (fromC, toC, lines, photos = [], vehicleNo = null, note = null) => {
+  const transferCenters = async (fromC, toC, lines, photos = [], vehicleNo = null, note = null, outSign = null) => {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     if (fromC === toC) { alert("출발 센터와 도착 센터가 같아요."); return; }
@@ -469,7 +469,7 @@ function Shell({ session, initialConfirm }) {
       for (const l of valid) {
         const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
         if (e1) throw e1;
-        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, batch_id: batchId, out_photos: photos.length ? photos : null, vehicle_no: vehicleNo || null, note: note || null, operator_name: me.name || null, operator_phone: me.phone || null, created_by: session.user.id });
+        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, batch_id: batchId, out_photos: photos.length ? photos : null, vehicle_no: vehicleNo || null, note: note || null, operator_name: me.name || null, operator_phone: me.phone || null, out_sign_url: outSign || null, created_by: session.user.id });
       }
       const { error: e2 } = await supabase.from("shipment").insert(rows);
       if (e2) throw e2;
@@ -1131,7 +1131,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const canSubmit = total > 0 && !busy && (isMv ? center !== toCenter : !!sel);
   const submit = async () => {
     setBusy(true);
-    const rows = isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note)
+    const rows = isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note, outSign)
       : await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo, outSign);
     setBusy(false); reset();
     if (rows && rows.length) setSlipRows(rows); // 등록 직후 전표 바로 출력
@@ -1213,7 +1213,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
 
         <div style={{ marginBottom: 18 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label={isMv ? "센터이동 현장 사진" : isRet ? "반납 현장 사진" : "출고 현장 사진"} color={themeColor} /></div>
 
-        {!isMv && <div style={{ marginBottom: 18 }}><SignaturePad onSave={setOutSign} label={isRet ? "반납자 서명" : "출고자 서명"} color={themeColor} /></div>}
+        <div style={{ marginBottom: 18 }}><SignaturePad onSave={setOutSign} label={isMv ? "출고 담당 서명" : isRet ? "반납자 서명" : "출고자 서명"} color={themeColor} /></div>
 
         <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : themeColor, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : isRet ? "반납 등록" : isMv ? "센터 이동" : "출고 등록"}</button>
         <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : isMv ? "센터 간 재고를 옮겨요 (출발 −, 도착 +)" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
