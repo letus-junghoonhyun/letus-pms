@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import * as XLSX from "xlsx";
 import QRCode from "qrcode";
+import jsQR from "jsqr";
 import { supabase } from "./supabase.js";
 
 const C = {
@@ -256,6 +257,7 @@ const Splash = ({ text }) => (
 function Shell({ session, initialConfirm }) {
   const [nav, setNav] = useState("현황");
   const [focusBatch, setFocusBatch] = useState(initialConfirm || null);
+  const [scanOpen, setScanOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [palletTypes, setPalletTypes] = useState([]);
@@ -655,6 +657,7 @@ function Shell({ session, initialConfirm }) {
           const on = nav === it.key;
           return <button key={it.key} onClick={() => setNav(it.key)} style={{ display: "block", width: "100%", padding: "9px 12px", marginBottom: 3, borderRadius: 8, border: "none", cursor: "pointer", textAlign: "left", fontSize: 13, background: on ? C.dark2 : "transparent", color: on ? "#fff" : C.side }}>{it.label}</button>;
         })}
+        <button onClick={() => setScanOpen(true)} style={{ display: "block", width: "100%", padding: "9px 12px", marginTop: 8, borderRadius: 8, border: `1px solid ${C.teal}`, cursor: "pointer", textAlign: "left", fontSize: 13, background: "transparent", color: C.teal }}>📷 QR 스캔</button>
         <div style={{ marginTop: 18, padding: "0 8px" }}>
           <button onClick={() => setNav("설정")} style={{ display: "block", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: 8 }}>
             <div style={{ color: "#6b7494", fontSize: 11 }}>{session.user.email}</div>
@@ -690,11 +693,14 @@ function Shell({ session, initialConfirm }) {
 
       {/* 모바일 하단 탭바 */}
       <nav className="lp-bottom" style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: C.dark, display: "none", justifyContent: "space-around", padding: "8px 4px", zIndex: 10 }}>
-        {items.slice(0, 5).map((it) => {
+        {items.slice(0, 4).map((it) => {
           const on = nav === it.key;
           return <button key={it.key} onClick={() => setNav(it.key)} style={{ background: "none", border: "none", color: on ? C.teal : C.side, fontSize: 11, cursor: "pointer", padding: "2px 6px" }}>{it.label}</button>;
         })}
+        <button onClick={() => setScanOpen(true)} style={{ background: "none", border: "none", color: C.teal, fontSize: 11, cursor: "pointer", padding: "2px 6px" }}>📷 스캔</button>
       </nav>
+
+      {scanOpen && <QrScanner onResult={(b) => { setScanOpen(false); setFocusBatch(b); }} onClose={() => setScanOpen(false)} />}
 
       <style>{`
         @media (max-width: 720px) {
@@ -768,7 +774,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
         {(from || to) && <button onClick={() => { setFrom(""); setTo(""); }} style={{ ...btnGhost, color: C.sub }}>전체</button>}
       </div>
       <Tabs tabs={tabs} tab={tab} setTab={setTab} count={cnt} />
-      <div style={{ overflowX: "auto" }}>
+      <div className="lp-table" style={{ overflowX: "auto" }}>
         <table style={tbl}>
           <thead><tr><Th>방향</Th><Th>상태</Th><Th>전표</Th><Th>유형</Th><Th r>수량</Th><Th>출고처</Th><Th>입고처</Th><Th>출고일시</Th><Th>입고확인</Th><Th>경과</Th><Th>조치</Th></tr></thead>
           <tbody>
@@ -822,7 +828,52 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
           </tbody>
         </table>
       </div>
-      <Note>날짜 범위로 조회할 수 있어요. 출고처→입고처로 흐름이, 출고일시·입고확인 시각이 함께 보입니다. <b>⋯</b> 버튼으로 출고완료 건을 수정·취소할 수 있어요(이력 보존).</Note>
+
+      {/* 모바일 카드 뷰 */}
+      <div className="lp-cards" style={{ display: "none", gap: 10 }}>
+        {filtered.length === 0 && <div style={{ padding: 20, fontSize: 13, color: C.hint, textAlign: "center" }}>해당 조건의 건이 없어요.</div>}
+        {filtered.map((s) => {
+          if (s._aj) {
+            const isRec = s.ajType === "회수"; const st = s.status;
+            const label = st === "완료" ? "AJ완료" : st === "발송" ? "발송됨" : "AJ요청";
+            const sty = st === "완료" ? { bg: C.greenBg, fg: C.green } : st === "발송" ? { bg: C.blueBg, fg: C.blue } : { bg: C.amberBg, fg: C.amber };
+            return (
+              <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "2px 7px", borderRadius: 10 }}>{isRec ? "AJ회수" : "AJ공급"}</span>
+                    <span style={{ fontSize: 11, padding: "2px 9px", borderRadius: 20, background: sty.bg, color: sty.fg }}>{label}</span>
+                  </div>
+                  {st === "발송" && !isRec && caps.aj && <button onClick={() => confirmAjSupply(s._raw)} style={btnTealSm}>입고확인</button>}
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 2 }}>{s.from} → {s.to}</div>
+                <div style={{ fontSize: 13, color: C.sub }}>{s.pallet_code} · {s.qty}장 · {fmtDT(s.depart_at)}</div>
+              </div>
+            );
+          }
+          const danger = isUnrecovered(s); const d = daysSince(s.depart_at);
+          return (
+            <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}><DirBadge s={s} /><Pill status={danger ? "미회수" : s.status} /></div>
+                <span style={{ fontSize: 11, color: C.hint }}>{s.slip_no}</span>
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 2 }}>{fromOf(s)} → {toOf(s)}</div>
+              <div style={{ fontSize: 14, marginBottom: 2 }}><b>{s.pallet_code}</b> · {s.qty}장</div>
+              <div style={{ fontSize: 12, color: C.sub }}>출고 {fmtDT(s.depart_at)}{s.confirmed_at ? ` · 입고 ${fmtDT(s.confirmed_at)}` : ""}{danger ? ` · 경과 ${d}일` : ""}</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setNav("확인")} style={btnTealSm}>입고확인</button>}
+                {s.status === "출고완료" && caps.confirmOwn && isReturn(s) && <span style={{ color: C.hint, fontSize: 12 }}>센터 확인 대기</span>}
+                {s.status === "입고확인" && <span style={{ color: C.green, fontSize: 12 }}>✓ 완료</span>}
+                {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={btnGhost}>🖨 전표</button>}
+                {caps.operate && s.status === "출고완료" && <button onClick={() => setEdit(s)} style={btnGhost}>수정·취소</button>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <style>{`@media (max-width: 720px) { .lp-table { display: none !important; } .lp-cards { display: grid !important; } }`}</style>
+      <Note>날짜 범위로 조회할 수 있어요. 출고처→입고처 흐름, 출고·입고 시각이 함께 보입니다.</Note>
       {edit && <EditShipmentModal s={edit} palletTypes={palletTypes} onClose={() => setEdit(null)} onSave={editShipment} onCancel={cancelShipment} />}
       {slipBatch && <SlipPrint rows={ships.filter((s) => (s.batch_id || s.id) === slipBatch)} palletTypes={palletTypes} onClose={() => setSlipBatch(null)} />}
     </>
@@ -1072,6 +1123,48 @@ function SignaturePad({ onSave, label = "서명", color = C.teal }) {
         style={{ width: "100%", maxWidth: 280, height: 90, border: `1px solid ${done ? color : C.border}`, borderRadius: 8, touchAction: "none", background: "#fff", display: "block" }} />
       <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
         <button type="button" onClick={clear} style={{ ...btnGhost, padding: "6px 12px" }}>지우기</button>
+      </div>
+    </div>
+  );
+}
+
+// 앱 내 QR 스캐너 — 카메라로 QR 인식 → onResult(batchId)
+function QrScanner({ onResult, onClose }) {
+  const videoRef = useRef(null); const streamRef = useRef(null); const raf = useRef(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let active = true; const canvas = document.createElement("canvas");
+    navigator.mediaDevices?.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false })
+      .then((s) => {
+        if (!active) { s.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = s; const v = videoRef.current; if (!v) return; v.srcObject = s; v.play();
+        const tick = () => {
+          if (!active || !v.videoWidth) { raf.current = requestAnimationFrame(tick); return; }
+          canvas.width = v.videoWidth; canvas.height = v.videoHeight;
+          const ctx = canvas.getContext("2d"); ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+          const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = jsQR(img.data, img.width, img.height);
+          if (code && code.data) {
+            const m = code.data.match(/confirm=([\w-]+)/);
+            if (m) { active = false; onResult(m[1]); return; }
+          }
+          raf.current = requestAnimationFrame(tick);
+        };
+        raf.current = requestAnimationFrame(tick);
+      })
+      .catch((e) => setErr("카메라를 열 수 없어요: " + (e.message || e)));
+    return () => { active = false; if (raf.current) cancelAnimationFrame(raf.current); if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop()); };
+  }, []); // eslint-disable-line
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 85, display: "flex", flexDirection: "column" }}>
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
+        {err ? <div style={{ color: "#fff", fontSize: 14, padding: 24, textAlign: "center" }}>{err}</div>
+          : <><video ref={videoRef} autoPlay playsInline muted style={{ maxWidth: "100%", maxHeight: "100%" }} />
+            <div style={{ position: "absolute", width: 220, height: 220, border: "3px solid #1D9E75", borderRadius: 16, boxShadow: "0 0 0 9999px rgba(0,0,0,.35)" }} /></>}
+      </div>
+      <div style={{ padding: "16px 20px", background: "#111", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ color: "#fff", fontSize: 13 }}>전표 QR을 사각형 안에 비추세요</span>
+        <button onClick={onClose} style={{ fontSize: 14, padding: "10px 16px", borderRadius: 8, border: "1px solid #555", background: "transparent", color: "#fff", cursor: "pointer" }}>닫기</button>
       </div>
     </div>
   );
