@@ -258,6 +258,21 @@ function Shell({ session, initialConfirm }) {
   const [nav, setNav] = useState("현황");
   const [focusBatch, setFocusBatch] = useState(initialConfirm || null);
   const [scanOpen, setScanOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // 뒤로가기: 오버레이 닫기 → 홈으로 (앱이 바로 종료되지 않게)
+  useEffect(() => {
+    window.history.pushState({ app: true }, "");
+    const onPop = () => {
+      if (scanOpen) { setScanOpen(false); window.history.pushState({ app: true }, ""); return; }
+      if (drawerOpen) { setDrawerOpen(false); window.history.pushState({ app: true }, ""); return; }
+      if (focusBatch) { setFocusBatch(null); window.history.pushState({ app: true }, ""); return; }
+      if (nav !== "현황") { setNav("현황"); window.history.pushState({ app: true }, ""); return; }
+      // 홈에서 아무것도 안 열려 있으면 기본 동작(종료) 허용
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [scanOpen, drawerOpen, focusBatch, nav]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [palletTypes, setPalletTypes] = useState([]);
@@ -667,7 +682,32 @@ function Shell({ session, initialConfirm }) {
         </div>
       </aside>
 
-      <main style={{ flex: 1, minWidth: 0, padding: "20px 18px 80px", overflow: "auto" }}>
+      {/* 모바일 상단바 */}
+      <div className="lp-topbar" style={{ display: "none", position: "fixed", top: 0, left: 0, right: 0, height: 52, background: C.dark, alignItems: "center", justifyContent: "space-between", padding: "0 14px", zIndex: 30 }}>
+        <span style={{ color: "#fff", fontWeight: 600, fontSize: 16 }}>LETUS<span style={{ color: C.teal }}> PMS</span></span>
+        <button onClick={() => setDrawerOpen(true)} aria-label="메뉴" style={{ background: "none", border: "none", color: "#fff", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>☰</button>
+      </div>
+
+      {/* 모바일 드로어 */}
+      {drawerOpen && (
+        <div onClick={() => setDrawerOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", zIndex: 40 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: 0, left: 0, bottom: 0, width: 250, background: C.dark, padding: "16px 12px", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 8px 16px" }}>
+              <span style={{ color: "#fff", fontWeight: 600, fontSize: 15 }}>LETUS<span style={{ color: C.teal }}> PMS</span></span>
+              <button onClick={() => setDrawerOpen(false)} style={{ background: "none", border: "none", color: C.side, fontSize: 20, cursor: "pointer" }}>✕</button>
+            </div>
+            {items.map((it) => { const on = nav === it.key; return <button key={it.key} onClick={() => { setNav(it.key); setDrawerOpen(false); }} style={{ display: "block", width: "100%", padding: "13px 14px", marginBottom: 4, borderRadius: 8, border: "none", cursor: "pointer", textAlign: "left", fontSize: 15, background: on ? C.dark2 : "transparent", color: on ? "#fff" : C.side }}>{it.label}</button>; })}
+            <button onClick={() => { setDrawerOpen(false); setScanOpen(true); }} style={{ display: "block", width: "100%", padding: "13px 14px", marginTop: 8, borderRadius: 8, border: `1px solid ${C.teal}`, cursor: "pointer", textAlign: "left", fontSize: 15, background: "transparent", color: C.teal }}>📷 QR 스캔</button>
+            <div style={{ borderTop: "1px solid #3a4258", marginTop: 14, paddingTop: 14 }}>
+              <div style={{ color: "#6b7494", fontSize: 12, padding: "0 8px 4px" }}>{session.user.email}</div>
+              <div style={{ color: C.teal, fontSize: 12, padding: "0 8px 10px" }}>{role}</div>
+              <button onClick={() => supabase.auth.signOut()} style={{ fontSize: 13, color: C.side, background: "transparent", border: "1px solid #3a4258", borderRadius: 6, padding: "8px 12px", cursor: "pointer", width: "100%", textAlign: "left" }}>로그아웃</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <main className="lp-main" style={{ flex: 1, minWidth: 0, padding: "20px 18px 40px", overflow: "auto" }}>
         {loading ? <Splash text="데이터 불러오는 중…" /> : err ? (
           <div style={{ background: C.redBg, color: C.red, padding: 16, borderRadius: 10, fontSize: 13 }}>
             {err}<br /><br />혹시 supabase.js에 anon key를 안 넣었거나, 쓰기 권한(RLS) 설정이 필요할 수 있어요. 화면을 캡처해서 Claude에게 물어보세요.
@@ -691,21 +731,13 @@ function Shell({ session, initialConfirm }) {
         )}
       </main>
 
-      {/* 모바일 하단 탭바 */}
-      <nav className="lp-bottom" style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: C.dark, display: "none", justifyContent: "space-around", padding: "8px 4px", zIndex: 10 }}>
-        {items.slice(0, 4).map((it) => {
-          const on = nav === it.key;
-          return <button key={it.key} onClick={() => setNav(it.key)} style={{ background: "none", border: "none", color: on ? C.teal : C.side, fontSize: 11, cursor: "pointer", padding: "2px 6px" }}>{it.label}</button>;
-        })}
-        <button onClick={() => setScanOpen(true)} style={{ background: "none", border: "none", color: C.teal, fontSize: 11, cursor: "pointer", padding: "2px 6px" }}>📷 스캔</button>
-      </nav>
-
       {scanOpen && <QrScanner onResult={(b) => { setScanOpen(false); setFocusBatch(b); }} onClose={() => setScanOpen(false)} />}
 
       <style>{`
         @media (max-width: 720px) {
           .lp-side { display: none !important; }
-          .lp-bottom { display: flex !important; }
+          .lp-topbar { display: flex !important; }
+          .lp-main { padding-top: 64px !important; }
         }
       `}</style>
     </div>
