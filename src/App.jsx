@@ -268,7 +268,9 @@ function Shell({ session, initialConfirm }) {
       if (drawerOpen) { setDrawerOpen(false); window.history.pushState({ app: true }, ""); return; }
       if (focusBatch) { setFocusBatch(null); window.history.pushState({ app: true }, ""); return; }
       if (nav !== "현황") { setNav("현황"); window.history.pushState({ app: true }, ""); return; }
-      // 홈에서 아무것도 안 열려 있으면 기본 동작(종료) 허용
+      // 홈: 종료 확인 (예=나가기 / 아니오=머무르기)
+      if (window.confirm("앱을 종료할까요?")) { window.removeEventListener("popstate", onPop); window.history.back(); }
+      else { window.history.pushState({ app: true }, ""); }
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
