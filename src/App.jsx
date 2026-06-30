@@ -841,7 +841,7 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
   const confirmUrl = `${window.location.origin}/?confirm=${h.batch_id || h.id}`;
   const copies = ["발송처용", "도착처용", "운송회사용", "보관용"];
   const Slip = ({ tag }) => (
-    <div style={{ border: "1.5px solid #000", padding: 10, width: 268, fontSize: 11, color: "#000", fontFamily: "sans-serif" }}>
+    <div className="slip-copy" style={{ border: "1.5px solid #000", padding: 10, width: 252, fontSize: 11, color: "#000", fontFamily: "sans-serif", boxSizing: "border-box" }}>
       <div style={{ textAlign: "center", fontWeight: 700, fontSize: 15 }}>파렛트 이동전표</div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, margin: "2px 1px 6px" }}>
         <span>전표 {h.slip_no}</span><span>({tag})</span>
@@ -849,7 +849,7 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
         <tbody>
           <tr><td style={cellH}>발송일</td><td style={cell}>{dateOf(h.depart_at)}</td><td style={cellH}>도착일</td><td style={cell}> </td></tr>
-          <tr><td style={cellH}>발송처</td><td style={cell} colSpan={3}>{from}</td></tr>
+          <tr><td style={cellH}>발송처</td><td style={cell} colSpan={3}>{from}{h.operator_name ? ` · ${h.operator_name}` : ""}</td></tr>
           <tr><td style={cellH}>도착처</td><td style={cell} colSpan={3}>{to}</td></tr>
           <tr><td style={cellH}>차량/기사</td><td style={cell} colSpan={3}>{h.vehicle_no || ""}{h.vehicle_no ? " / " : ""}</td></tr>
           <tr><td style={cellH}>유형</td><td style={cellH}>용도</td><td style={cellH} colSpan={2}>수량</td></tr>
@@ -893,7 +893,16 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
         <div id="slip-print" style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
           {copies.map((t) => <Slip key={t} tag={t} />)}
         </div>
-        <style>{`@media print { body * { visibility: hidden !important; } #slip-print, #slip-print * { visibility: visible !important; } #slip-print { position: absolute; left: 0; top: 0; } .no-print { display: none !important; } }`}</style>
+        <style>{`
+          @page { size: A4 landscape; margin: 6mm; }
+          @media print {
+            body * { visibility: hidden !important; }
+            #slip-print, #slip-print * { visibility: visible !important; }
+            #slip-print { position: absolute; left: 0; top: 0; width: 100%; display: flex !important; flex-wrap: nowrap !important; gap: 3mm !important; justify-content: space-between !important; }
+            #slip-print .slip-copy { flex: 1 1 0 !important; width: auto !important; min-width: 0 !important; }
+            .no-print { display: none !important; }
+          }
+        `}</style>
       </div>
     </div>
   );
