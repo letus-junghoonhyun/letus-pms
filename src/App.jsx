@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import * as XLSX from "xlsx";
 import QRCode from "qrcode";
 import { supabase } from "./supabase.js";
@@ -525,6 +526,7 @@ function Shell({ session, initialConfirm }) {
       if (newStatus === "입고확인") {
         if (!s.confirmed_at) patch.confirmed_at = new Date().toISOString();
         patch.receiver_name = me.name || null;       // 입고확인한 담당자 자동 기록
+        patch.receiver_phone = me.phone || null;
         if (inSign) patch.in_sign_url = inSign;
       }
       if (inPhotos && inPhotos.length) patch.in_photos = inPhotos;
@@ -853,7 +855,7 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
         <tbody>
           <tr><td style={cellH}>발송일</td><td style={cell}>{dateOf(h.depart_at)}</td><td style={cellH}>도착일</td><td style={cell}> </td></tr>
-          <tr><td style={cellH}>발송처</td><td style={cell} colSpan={3}>{from}{h.operator_name ? ` · ${h.operator_name}` : ""}</td></tr>
+          <tr><td style={cellH}>발송처</td><td style={cell} colSpan={3}>{from}</td></tr>
           <tr><td style={cellH}>도착처</td><td style={cell} colSpan={3}>{to}</td></tr>
           <tr><td style={cellH}>차량/기사</td><td style={cell} colSpan={3}>{h.vehicle_no || ""}{h.vehicle_no ? " / " : ""}</td></tr>
           <tr><td style={cellH}>유형</td><td style={cellH}>용도</td><td style={cellH} colSpan={2}>수량</td></tr>
@@ -869,9 +871,9 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
         <tbody>
           <tr><td style={cellH}>출고확인</td><td style={cellH}>운송(기사)</td><td style={cellH}>인수확인</td></tr>
           <tr>
-            <td style={{ ...cell, height: 38, verticalAlign: "bottom", fontSize: 9, position: "relative" }}>{h.out_sign_url && <img src={h.out_sign_url} alt="" style={{ position: "absolute", top: 2, left: "50%", transform: "translateX(-50%)", height: 24 }} />}{h.operator_name || ""}</td>
-            <td style={{ ...cell, height: 38, verticalAlign: "bottom" }}>(인)</td>
-            <td style={{ ...cell, height: 38, verticalAlign: "bottom", fontSize: 9, position: "relative" }}>{h.in_sign_url && <img src={h.in_sign_url} alt="" style={{ position: "absolute", top: 2, left: "50%", transform: "translateX(-50%)", height: 24 }} />}{h.receiver_name || ""}</td>
+            <td style={{ ...cell, height: 42, verticalAlign: "bottom", fontSize: 8, position: "relative" }}>{h.out_sign_url && <img src={h.out_sign_url} alt="" style={{ position: "absolute", top: 2, left: "50%", transform: "translateX(-50%)", height: 22 }} />}{h.operator_name || ""}{h.operator_phone ? <><br />{h.operator_phone}</> : ""}</td>
+            <td style={{ ...cell, height: 42, verticalAlign: "bottom" }}>(인)</td>
+            <td style={{ ...cell, height: 42, verticalAlign: "bottom", fontSize: 8, position: "relative" }}>{h.in_sign_url && <img src={h.in_sign_url} alt="" style={{ position: "absolute", top: 2, left: "50%", transform: "translateX(-50%)", height: 22 }} />}{h.receiver_name || ""}{h.receiver_phone ? <><br />{h.receiver_phone}</> : ""}</td>
           </tr>
         </tbody>
       </table>
@@ -884,8 +886,8 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
       </div>
     </div>
   );
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16, overflow: "auto" }}>
+  return createPortal(
+    <div className="slip-modal" onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16, overflow: "auto" }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, padding: 20, maxWidth: "95vw", maxHeight: "92vh", overflow: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }} className="no-print">
           <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>파렛트 이동전표</h3>
@@ -898,18 +900,18 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
           {copies.map((t) => <Slip key={t} tag={t} />)}
         </div>
         <style>{`
-          @page { size: A4 landscape; margin: 6mm; }
+          @page { size: A4 landscape; margin: 5mm; }
           @media print {
-            body * { visibility: hidden !important; }
-            #slip-print, #slip-print * { visibility: visible !important; }
-            #slip-print { position: absolute; left: 0; top: 0; width: 100%; display: flex !important; flex-wrap: nowrap !important; gap: 3mm !important; justify-content: space-between !important; }
-            #slip-print .slip-copy { flex: 1 1 0 !important; width: auto !important; min-width: 0 !important; }
-            .no-print { display: none !important; }
+            #root { display: none !important; }
+            .slip-modal { position: static !important; background: #fff !important; padding: 0 !important; display: block !important; overflow: visible !important; }
+            .slip-modal > div { max-width: none !important; max-height: none !important; padding: 0 !important; border-radius: 0 !important; overflow: visible !important; }
+            .slip-modal .no-print { display: none !important; }
+            #slip-print { display: flex !important; flex-wrap: nowrap !important; gap: 2mm !important; width: 100%; justify-content: space-between !important; }
+            #slip-print .slip-copy { width: 70mm !important; font-size: 9px !important; padding: 6px !important; }
           }
         `}</style>
       </div>
-    </div>
-  );
+    </div>, document.body);
 }
 const cell = { border: "1px solid #000", padding: "3px 5px", textAlign: "center" };
 const cellH = { border: "1px solid #000", padding: "3px 5px", textAlign: "center", fontWeight: 700, background: "#f0f0f0" };
