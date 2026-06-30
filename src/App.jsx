@@ -380,7 +380,7 @@ function Shell({ session, initialConfirm }) {
           id: uid(), slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
           pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction, center,
           depart_at, note: note || null, vehicle_no: vehicleNo || null, batch_id: batchId, out_photos: photos.length ? photos : null,
-          operator_name: me.name || null, operator_phone: me.phone || null, out_sign_url: outSign || null, created_by: session.user.id,
+          operator_name: me.name || (session.user.email || "").split("@")[0] || null, operator_phone: me.phone || null, out_sign_url: outSign || null, created_by: session.user.id,
         });
       }
       const { error: e2 } = await supabase.from("shipment").insert(shipRows);
@@ -470,7 +470,7 @@ function Shell({ session, initialConfirm }) {
       for (const l of valid) {
         const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
         if (e1) throw e1;
-        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, batch_id: batchId, out_photos: photos.length ? photos : null, vehicle_no: vehicleNo || null, note: note || null, operator_name: me.name || null, operator_phone: me.phone || null, out_sign_url: outSign || null, created_by: session.user.id });
+        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, batch_id: batchId, out_photos: photos.length ? photos : null, vehicle_no: vehicleNo || null, note: note || null, operator_name: me.name || (session.user.email || "").split("@")[0] || null, operator_phone: me.phone || null, out_sign_url: outSign || null, created_by: session.user.id });
       }
       const { error: e2 } = await supabase.from("shipment").insert(rows);
       if (e2) throw e2;
@@ -525,7 +525,7 @@ function Shell({ session, initialConfirm }) {
       const patch = { status: newStatus };
       if (newStatus === "입고확인") {
         if (!s.confirmed_at) patch.confirmed_at = new Date().toISOString();
-        patch.receiver_name = me.name || null;       // 입고확인한 담당자 자동 기록
+        patch.receiver_name = me.name || (session.user.email || "").split("@")[0] || null; // 입고확인한 담당자 자동 기록
         patch.receiver_phone = me.phone || null;
         if (inSign) patch.in_sign_url = inSign;
       }
@@ -1051,27 +1051,26 @@ function PhotoCapture({ photos = [], setPhotos, label = "현장 사진", hint = 
 
 // 전자 서명 패드 — 그리고 '서명 적용'하면 업로드 후 onSave(url)
 function SignaturePad({ onSave, label = "서명", color = C.teal }) {
-  const ref = useRef(null); const drawing = useRef(false);
-  const [done, setDone] = useState(false); const [busy, setBusy] = useState(false); const [dirty, setDirty] = useState(false);
+  const ref = useRef(null); const drawing = useRef(false); const timer = useRef(null); const dirty = useRef(false);
+  const [done, setDone] = useState(false); const [busy, setBusy] = useState(false);
   const pos = (e) => { const c = ref.current; const r = c.getBoundingClientRect(); const t = e.touches ? e.touches[0] : e; return { x: (t.clientX - r.left) * (c.width / r.width), y: (t.clientY - r.top) * (c.height / r.height) }; };
-  const start = (e) => { drawing.current = true; const ctx = ref.current.getContext("2d"); const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); setDirty(true); e.preventDefault(); };
-  const move = (e) => { if (!drawing.current) return; const ctx = ref.current.getContext("2d"); const p = pos(e); ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.strokeStyle = "#111"; ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault(); };
-  const end = () => { drawing.current = false; };
-  const clear = () => { const c = ref.current; c.getContext("2d").clearRect(0, 0, c.width, c.height); setDone(false); setDirty(false); onSave && onSave(null); };
   const apply = async () => {
-    if (!dirty) return;
+    if (!dirty.current) return;
     setBusy(true);
     try { const blob = await new Promise((r) => ref.current.toBlob(r, "image/png")); const urls = await uploadPhotos([new File([blob], "sign.png", { type: "image/png" })]); onSave && onSave(urls[0]); setDone(true); }
-    catch (e) { alert("서명 저장 실패: " + (e.message || e)); }
+    catch (e) { /* 조용히 무시, 재시도 가능 */ }
     setBusy(false);
   };
+  const start = (e) => { drawing.current = true; dirty.current = true; if (timer.current) clearTimeout(timer.current); const ctx = ref.current.getContext("2d"); const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault(); };
+  const move = (e) => { if (!drawing.current) return; const ctx = ref.current.getContext("2d"); const p = pos(e); ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.strokeStyle = "#111"; ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault(); };
+  const end = () => { if (!drawing.current) return; drawing.current = false; if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(apply, 500); }; // 손 떼면 자동 저장
+  const clear = () => { const c = ref.current; c.getContext("2d").clearRect(0, 0, c.width, c.height); dirty.current = false; setDone(false); onSave && onSave(null); };
   return (
     <div>
-      <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{label} {done && <span style={{ color, fontSize: 11, fontWeight: 600 }}>· 서명됨 ✓</span>}</div>
+      <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{label} <span style={{ color: C.hint, fontSize: 11 }}>· 사인하면 자동 저장</span> {busy && <span style={{ color: C.hint, fontSize: 11 }}>저장 중…</span>}{done && !busy && <span style={{ color, fontSize: 11, fontWeight: 600 }}>· 서명됨 ✓</span>}</div>
       <canvas ref={ref} width={280} height={90} onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end} onTouchStart={start} onTouchMove={move} onTouchEnd={end}
         style={{ width: "100%", maxWidth: 280, height: 90, border: `1px solid ${done ? color : C.border}`, borderRadius: 8, touchAction: "none", background: "#fff", display: "block" }} />
       <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-        <button type="button" onClick={apply} disabled={busy || !dirty} style={{ fontSize: 12, padding: "6px 12px", borderRadius: 7, border: "none", cursor: "pointer", background: (busy || !dirty) ? "#c7cad1" : color, color: "#fff" }}>{busy ? "저장 중…" : "서명 적용"}</button>
         <button type="button" onClick={clear} style={{ ...btnGhost, padding: "6px 12px" }}>지우기</button>
       </div>
     </div>
