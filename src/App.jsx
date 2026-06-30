@@ -27,6 +27,14 @@ const DirBadge = ({ s }) => isMove(s)
     ? <span style={{ fontSize: 10, color: "#854F0B", background: "#FAEEDA", padding: "1px 6px", borderRadius: 10 }}>반납</span>
     : <span style={{ fontSize: 10, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10 }}>출고</span>;
 const won = (n) => "₩" + (n || 0).toLocaleString();
+// 연락처 자동 하이픈 (숫자만 입력하면 010-1234-5678 형태로)
+const formatPhone = (v) => {
+  const d = (v || "").replace(/\D/g, "").slice(0, 11);
+  if (d.length < 4) return d;
+  if (d.length < 7) return d.slice(0, 3) + "-" + d.slice(3);
+  if (d.length <= 10) return d.slice(0, 3) + "-" + d.slice(3, 6) + "-" + d.slice(6);
+  return d.slice(0, 3) + "-" + d.slice(3, 7) + "-" + d.slice(7);
+};
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Date.now() + Math.random());
 
 const ST = {
@@ -182,7 +190,7 @@ function Auth() {
           </div>
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="이메일" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
           {mode === "signup" && <input value={pname} onChange={(e) => setPname(e.target.value)} placeholder="담당자 이름" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
-          {mode === "signup" && <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="연락처(휴대폰)" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
+          {mode === "signup" && <input value={phone} onChange={(e) => setPhone(formatPhone(e.target.value))} inputMode="numeric" placeholder="연락처(휴대폰)" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
           {mode === "signup" && <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="회사명(거래처명)" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
           {mode !== "forgot" && <input value={pw} onChange={(e) => setPw(e.target.value)} type="password" placeholder="비밀번호" onKeyDown={(e) => e.key === "Enter" && submit()} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }} />}
           {mode === "signup" && <div style={{ fontSize: 11, color: C.hint, marginBottom: 12, lineHeight: 1.5 }}>가입 후 관리자가 소속 거래처를 연결하면 본인 거래처 건이 보여요.</div>}
@@ -870,6 +878,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                       {s.status === "입고확인" && !s.discrepancy && <span style={{ color: C.green, fontSize: 12 }}>✓ 완료</span>}
                       {s.discrepancy && <span style={{ fontSize: 11, color: C.amber, background: C.amberBg, padding: "2px 8px", borderRadius: 10 }}>⚠ 출고{s.qty}/입고{s.received_qty}</span>}
                       {s.discrepancy && caps.operate && <button onClick={() => setDisc(s)} style={btnTealSm}>해결</button>}
+                      {s.discrepancy && s.receiver_phone && <a href={`tel:${s.receiver_phone}`} style={{ ...btnGhost, textDecoration: "none" }} title={`입고담당 ${s.receiver_name || ""} 연락`}>📞</a>}
                       {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={{ ...btnGhost, color: C.sub }} title="전표 출력">🖨</button>}
                       {caps.operate && s.status === "출고완료" && <button onClick={() => setEdit(s)} style={{ ...btnGhost, color: C.sub }} title="수정·취소">⋯</button>}
                     </div>
@@ -920,6 +929,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                 {s.status === "입고확인" && !s.discrepancy && <span style={{ color: C.green, fontSize: 12 }}>✓ 완료</span>}
                 {s.discrepancy && <span style={{ fontSize: 12, color: C.amber, background: C.amberBg, padding: "3px 9px", borderRadius: 10 }}>⚠ 출고{s.qty}/입고{s.received_qty}</span>}
                 {s.discrepancy && caps.operate && <button onClick={() => setDisc(s)} style={btnTealSm}>해결</button>}
+                {s.discrepancy && s.receiver_phone && <a href={`tel:${s.receiver_phone}`} style={{ ...btnTealSm, background: "#fff", color: C.tealDk, border: `1px solid ${C.border}`, textDecoration: "none" }}>📞 연락</a>}
                 {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={btnGhost}>🖨 전표</button>}
                 {caps.operate && s.status === "출고완료" && <button onClick={() => setEdit(s)} style={btnGhost}>수정·취소</button>}
               </div>
@@ -2131,7 +2141,7 @@ function Settings({ session, role, partners }) {
             <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>이름</div>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="이름" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 8 }} />
             <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>연락처</div>
-            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="휴대폰 번호" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
+            <input value={phone} onChange={(e) => setPhone(formatPhone(e.target.value))} inputMode="numeric" placeholder="휴대폰 번호" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
             <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>회사명</div>
             <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="회사명" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
             <button onClick={saveProfile} disabled={savingP} style={{ ...btnTeal, width: "100%", justifyContent: "center" }}>{savingP ? "저장 중…" : "정보 저장"}</button>
