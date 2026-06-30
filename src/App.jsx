@@ -260,21 +260,25 @@ function Shell({ session, initialConfirm }) {
   const [scanOpen, setScanOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // 뒤로가기: 오버레이 닫기 → 홈으로 (앱이 바로 종료되지 않게)
+  // 뒤로가기 처리용 최신 상태 ref (핸들러는 1번만 등록)
+  const backRef = useRef({});
+  backRef.current = { scanOpen, drawerOpen, focusBatch, nav, setScanOpen, setDrawerOpen, setFocusBatch, setNav };
   useEffect(() => {
     window.history.pushState({ app: true }, "");
+    const repush = () => window.history.pushState({ app: true }, "");
     const onPop = () => {
-      if (scanOpen) { setScanOpen(false); window.history.pushState({ app: true }, ""); return; }
-      if (drawerOpen) { setDrawerOpen(false); window.history.pushState({ app: true }, ""); return; }
-      if (focusBatch) { setFocusBatch(null); window.history.pushState({ app: true }, ""); return; }
-      if (nav !== "현황") { setNav("현황"); window.history.pushState({ app: true }, ""); return; }
+      const st = backRef.current;
+      if (st.scanOpen) { st.setScanOpen(false); repush(); return; }
+      if (st.drawerOpen) { st.setDrawerOpen(false); repush(); return; }
+      if (st.focusBatch) { st.setFocusBatch(null); repush(); return; }
+      if (st.nav !== "현황") { st.setNav("현황"); repush(); return; }
       // 홈: 종료 확인 (예=나가기 / 아니오=머무르기)
       if (window.confirm("앱을 종료할까요?")) { window.removeEventListener("popstate", onPop); window.history.back(); }
-      else { window.history.pushState({ app: true }, ""); }
+      else { repush(); }
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [scanOpen, drawerOpen, focusBatch, nav]);
+  }, []);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [palletTypes, setPalletTypes] = useState([]);
