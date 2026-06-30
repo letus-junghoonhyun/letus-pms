@@ -808,7 +808,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                   <Td>
                     <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                       {/* 입고확인: 협력업체는 본인 정방향만, 내부는 전체(반납 입고확인 포함). 회수·반납은 회수 관리에서 처리 */}
-                      {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setStatus(s, "입고확인", "입고확인")} style={btnGhost}>입고확인</button>}
+                      {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setNav("확인")} style={btnGhost} title="입고확인 화면에서 사진·서명 후 확인">입고확인</button>}
                       {s.status === "출고완료" && caps.confirmOwn && isReturn(s) && <span style={{ color: C.hint, fontSize: 11 }}>센터 확인 대기</span>}
                       {s.status === "입고확인" && <span style={{ color: C.green, fontSize: 11 }}>✓ 완료</span>}
                       {!isReturn(s) && !isMove(s) && <button onClick={() => setSlipBatch(s.batch_id || s.id)} style={{ ...btnGhost, color: C.sub }} title="전표 출력">🖨</button>}
@@ -1131,6 +1131,8 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const themeBg = isRet ? C.amberBg : isMv ? "#efe8ff" : C.tealBg;
   const canSubmit = total > 0 && !busy && (isMv ? center !== toCenter : !!sel);
   const submit = async () => {
+    if (!photos.length) { alert("현장 사진을 촬영/첨부한 후 등록해주세요."); return; }
+    if (!outSign) { alert("서명을 완료한 후 등록해주세요. (사인 후 손을 떼면 자동 저장돼요)"); return; }
     setBusy(true);
     const rows = isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note, outSign)
       : await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo, outSign);
@@ -1347,23 +1349,24 @@ function QuickConfirm({ rows, setStatus, onClose }) {
 function ConfirmCard({ s, setStatus }) {
   const [photos, setPhotos] = useState([]);
   const [sign, setSign] = useState(null);
-  const [open, setOpen] = useState(false);
+  const confirm = () => {
+    if (!photos.length) { alert("입고 사진을 촬영/첨부한 후 확인해주세요."); return; }
+    if (!sign) { alert("인수자 서명을 완료한 후 확인해주세요. (사인 후 손을 떼면 자동 저장돼요)"); return; }
+    setStatus(s, "입고확인", "입고확인", photos, sign);
+  };
   return (
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{fromOf(s)} → {toOf(s)}</div>
           <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.note ? ` · ${s.note}` : ""}</div>
         </div>
-        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-          <button onClick={() => setOpen((o) => !o)} style={{ ...btnGhost, color: (photos.length || sign) ? C.tealDk : C.sub }}>📷{photos.length ? ` ${photos.length}` : ""}{sign ? " ✍" : ""}</button>
-          <button onClick={() => setStatus(s, "입고확인", "입고확인", photos, sign)} style={btnTeal}>✓ 입고확인</button>
-        </div>
+        <button onClick={confirm} style={btnTeal}>✓ 입고확인</button>
       </div>
-      {open && <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}`, display: "grid", gap: 14 }}>
-        <PhotoCapture photos={photos} setPhotos={setPhotos} label="입고 사진" hint="받은 파렛트 / 차량" />
-        <SignaturePad onSave={setSign} label="인수자 서명" />
-      </div>}
+      <div style={{ display: "grid", gap: 14, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+        <PhotoCapture photos={photos} setPhotos={setPhotos} label="입고 사진 (필수)" hint="받은 파렛트 / 차량" />
+        <SignaturePad onSave={setSign} label="인수자 서명 (필수)" />
+      </div>
     </div>
   );
 }
