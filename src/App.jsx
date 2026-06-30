@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as XLSX from "xlsx";
+import QRCode from "qrcode";
 import { supabase } from "./supabase.js";
 
 const C = {
@@ -217,7 +218,8 @@ export default function App() {
   if (!authReady) return <Splash text="불러오는 중…" />;
   if (recovering) return <ResetPassword onDone={() => setRecovering(false)} />;
   if (!session) return <Auth />;
-  return <Shell session={session} />;
+  const confirmParam = new URLSearchParams(window.location.search).get("confirm");
+  return <Shell session={session} initialConfirm={confirmParam} />;
 }
 
 // 비밀번호 재설정(메일 링크로 진입했을 때) 새 비밀번호 입력 화면
@@ -250,8 +252,9 @@ const Splash = ({ text }) => (
   <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: C.sub, fontFamily: "system-ui, sans-serif", fontSize: 14 }}>{text}</div>
 );
 
-function Shell({ session }) {
+function Shell({ session, initialConfirm }) {
   const [nav, setNav] = useState("현황");
+  const [focusBatch, setFocusBatch] = useState(initialConfirm || null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [palletTypes, setPalletTypes] = useState([]);
@@ -660,6 +663,8 @@ function Shell({ session }) {
           <div style={{ background: C.redBg, color: C.red, padding: 16, borderRadius: 10, fontSize: 13 }}>
             {err}<br /><br />혹시 supabase.js에 anon key를 안 넣었거나, 쓰기 권한(RLS) 설정이 필요할 수 있어요. 화면을 캡처해서 Claude에게 물어보세요.
           </div>
+        ) : focusBatch ? (
+          <QuickConfirm rows={ships.filter((s) => (s.batch_id || s.id) === focusBatch)} setStatus={setStatus} onClose={() => { setFocusBatch(null); window.history.replaceState({}, "", window.location.pathname); }} />
         ) : (
           <>
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply }} />}
@@ -818,6 +823,13 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
   );
 }
 
+// QR 이미지 (스캔 → 입고확인 링크)
+function QrImg({ value, size = 88 }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => { QRCode.toDataURL(value, { margin: 1, width: size * 2 }).then(setUrl).catch(() => setUrl("")); }, [value, size]);
+  return url ? <img src={url} alt="QR" style={{ width: size, height: size }} /> : <div style={{ width: size, height: size }} />;
+}
+
 // 파렛트 이동전표 출력 (AJ 양식 4분할) — window.print()
 function SlipPrint({ rows, onClose, palletTypes = [] }) {
   if (!rows.length) return null;
@@ -826,6 +838,7 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
   const from = fromOf(h), to = toOf(h);
   const usageOf = (code) => palletTypes.find((p) => p.code === code)?.usage || "";
   const totalQty = rows.reduce((a, r) => a + (r.qty || 0), 0);
+  const confirmUrl = `${window.location.origin}/?confirm=${h.batch_id || h.id}`;
   const copies = ["발송처용", "도착처용", "운송회사용", "보관용"];
   const Slip = ({ tag }) => (
     <div style={{ border: "1.5px solid #000", padding: 10, width: 268, fontSize: 11, color: "#000", fontFamily: "sans-serif" }}>
@@ -858,7 +871,13 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
           </tr>
         </tbody>
       </table>
-      {h.operator_phone && <div style={{ fontSize: 9, color: "#444", marginTop: 3 }}>출고담당 연락처: {h.operator_phone}</div>}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+        <QrImg value={confirmUrl} size={70} />
+        <div style={{ fontSize: 9, color: "#333", lineHeight: 1.4 }}>
+          <b>QR 스캔 → 입고확인</b><br />받는 분이 폰으로 스캔하면<br />이 건 입고확인 화면이 떠요.
+          {h.operator_phone && <><br />출고담당 {h.operator_phone}</>}
+        </div>
+      </div>
     </div>
   );
   return (
@@ -1255,6 +1274,26 @@ function Confirm({ ships, setStatus, caps = {}, ajReqs = [], confirmAjSupply }) 
         </div>
       )}
       <Note>{caps.confirmOwn ? "확인하면 우리 장부에 즉시 반영돼요. 받은 파렛트 사진을 함께 남기면 증빙이 돼요." : "입고확인하면 센터/거래처 재고에 즉시 반영돼요. 사진을 남기면 증빙이 됩니다."}</Note>
+    </>
+  );
+}
+
+// QR 스캔 입고확인 — 해당 전표(batch) 건만 모아서 확인
+function QuickConfirm({ rows, setStatus, onClose }) {
+  const pending = rows.filter((s) => s.status === "출고완료");
+  const done = rows.filter((s) => s.status !== "출고완료");
+  return (
+    <>
+      <Head title="📷 QR 입고확인" sub={rows.length ? `전표 ${rows[0].slip_no} · ${fromOf(rows[0])} → ${toOf(rows[0])}` : ""} action={<button onClick={onClose} style={btnGhost}>닫기</button>} />
+      {rows.length === 0 ? (
+        <div style={{ padding: 30, textAlign: "center", color: C.hint, fontSize: 13, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12 }}>해당 전표를 찾을 수 없어요.<br />이미 처리됐거나, 이 계정 권한 밖의 건일 수 있어요.</div>
+      ) : (
+        <div style={{ display: "grid", gap: 12, maxWidth: 560 }}>
+          {pending.length === 0 && <div style={{ background: C.greenBg, color: C.green, fontSize: 14, fontWeight: 600, padding: 16, borderRadius: 12, textAlign: "center" }}>✓ 이 전표는 모두 입고확인 완료됐어요.</div>}
+          {pending.map((s) => <ConfirmCard key={s.id} s={s} setStatus={setStatus} />)}
+          {done.length > 0 && <Note>이미 입고확인된 건: {done.map((s) => `${s.pallet_code} ${s.qty}장`).join(", ")}</Note>}
+        </div>
+      )}
     </>
   );
 }
