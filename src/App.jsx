@@ -357,7 +357,7 @@ function Shell({ session, initialConfirm }) {
   };
 
   // lines: [{ pallet, qty }] — 여러 파렛트 종류를 한 번에 등록(혼합). 전표번호는 유형마다 고유 발급.
-  const register = async (partner, lines, departDate, note, direction = "출고", center = null, photos = [], vehicleNo = null) => {
+  const register = async (partner, lines, departDate, note, direction = "출고", center = null, photos = [], vehicleNo = null, outSign = null) => {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     // 정방향 출고는 센터 재고 한도 초과 불가
@@ -379,7 +379,7 @@ function Shell({ session, initialConfirm }) {
           id: uid(), slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
           pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction, center,
           depart_at, note: note || null, vehicle_no: vehicleNo || null, batch_id: batchId, out_photos: photos.length ? photos : null,
-          operator_name: me.name || null, operator_phone: me.phone || null, created_by: session.user.id,
+          operator_name: me.name || null, operator_phone: me.phone || null, out_sign_url: outSign || null, created_by: session.user.id,
         });
       }
       const { error: e2 } = await supabase.from("shipment").insert(shipRows);
@@ -519,10 +519,14 @@ function Shell({ session, initialConfirm }) {
     } catch (e) { alert("출고 취소 실패: " + (e.message || e)); }
   };
 
-  const setStatus = async (s, newStatus, mvType, inPhotos) => {
+  const setStatus = async (s, newStatus, mvType, inPhotos, inSign) => {
     try {
       const patch = { status: newStatus };
-      if (newStatus === "입고확인" && !s.confirmed_at) patch.confirmed_at = new Date().toISOString();
+      if (newStatus === "입고확인") {
+        if (!s.confirmed_at) patch.confirmed_at = new Date().toISOString();
+        patch.receiver_name = me.name || null;       // 입고확인한 담당자 자동 기록
+        if (inSign) patch.in_sign_url = inSign;
+      }
       if (inPhotos && inPhotos.length) patch.in_photos = inPhotos;
       const { error } = await supabase.from("shipment").update(patch).eq("id", s.id);
       if (error) throw error;
@@ -865,9 +869,9 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
         <tbody>
           <tr><td style={cellH}>출고확인</td><td style={cellH}>운송(기사)</td><td style={cellH}>인수확인</td></tr>
           <tr>
-            <td style={{ ...cell, height: 30, verticalAlign: "bottom", fontSize: 9 }}>{h.operator_name || ""} (인)</td>
-            <td style={{ ...cell, height: 30, verticalAlign: "bottom" }}>(인)</td>
-            <td style={{ ...cell, height: 30, verticalAlign: "bottom" }}>(인)</td>
+            <td style={{ ...cell, height: 38, verticalAlign: "bottom", fontSize: 9, position: "relative" }}>{h.out_sign_url && <img src={h.out_sign_url} alt="" style={{ position: "absolute", top: 2, left: "50%", transform: "translateX(-50%)", height: 24 }} />}{h.operator_name || ""}</td>
+            <td style={{ ...cell, height: 38, verticalAlign: "bottom" }}>(인)</td>
+            <td style={{ ...cell, height: 38, verticalAlign: "bottom", fontSize: 9, position: "relative" }}>{h.in_sign_url && <img src={h.in_sign_url} alt="" style={{ position: "absolute", top: 2, left: "50%", transform: "translateX(-50%)", height: 24 }} />}{h.receiver_name || ""}</td>
           </tr>
         </tbody>
       </table>
@@ -1043,6 +1047,35 @@ function PhotoCapture({ photos = [], setPhotos, label = "현장 사진", hint = 
   );
 }
 
+// 전자 서명 패드 — 그리고 '서명 적용'하면 업로드 후 onSave(url)
+function SignaturePad({ onSave, label = "서명", color = C.teal }) {
+  const ref = useRef(null); const drawing = useRef(false);
+  const [done, setDone] = useState(false); const [busy, setBusy] = useState(false); const [dirty, setDirty] = useState(false);
+  const pos = (e) => { const c = ref.current; const r = c.getBoundingClientRect(); const t = e.touches ? e.touches[0] : e; return { x: (t.clientX - r.left) * (c.width / r.width), y: (t.clientY - r.top) * (c.height / r.height) }; };
+  const start = (e) => { drawing.current = true; const ctx = ref.current.getContext("2d"); const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); setDirty(true); e.preventDefault(); };
+  const move = (e) => { if (!drawing.current) return; const ctx = ref.current.getContext("2d"); const p = pos(e); ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.strokeStyle = "#111"; ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault(); };
+  const end = () => { drawing.current = false; };
+  const clear = () => { const c = ref.current; c.getContext("2d").clearRect(0, 0, c.width, c.height); setDone(false); setDirty(false); onSave && onSave(null); };
+  const apply = async () => {
+    if (!dirty) return;
+    setBusy(true);
+    try { const blob = await new Promise((r) => ref.current.toBlob(r, "image/png")); const urls = await uploadPhotos([new File([blob], "sign.png", { type: "image/png" })]); onSave && onSave(urls[0]); setDone(true); }
+    catch (e) { alert("서명 저장 실패: " + (e.message || e)); }
+    setBusy(false);
+  };
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{label} {done && <span style={{ color, fontSize: 11, fontWeight: 600 }}>· 서명됨 ✓</span>}</div>
+      <canvas ref={ref} width={280} height={90} onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end} onTouchStart={start} onTouchMove={move} onTouchEnd={end}
+        style={{ width: "100%", maxWidth: 280, height: 90, border: `1px solid ${done ? color : C.border}`, borderRadius: 8, touchAction: "none", background: "#fff", display: "block" }} />
+      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+        <button type="button" onClick={apply} disabled={busy || !dirty} style={{ fontSize: 12, padding: "6px 12px", borderRadius: 7, border: "none", cursor: "pointer", background: (busy || !dirty) ? "#c7cad1" : color, color: "#fff" }}>{busy ? "저장 중…" : "서명 적용"}</button>
+        <button type="button" onClick={clear} style={{ ...btnGhost, padding: "6px 12px" }}>지우기</button>
+      </div>
+    </div>
+  );
+}
+
 // 라이브 카메라 — 촬영 버튼으로 연속 촬영, 종료까지 계속 업로드
 function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
   const videoRef = useRef(null); const streamRef = useRef(null);
@@ -1084,12 +1117,12 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const [qtys, setQtys] = useState({});
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
   const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(myCenters[0] || centers[0]); const [toCenter, setToCenter] = useState(centers.find((c) => c !== (myCenters[0] || centers[0])) || centers[0]);
-  const [photos, setPhotos] = useState([]); const [vehicleNo, setVehicleNo] = useState(""); const [slipRows, setSlipRows] = useState(null);
+  const [photos, setPhotos] = useState([]); const [vehicleNo, setVehicleNo] = useState(""); const [slipRows, setSlipRows] = useState(null); const [outSign, setOutSign] = useState(null);
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
   const isRet = dir === "반납"; const isMv = dir === "이동";
   const total = qtysTotal(qtys);
-  const reset = () => { setQtys({}); setNote(""); setDate(today); setPhotos([]); setVehicleNo(""); };
+  const reset = () => { setQtys({}); setNote(""); setDate(today); setPhotos([]); setVehicleNo(""); setOutSign(null); };
   // 출고/이동은 출발 센터 재고 한도 내. 반납(거래처→센터)은 한도 없음.
   const stockOf = (code) => centerStock(ships, ajReqs, center, code);
   useEffect(() => { setQtys({}); }, [center, dir]);
@@ -1099,7 +1132,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const submit = async () => {
     setBusy(true);
     const rows = isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note)
-      : await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo);
+      : await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo, outSign);
     setBusy(false); reset();
     if (rows && rows.length) setSlipRows(rows); // 등록 직후 전표 바로 출력
   };
@@ -1179,6 +1212,8 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
         <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
         <div style={{ marginBottom: 18 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label={isMv ? "센터이동 현장 사진" : isRet ? "반납 현장 사진" : "출고 현장 사진"} color={themeColor} /></div>
+
+        {!isMv && <div style={{ marginBottom: 18 }}><SignaturePad onSave={setOutSign} label={isRet ? "반납자 서명" : "출고자 서명"} color={themeColor} /></div>}
 
         <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : themeColor, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : isRet ? "반납 등록" : isMv ? "센터 이동" : "출고 등록"}</button>
         <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : isMv ? "센터 간 재고를 옮겨요 (출발 −, 도착 +)" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
@@ -1310,6 +1345,7 @@ function QuickConfirm({ rows, setStatus, onClose }) {
 // 입고확인 카드 — 사진 촬영(선택) 후 확인
 function ConfirmCard({ s, setStatus }) {
   const [photos, setPhotos] = useState([]);
+  const [sign, setSign] = useState(null);
   const [open, setOpen] = useState(false);
   return (
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16 }}>
@@ -1319,11 +1355,14 @@ function ConfirmCard({ s, setStatus }) {
           <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.note ? ` · ${s.note}` : ""}</div>
         </div>
         <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-          <button onClick={() => setOpen((o) => !o)} style={{ ...btnGhost, color: photos.length ? C.tealDk : C.sub }}>📷{photos.length ? ` ${photos.length}` : ""}</button>
-          <button onClick={() => setStatus(s, "입고확인", "입고확인", photos)} style={btnTeal}>✓ 입고확인</button>
+          <button onClick={() => setOpen((o) => !o)} style={{ ...btnGhost, color: (photos.length || sign) ? C.tealDk : C.sub }}>📷{photos.length ? ` ${photos.length}` : ""}{sign ? " ✍" : ""}</button>
+          <button onClick={() => setStatus(s, "입고확인", "입고확인", photos, sign)} style={btnTeal}>✓ 입고확인</button>
         </div>
       </div>
-      {open && <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}><PhotoCapture photos={photos} setPhotos={setPhotos} label="입고 사진" hint="받은 파렛트 / 차량" /></div>}
+      {open && <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}`, display: "grid", gap: 14 }}>
+        <PhotoCapture photos={photos} setPhotos={setPhotos} label="입고 사진" hint="받은 파렛트 / 차량" />
+        <SignaturePad onSave={setSign} label="인수자 서명" />
+      </div>}
     </div>
   );
 }
