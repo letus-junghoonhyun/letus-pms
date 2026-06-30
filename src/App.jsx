@@ -844,7 +844,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                 <tr key={s.id} style={{ borderTop: `1px solid ${C.border}` }}>
                   <Td><DirBadge s={s} /></Td>
                   <Td><Pill status={danger ? "미회수" : s.status} /></Td>
-                  <Td c={C.sub}>{s.slip_no}</Td><Td>{s.pallet_code}</Td><Td r>{s.qty}</Td>
+                  <td style={{ padding: "11px 6px", fontSize: 12, color: C.sub }}>{s.slip_no}{s.vehicle_no ? <div style={{ fontSize: 10, color: C.hint }}>🚚 {s.vehicle_no}</div> : null}</td><Td>{s.pallet_code}</Td><Td r>{s.qty}</Td>
                   <Td>{fromOf(s)}</Td><Td>{toOf(s)}</Td>
                   <Td c={C.sub}>{fmtDT(s.depart_at)}</Td>
                   <Td c={s.confirmed_at ? C.text : C.hint}>{fmtDT(s.confirmed_at)}</Td>
@@ -897,7 +897,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
                 <span style={{ fontSize: 11, color: C.hint }}>{s.slip_no}</span>
               </div>
               <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 2 }}>{fromOf(s)} → {toOf(s)}</div>
-              <div style={{ fontSize: 14, marginBottom: 2 }}><b>{s.pallet_code}</b> · {s.qty}장</div>
+              <div style={{ fontSize: 14, marginBottom: 2 }}><b>{s.pallet_code}</b> · {s.qty}장{s.vehicle_no ? <span style={{ color: C.sub, fontWeight: 400 }}> · 🚚 {s.vehicle_no}</span> : ""}</div>
               <div style={{ fontSize: 12, color: C.sub }}>출고 {fmtDT(s.depart_at)}{s.confirmed_at ? ` · 입고 ${fmtDT(s.confirmed_at)}` : ""}{danger ? ` · 경과 ${d}일` : ""}</div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
                 {s.status === "출고완료" && (caps.operate || (caps.confirmOwn && !isReturn(s))) && <button onClick={() => setNav("확인")} style={btnTealSm}>입고확인</button>}
@@ -946,7 +946,7 @@ function SlipPrint({ rows, onClose, palletTypes = [] }) {
           <tr><td style={cellH}>발송일</td><td style={cell}>{dateOf(h.depart_at)}</td><td style={cellH}>도착일</td><td style={cell}> </td></tr>
           <tr><td style={cellH}>발송처</td><td style={cell} colSpan={3}>{from}</td></tr>
           <tr><td style={cellH}>도착처</td><td style={cell} colSpan={3}>{to}</td></tr>
-          <tr><td style={cellH}>차량/기사</td><td style={cell} colSpan={3}>{h.vehicle_no || ""}{h.vehicle_no ? " / " : ""}</td></tr>
+          <tr><td style={cellH}>차량정보</td><td style={cell} colSpan={3}>{h.vehicle_no || ""}</td></tr>
           <tr><td style={cellH}>유형</td><td style={cellH}>용도</td><td style={cellH} colSpan={2}>수량</td></tr>
           {rows.map((r, i) => (
             <tr key={i}><td style={cell}>{r.pallet_code}</td><td style={{ ...cell, fontSize: 10 }}>{usageOf(r.pallet_code)}</td><td style={cell} colSpan={2}>{r.qty}</td></tr>
@@ -1490,7 +1490,7 @@ function ConfirmCard({ s, setStatus }) {
       <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><DirBadge s={s} />{fromOf(s)} → {toOf(s)}</div>
-          <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.note ? ` · ${s.note}` : ""}</div>
+          <div style={{ fontSize: 12, color: C.sub }}>{s.slip_no} · {s.pallet_code} · {s.qty}장{s.vehicle_no ? ` · 🚚${s.vehicle_no}` : ""}{s.note ? ` · ${s.note}` : ""}</div>
         </div>
         <button onClick={confirm} style={btnTeal}>✓ 입고확인</button>
       </div>
