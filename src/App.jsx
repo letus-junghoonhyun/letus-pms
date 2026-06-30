@@ -1880,7 +1880,7 @@ function Settings({ session, role, partners }) {
 
   const saveProfile = async () => {
     setSavingP(true); setPmsg("");
-    const { error } = await supabase.from("profiles").update({ name: name || null, company: company || null, phone: phone || null }).eq("id", session.user.id);
+    const { error } = await supabase.from("profiles").upsert({ id: session.user.id, name: name || null, company: company || null, phone: phone || null }, { onConflict: "id" });
     setSavingP(false); setPmsg(error ? "저장 실패: " + error.message : "저장됐어요.");
   };
   const changePw = async () => {
@@ -1914,7 +1914,7 @@ function Settings({ session, role, partners }) {
           <Row label="상태"><span style={{ color: prof?.active === false ? C.red : C.green }}>{prof?.active === false ? "비활성" : "활성"}</span></Row>
 
           <div style={{ marginTop: 16 }}>
-            <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>표시 이름</div>
+            <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>이름</div>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="이름" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 8 }} />
             <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>연락처</div>
             <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="휴대폰 번호" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
