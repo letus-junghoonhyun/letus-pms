@@ -129,6 +129,7 @@ function Auth() {
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [company, setCompany] = useState("");
+  const [pname, setPname] = useState(""); const [phone, setPhone] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -147,7 +148,7 @@ function Auth() {
         else {
           const u = data.user;
           if (u) {
-            await supabase.from("profiles").upsert({ id: u.id, name: company || email.split("@")[0], email, company: company || null });
+            await supabase.from("profiles").upsert({ id: u.id, name: pname || company || email.split("@")[0], email, company: company || null, phone: phone || null });
             await supabase.from("user_roles").upsert({ user_id: u.id, role: "협력업체" }, { onConflict: "user_id" });
           }
           if (!data.session) setMsg("가입 완료! 로그인하세요. (로그인이 안 되면 Supabase에서 이메일 인증을 꺼주세요)");
@@ -177,6 +178,8 @@ function Auth() {
             ))}
           </div>
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="이메일" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
+          {mode === "signup" && <input value={pname} onChange={(e) => setPname(e.target.value)} placeholder="담당자 이름" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
+          {mode === "signup" && <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="연락처(휴대폰)" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
           {mode === "signup" && <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="회사명(거래처명)" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />}
           {mode !== "forgot" && <input value={pw} onChange={(e) => setPw(e.target.value)} type="password" placeholder="비밀번호" onKeyDown={(e) => e.key === "Enter" && submit()} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "11px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }} />}
           {mode === "signup" && <div style={{ fontSize: 11, color: C.hint, marginBottom: 12, lineHeight: 1.5 }}>가입 후 관리자가 소속 거래처를 연결하면 본인 거래처 건이 보여요.</div>}
@@ -263,6 +266,7 @@ function Shell({ session }) {
   const [ajReqs, setAjReqs] = useState([]);
   const [centers, setCenters] = useState([]);        // 활성 센터 이름 목록
   const [myCenterCodes, setMyCenterCodes] = useState(null); // 내 담당 센터(없으면 전체)
+  const [me, setMe] = useState({});                  // 내 프로필(이름/연락처)
 
   const loadAll = useCallback(async () => {
     setErr("");
@@ -274,7 +278,7 @@ function Shell({ session }) {
         supabase.from("partner_pallet").select("*"),
         supabase.from("shipment").select("*").order("depart_at", { ascending: false }),
         supabase.from("user_roles").select("role").eq("user_id", session.user.id).maybeSingle(),
-        supabase.from("profiles").select("active, center_codes").eq("id", session.user.id).maybeSingle(),
+        supabase.from("profiles").select("active, center_codes, name, phone").eq("id", session.user.id).maybeSingle(),
         supabase.from("aj_request").select("*").order("requested_at", { ascending: false }),
         supabase.from("app_center").select("name, active").eq("active", true).order("name"),
       ]);
@@ -282,6 +286,7 @@ function Shell({ session }) {
       if (me?.data && me.data.active === false) { setBlocked(true); setLoading(false); return; }
       setCenters((ct.data || []).map((c) => c.name));
       setMyCenterCodes(me?.data?.center_codes || null);
+      setMe(me?.data || {});
       // 단가·AJ는 협력업체에게 RLS로 막혀 빈 값이 올 수 있어요 — 에러 아니므로 제외하고 검사
       const firstErr = [pt, pa, pp, sh].find((r) => r.error);
       if (firstErr) throw firstErr.error;
@@ -370,7 +375,8 @@ function Shell({ session }) {
         shipRows.push({
           id: uid(), slip_no: slip, to_partner: partner.code, to_partner_name: partner.name,
           pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction, center,
-          depart_at, note: note || null, vehicle_no: vehicleNo || null, batch_id: batchId, out_photos: photos.length ? photos : null, created_by: session.user.id,
+          depart_at, note: note || null, vehicle_no: vehicleNo || null, batch_id: batchId, out_photos: photos.length ? photos : null,
+          operator_name: me.name || null, operator_phone: me.phone || null, created_by: session.user.id,
         });
       }
       const { error: e2 } = await supabase.from("shipment").insert(shipRows);
@@ -460,7 +466,7 @@ function Shell({ session }) {
       for (const l of valid) {
         const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
         if (e1) throw e1;
-        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, batch_id: batchId, out_photos: photos.length ? photos : null, vehicle_no: vehicleNo || null, note: note || null, created_by: session.user.id });
+        rows.push({ id: uid(), slip_no: slip, to_partner: null, to_partner_name: toC, pallet_code: l.pallet, qty: l.qty, status: "출고완료", direction: "이동", center: fromC, to_center: toC, depart_at: nowISO, batch_id: batchId, out_photos: photos.length ? photos : null, vehicle_no: vehicleNo || null, note: note || null, operator_name: me.name || null, operator_phone: me.phone || null, created_by: session.user.id });
       }
       const { error: e2 } = await supabase.from("shipment").insert(rows);
       if (e2) throw e2;
@@ -838,7 +844,7 @@ function SlipPrint({ rows, onClose }) {
             </tr>
           ))}
           <tr><td style={cell}>비고</td><td style={cell} colSpan={3}>{h.note || ""}</td></tr>
-          <tr><td style={cell}>담당</td><td style={cell} colSpan={3}>(인)</td></tr>
+          <tr><td style={cell}>담당자</td><td style={cell} colSpan={3}>{h.operator_name || ""}{h.operator_phone ? ` (${h.operator_phone})` : ""} (인)</td></tr>
         </tbody>
       </table>
     </div>
@@ -1759,13 +1765,13 @@ const ROLE_BADGE = {
 // 내 설정 — 계정 정보 + 비밀번호 변경
 function Settings({ session, role, partners }) {
   const [prof, setProf] = useState(null);
-  const [name, setName] = useState(""); const [company, setCompany] = useState("");
+  const [name, setName] = useState(""); const [company, setCompany] = useState(""); const [phone, setPhone] = useState("");
   const [savingP, setSavingP] = useState(false); const [pmsg, setPmsg] = useState("");
   const [pw, setPw] = useState(""); const [pw2, setPw2] = useState(""); const [savingPw, setSavingPw] = useState(false); const [pwmsg, setPwmsg] = useState("");
 
   useEffect(() => {
-    supabase.from("profiles").select("name, company, partner_code, active").eq("id", session.user.id).maybeSingle()
-      .then(({ data }) => { setProf(data || {}); setName(data?.name || ""); setCompany(data?.company || ""); });
+    supabase.from("profiles").select("name, company, phone, partner_code, active").eq("id", session.user.id).maybeSingle()
+      .then(({ data }) => { setProf(data || {}); setName(data?.name || ""); setCompany(data?.company || ""); setPhone(data?.phone || ""); });
   }, [session.user.id]);
 
   const rb = ROLE_BADGE[role] || ROLE_BADGE.협력업체;
@@ -1774,7 +1780,7 @@ function Settings({ session, role, partners }) {
 
   const saveProfile = async () => {
     setSavingP(true); setPmsg("");
-    const { error } = await supabase.from("profiles").update({ name: name || null, company: company || null }).eq("id", session.user.id);
+    const { error } = await supabase.from("profiles").update({ name: name || null, company: company || null, phone: phone || null }).eq("id", session.user.id);
     setSavingP(false); setPmsg(error ? "저장 실패: " + error.message : "저장됐어요.");
   };
   const changePw = async () => {
@@ -1810,6 +1816,8 @@ function Settings({ session, role, partners }) {
           <div style={{ marginTop: 16 }}>
             <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>표시 이름</div>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="이름" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 8 }} />
+            <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>연락처</div>
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="휴대폰 번호" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
             <div style={{ fontSize: 12, color: C.sub, marginBottom: 6 }}>회사명</div>
             <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="회사명" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 11px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 10 }} />
             <button onClick={saveProfile} disabled={savingP} style={{ ...btnTeal, width: "100%", justifyContent: "center" }}>{savingP ? "저장 중…" : "정보 저장"}</button>
