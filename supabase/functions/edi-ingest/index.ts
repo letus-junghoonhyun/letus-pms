@@ -55,6 +55,34 @@ Deno.serve(async (req) => {
       });
       return json({ ok: true, upserted: n });
     }
+    // 3) 이동(건별) 마지막 일자
+    if (body.action === "move_status") {
+      const { data, error } = await db.from("aj_move").select("move_date").order("move_date", { ascending: false }).limit(1);
+      if (error) return json({ error: error.message }, 500);
+      return json({ last_date: data && data.length ? data[0].move_date : null });
+    }
+
+    // 4) 이동(건별) 저장 (upsert: 수정·입고확인 상태 변경도 반영)
+    if (body.action === "moves_upsert") {
+      const rows = (body.rows || []).map((r) => ({
+        move_code: r.move_code, move_date: r.move_date, item: r.item, from_name: r.from_name, to_name: r.to_name,
+        move_type: r.move_type, iner: r.iner, qty: r.qty, chng: r.chng, conf: r.conf, retn: r.retn,
+        bill_no: r.bill_no || null, note: r.note || null, synced_at: new Date().toISOString(),
+      }));
+      let n = 0;
+      for (let i = 0; i < rows.length; i += 500) {
+        const chunk = rows.slice(i, i + 500);
+        const { error } = await db.from("aj_move").upsert(chunk, { onConflict: "move_code,item,from_name,to_name,move_date" });
+        if (error) return json({ error: error.message }, 500);
+        n += chunk.length;
+      }
+      const dates = rows.map((r) => r.move_date).sort();
+      await db.from("aj_sync_log").insert({
+        from_date: dates[0] || null, to_date: dates[dates.length - 1] || null,
+        workplaces: 0, rows_upserted: n, status: "ok", note: "moves " + (body.note || ""),
+      });
+      return json({ ok: true, upserted: n });
+    }
     return json({ error: "unknown action" }, 400);
   } catch (e) {
     return json({ error: String(e) }, 500);

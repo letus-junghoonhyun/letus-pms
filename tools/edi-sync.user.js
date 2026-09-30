@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      1.7
+// @version      1.8
 // @description  EDI 로그인 후 메인 화면이 열리면, PMS에 없는 날짜부터 어제까지의 일별 재고를 조회해 PMS로 보냅니다.
 // @match        http://edi.ajuprs.com/main_frame.do
 // @grant        GM_xmlhttpRequest
@@ -20,6 +20,8 @@
 (function () {
   "use strict";
   const COLS = "STOC_DATE|DATE_NAME|DEMD_TYPE|ITEM_NAME|LAST_STOC|RD00_VOLM|RD01_VOLM|RD05_VOLM|RD08_VOLM|RD99_VOLM|MS00_VOLM|MSCF_VOLM|MSCT_VOLM|MSCX_VOLM|MSIN_VOLM|MSOT_VOLM|MD00_VOLM|MDCF_VOLM|MDCT_VOLM|MDCX_VOLM|MDIN_VOLM|MDOT_VOLM|RS00_VOLM|RS01_VOLM|RS05_VOLM|RS06_VOLM|RS99_VOLM|DEST_VOLM|THIS_STOC|CONT_STOC|BACK_STOC|CONF_STOC|SELF_VOLM|sStatus".split("|");
+  const MCOLS = "sSeq|sStatus|sCheck|MOVE_CODE|DEMD_DATE|DATE_NAME|SHOT_NAME|DELV_POST_NAME|STOR_POST_NAME|SELF_CODE|INER_MOVE|MOVE_TYPE|MOVE_VOLM|ABS_MOVE_VOLM|CHNG_FLAG|CONF_FLAG|RETN_FLAG|BILL_NUMB|MOVE_DESC".split("|");
+  const MOVE_CHUNK_DAYS = 7;  // 이동 내역은 하루 300건 안팎이라 7일씩 나눠 조회
   const CHUNK_DAYS = 40;      // 한 번에 조회할 최대 일수
   const START_DATE = "2026-09-26"; // 실제 데이터 사용 시작일(정산기간 26일 시작). 처음 받는 작업장은 여기서부터
   const CONCURRENCY = 3;      // 동시에 조회할 작업장 수 (EDI 서버 부담을 줄이려고 3개로 제한)
@@ -90,6 +92,42 @@
     return out;
   }
 
+  // 거래처 입출고 조회 화면의 사용자 ID(instEmpn): HTML 안에 값이 들어 있다
+  async function instEmpn() {
+    const html = await (await fetch("/edi/stoc/STOC_CLNT_STDE.do", { credentials: "same-origin" })).text();
+    const m = html.match(/name=["']instEmpn["'][^>]*value=["']([^"']*)["']/) || html.match(/id=["']instEmpn["'][^>]*value=["']([^"']*)["']/);
+    if (!m || !m[1]) throw new Error("EDI 사용자 ID(instEmpn)를 못 찾았어요");
+    return m[1];
+  }
+
+  async function pullMoves(demd, inst, from, to) {
+    const body = "S_SAVENAME=" + MCOLS.join("|") + "&demdCode=" + encodeURIComponent(demd.code) + "&instEmpn=" + encodeURIComponent(inst) +
+      "&postCode=&demdName=&postName=&postNumb=&storTypeNm=&remvFlag=N&itemCode=&begnDate=" + from + "&enddDate=" + to +
+      "&confFlag=&inerMove=1&demdNumb=&retnFlag=&"; // 작업장 비움 = 모든작업장
+    let text = "";
+    for (let t = 0; ; t++) {
+      try {
+        const res = await fetch("/edi/stoc/STOC_CLNT_STDE_SEARCH.do", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, body, credentials: "same-origin" });
+        text = await res.text();
+        if (text.indexOf("<?xml") < 0) throw new Error("EDI 응답이 비정상이에요(로그인 만료?)");
+        break;
+      } catch (e) { if (/로그인 만료/.test(e.message) || t >= 2) throw e; await sleep(4000 * (t + 1)); }
+    }
+    const xml = new DOMParser().parseFromString(text.slice(text.indexOf("<?xml")), "text/xml");
+    const out = [];
+    xml.querySelectorAll("TR").forEach((tr) => {
+      const o = {};
+      tr.querySelectorAll("TD").forEach((td, i) => { o[MCOLS[i]] = td.textContent; });
+      if (!o.MOVE_CODE || !o.DEMD_DATE) return;
+      out.push({
+        move_code: o.MOVE_CODE, move_date: o.DEMD_DATE, item: o.SHOT_NAME, from_name: o.DELV_POST_NAME, to_name: o.STOR_POST_NAME,
+        move_type: o.MOVE_TYPE, iner: o.INER_MOVE, qty: num(o.MOVE_VOLM), chng: o.CHNG_FLAG, conf: o.CONF_FLAG, retn: o.RETN_FLAG,
+        bill_no: o.BILL_NUMB, note: o.MOVE_DESC,
+      });
+    });
+    return out;
+  }
+
   async function run() {
     // 형식이 틀린 주소(오타 등)는 지우고 다시 입력받는다
     if (GM_getValue("fnUrl") && !/^https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1\/[\w-]+$/.test(GM_getValue("fnUrl"))) GM_setValue("fnUrl", "");
@@ -120,8 +158,6 @@
     const todo = workplaces.filter((w) => !w.last_synced || parse(w.last_synced) < yesterday);
     const st = { total: 0, done: 0, failed: 0, idle: 0, lastErr: "", abort: false };
     const label = () => `${st.done}/${todo.length}곳 · ${st.total}행` + (st.failed ? ` · 실패 ${st.failed}` : "");
-    if (!todo.length) { GM_setValue("lastRun2", Date.now()); say("이미 최신이에요 (어제까지 반영됨)"); return; }
-
     let next = 0;
     async function worker() {
       while (!st.abort) {
@@ -155,10 +191,31 @@
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-    GM_setValue("lastRun2", st.failed ? 0 : Date.now()); // 실패가 있으면 다음 접속 때 바로 이어서 재시도
+    // ── 건별 이동(거래처 입출고 조회): 모든작업장을 한 번에. 수정·입고확인 변경을 잡으려고 최근 3일은 다시 받는다 ──
+    let mv = 0, mvErr = "";
+    if (!st.abort) {
+      try {
+        const inst = await instEmpn();
+        const { last_date } = await call("move_status", {});
+        let from = last_date ? addDays(parse(last_date), -3) : parse(START_DATE);
+        if (from < parse(START_DATE)) from = parse(START_DATE);
+        let guard = 0;
+        while (from <= yesterday && guard++ < 60) {
+          const to = new Date(Math.min(addDays(from, MOVE_CHUNK_DAYS - 1), yesterday));
+          say(`이동 내역 ${fmt(from)}~${fmt(to)} 조회 중… (${label()})`, true);
+          const rows = await pullMoves(demd, inst, fmt(from), fmt(to));
+          if (rows.length) { await call("moves_upsert", { rows, note: fmt(from) + "~" + fmt(to) }); mv += rows.length; }
+          from = addDays(to, 1);
+        }
+      } catch (e) { mvErr = e.message; }
+    }
+
+    GM_setValue("lastRun2", st.failed || mvErr ? 0 : Date.now()); // 실패가 있으면 다음 접속 때 바로 이어서 재시도
+    const mvTxt = mvErr ? ` · 이동내역 실패: ${mvErr}` : ` · 이동 ${mv}건`;
     say(st.abort ? `중단됨 · ${label()} — ${st.lastErr} (다시 접속하면 이어서 받아요)`
-      : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}`
-      : `동기화 완료 · ${st.done}곳 ${st.total}행 반영 (어제까지)`, st.abort || st.failed);
+      : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}${mvTxt}`
+      : (todo.length || mv || mvErr) ? `동기화 완료 · ${st.done}곳 ${st.total}행${mvTxt} (어제까지)`
+      : "이미 최신이에요 (어제까지 반영됨)", st.abort || st.failed || !!mvErr);
   }
 
   run().catch((e) => say("동기화 실패: " + e.message));
