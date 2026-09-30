@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      1.5
+// @version      1.6
 // @description  EDI 로그인 후 메인 화면이 열리면, PMS에 없는 날짜부터 어제까지의 일별 재고를 조회해 PMS로 보냅니다.
 // @match        http://edi.ajuprs.com/main_frame.do
 // @grant        GM_xmlhttpRequest
@@ -20,8 +20,11 @@
 (function () {
   "use strict";
   const COLS = "STOC_DATE|DATE_NAME|DEMD_TYPE|ITEM_NAME|LAST_STOC|RD00_VOLM|RD01_VOLM|RD05_VOLM|RD08_VOLM|RD99_VOLM|MS00_VOLM|MSCF_VOLM|MSCT_VOLM|MSCX_VOLM|MSIN_VOLM|MSOT_VOLM|MD00_VOLM|MDCF_VOLM|MDCT_VOLM|MDCX_VOLM|MDIN_VOLM|MDOT_VOLM|RS00_VOLM|RS01_VOLM|RS05_VOLM|RS06_VOLM|RS99_VOLM|DEST_VOLM|THIS_STOC|CONT_STOC|BACK_STOC|CONF_STOC|SELF_VOLM|sStatus".split("|");
-  const CHUNK_DAYS = 31;      // 한 번에 조회할 최대 일수
+  const CHUNK_DAYS = 40;      // 한 번에 조회할 최대 일수
+  const BACKFILL_DAYS = 36;   // 처음 받는 작업장은 어제 기준 36일 전부터 (직전 정산기간 26일~25일을 포함)
+  const CONCURRENCY = 3;      // 동시에 조회할 작업장 수 (EDI 서버 부담을 줄이려고 3개로 제한)
   const MIN_INTERVAL_MS = 60 * 60 * 1000; // 1시간 안에 다시 열면 건너뜀
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // ── 작은 상태창 ──
   const box = document.createElement("div");
@@ -112,23 +115,50 @@
     const { workplaces } = await call("status", {});
     if (!workplaces || !workplaces.length) { say("동기화 대상 작업장이 없어요 (PMS에서 지정)"); return; }
 
-    const yesterday = addDays(new Date(), -1);
-    let total = 0, done = 0, empty = 0;
-    for (const w of workplaces) {
-      let from = w.last_synced ? addDays(parse(w.last_synced), 1) : addDays(yesterday, -60); // 처음이면 60일 전부터
-      let guard = 0;
-      while (from <= yesterday && guard++ < 20) {
-        const to = new Date(Math.min(addDays(from, CHUNK_DAYS - 1), yesterday));
-        say(`${w.name} ${fmt(from)}~${fmt(to)} 조회 중… (${done + 1}/${workplaces.length})`, true);
-        const rows = await pull(demd, w.no, fmt(from), fmt(to));
-        if (rows.length) { await call("upsert", { rows, note: "userscript " + w.name }); total += rows.length; }
-        else empty++; // EDI 는 값이 0이어도 제품별 행을 주므로, 0행이면 이상 신호
-        from = addDays(to, 1);
+    const yesterday = parse(fmt(addDays(new Date(), -1))); // 시각을 뺀 어제 날짜
+    // 아직 어제까지 못 받은 작업장만 대상으로 한다
+    const todo = workplaces.filter((w) => !w.last_synced || parse(w.last_synced) < yesterday);
+    const st = { total: 0, done: 0, failed: 0, idle: 0, lastErr: "", abort: false };
+    const label = () => `${st.done}/${todo.length}곳 · ${st.total}행` + (st.failed ? ` · 실패 ${st.failed}` : "");
+    if (!todo.length) { GM_setValue("lastRun2", Date.now()); say("이미 최신이에요 (어제까지 반영됨)"); return; }
+
+    let next = 0;
+    async function worker() {
+      while (!st.abort) {
+        const w = todo[next++];
+        if (!w) return;
+        try {
+          let from = w.last_synced ? addDays(parse(w.last_synced), 1) : addDays(yesterday, -BACKFILL_DAYS);
+          let guard = 0, any = false;
+          while (from <= yesterday && guard++ < 10) {
+            const to = new Date(Math.min(addDays(from, CHUNK_DAYS - 1), yesterday));
+            say(`${w.name} ${fmt(from)}~${fmt(to)} 조회 중… (${label()})`, true);
+            let rows;
+            for (let t = 0; ; t++) { // 일시 오류는 최대 2번 재시도
+              try { rows = await pull(demd, w.no, fmt(from), fmt(to)); break; }
+              catch (e) { if (/로그인 만료/.test(e.message) || t >= 2) throw e; await sleep(4000 * (t + 1)); }
+            }
+            if (rows.length) { await call("upsert", { rows, note: "userscript " + w.name }); st.total += rows.length; any = true; }
+            from = addDays(to, 1);
+          }
+          if (!any) { // 재고가 전혀 없는 작업장: 조회했다는 표시만 남겨 다음부터 건너뛴다
+            const z = { stoc_date: fmt(yesterday), workplace_no: w.no, item: "-", last_stoc: 0, rental_in: 0, move_in: 0, move_out: 0, return_out: 0, this_stoc: 0, raw: null };
+            await call("upsert", { rows: [z], note: "userscript(빈 작업장) " + w.name }); st.idle++;
+          }
+          st.done++;
+        } catch (e) {
+          st.failed++; st.lastErr = w.name + ": " + e.message;
+          if (/로그인 만료|EDI 작업장 코드/.test(e.message)) st.abort = true; // EDI 세션이 끊기면 전체 중단(다음 접속 때 이어서)
+          if (/토큰이|주소가|anon 키가/.test(e.message)) st.abort = true;
+        }
       }
-      done++;
     }
-    GM_setValue("lastRun2", empty && !total ? 0 : Date.now()); // 빈 응답뿐이면 다음 접속 때 바로 재시도
-    say(empty ? `완료 ${total}행 반영 · 빈 응답 ${empty}건(확인 필요)` : total ? `동기화 완료 · ${total}행 반영 (어제까지)` : "이미 최신이에요 (어제까지 반영됨)");
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+    GM_setValue("lastRun2", st.failed ? 0 : Date.now()); // 실패가 있으면 다음 접속 때 바로 이어서 재시도
+    say(st.abort ? `중단됨 · ${label()} — ${st.lastErr} (다시 접속하면 이어서 받아요)`
+      : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}`
+      : `동기화 완료 · ${st.done}곳 ${st.total}행 반영 (어제까지)`, st.abort || st.failed);
   }
 
   run().catch((e) => say("동기화 실패: " + e.message));
