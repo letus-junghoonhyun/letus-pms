@@ -49,7 +49,7 @@
           if (r.status === 401) { GM_setValue("anon", ""); return reject(new Error("anon 키가 틀렸어요. EDI를 새로고침하면 다시 물어봅니다")); }
           reject(new Error(j.error || "HTTP " + r.status));
         },
-        onerror: () => reject(new Error("PMS 서버 연결 실패")), ontimeout: () => reject(new Error("PMS 서버 응답 시간 초과")),
+        onerror: () => reject(new Error("PMS 서버 연결 실패 — 저장된 주소: " + GM_getValue("fnUrl"))), ontimeout: () => reject(new Error("PMS 서버 응답 시간 초과")),
       });
     });
   }
@@ -86,6 +86,8 @@
   }
 
   async function run() {
+    // 형식이 틀린 주소(오타 등)는 지우고 다시 입력받는다
+    if (GM_getValue("fnUrl") && !/^https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1\/[\w-]+$/.test(GM_getValue("fnUrl"))) GM_setValue("fnUrl", "");
     if (!GM_getValue("fnUrl")) {
       const u = prompt("PMS 수신 함수 주소 (예: https://xxxx.supabase.co/functions/v1/edi-ingest)");
       if (!u) return;
