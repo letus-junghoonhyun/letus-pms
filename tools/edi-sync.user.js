@@ -57,7 +57,7 @@
   async function pull(demd, no, from, to) {
     const body = "S_SAVENAME=" + COLS.join("|") + "&title=조회기간&begnDate=" + from + "&enddDate=" + to +
       "&title=제품유형&itemCode=&title=작업장&demdCode=" + encodeURIComponent(demd.code) + "&demdName=" + encodeURIComponent(demd.name) +
-      "&demdNumb=" + no + "&title=출고&";
+      "&demdNumb=" + (no === 0 ? "" : no) + "&title=출고&"; // 0번 = 모든작업장 합계
     const res = await fetch("/edi/stoc/EDI_STOC_CLNT_LIST_NEW.do", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, body, credentials: "same-origin" });
     const text = await res.text();
     const at = text.indexOf("<?xml");
