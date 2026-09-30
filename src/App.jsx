@@ -113,9 +113,9 @@ const toOf = (s) => isMove(s) ? (s.to_center || "—") : isReturn(s) ? (s.center
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
 const NAV_BY_ROLE = {
-  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "정산", "마스터", "사용자", "설정"],
-  운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "정산", "마스터", "설정"],
-  정산담당: ["현황", "재고", "정산", "마스터", "설정"],
+  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "정산", "마스터", "사용자", "설정"],
+  운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "정산", "마스터", "설정"],
+  정산담당: ["현황", "재고", "EDI", "정산", "마스터", "설정"],
   협력업체: ["현황", "반납", "확인", "설정"],
   AJ: ["AJ", "설정"],   // AJ네트웍스 직원: 요청 처리 + 내 설정
 };
@@ -654,7 +654,7 @@ function Shell({ session, initialConfirm }) {
     { key: "현황", label: "수불 현황" }, { key: "출고", label: "출고 등록" },
     { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
-    { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 요청" },
+    { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
     { key: "정산", label: "정산" }, { key: "마스터", label: "거래처·단가" },
     { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
@@ -748,6 +748,7 @@ function Shell({ session, initialConfirm }) {
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
             {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, ships, caps, centers: centerList }} />}
+            {nav === "EDI" && caps.inventory && <EdiStock caps={caps} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner, centers, addCenter, toggleCenter }} />}
             {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId: session.user.id }} />}
@@ -1853,6 +1854,191 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
         </div>
       )}
       <Note>공급요청 완료 → 센터 재고 +. 회수요청 완료 → 센터/거래처 재고 −, AJ로. 지금은 수동 2단계(가설정)예요 — 나중에 실제 AJ EDI 연동으로 이 완료 처리가 자동화됩니다.</Note>
+    </>
+  );
+}
+
+// ─── EDI 재고·정산 (AJ EDI 일별 재고 기반) ─────────────────────
+// 정산: 전월 26일 ~ 당월 25일 · 월 사용장수 = 일별 보유수량 합 ÷ 일수(올림) × 단가
+const AJ_UNIT_DEFAULT = 2400;
+const isoD = (d) => d.toISOString().slice(0, 10);
+const periodOf = (ym) => {
+  const [y, m] = ym.split("-").map(Number);
+  const s = new Date(Date.UTC(y, m - 2, 26)), e = new Date(Date.UTC(y, m - 1, 25));
+  return { from: isoD(s), to: isoD(e), days: Math.round((e - s) / 86400000) + 1 };
+};
+const billingMonthOf = (d) => { const x = new Date(d.getTime() + 9 * 3600000); const y = x.getUTCFullYear(), m = x.getUTCMonth(), dd = x.getUTCDate(); const t = new Date(Date.UTC(y, dd >= 26 ? m + 1 : m, 1)); return isoD(t).slice(0, 7); };
+
+function EdiStock({ caps = {} }) {
+  const nowMonth = billingMonthOf(new Date());
+  const [wps, setWps] = useState([]);
+  const [wpNo, setWpNo] = useState(1);
+  const [q, setQ] = useState("");
+  const [onlyData, setOnlyData] = useState(true);
+  const [month, setMonth] = useState(nowMonth);
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [item, setItem] = useState("");
+  const [negMode, setNegMode] = useState("zero");
+  const [unit, setUnit] = useState(AJ_UNIT_DEFAULT);
+
+  useEffect(() => {
+    supabase.from("aj_workplace").select("*").order("no").limit(1000).then(({ data, error }) => {
+      if (error) setMsg("작업장 목록을 불러오지 못했어요. letus_edi.sql 실행 여부를 확인해주세요. (" + error.message + ")");
+      else setWps(data || []);
+    });
+  }, []);
+  const per = useMemo(() => periodOf(month), [month]);
+  const months = useMemo(() => { const out = []; let [y, m] = nowMonth.split("-").map(Number); for (let i = 0; i < 8; i++) { out.push(`${y}-${String(m).padStart(2, "0")}`); m--; if (m === 0) { m = 12; y--; } } return out; }, [nowMonth]);
+
+  useEffect(() => {
+    let alive = true;
+    setBusy(true);
+    supabase.from("aj_stock_daily").select("stoc_date,item,last_stoc,rental_in,move_in,move_out,return_out,this_stoc")
+      .eq("workplace_no", wpNo).gte("stoc_date", per.from).lte("stoc_date", per.to).order("stoc_date").limit(3000)
+      .then(({ data, error }) => { if (!alive) return; setBusy(false); if (error) setMsg(error.message); else { setRows(data || []); } });
+    return () => { alive = false; };
+  }, [wpNo, per.from, per.to]);
+
+  const wp = wps.find((w) => w.no === wpNo);
+  const toggleSync = async () => {
+    const next = !wp.sync_enabled;
+    const { error } = await supabase.from("aj_workplace").update({ sync_enabled: next }).eq("no", wp.no);
+    if (error) { setMsg(error.message); return; }
+    setWps((l) => l.map((w) => (w.no === wp.no ? { ...w, sync_enabled: next } : w)));
+  };
+  const shown = wps.filter((w) => (!onlyData || w.last_synced || w.sync_enabled) &&(!q || (w.no + " " + w.name).includes(q)));
+  const byItem = useMemo(() => {
+    const m = {};
+    rows.forEach((r) => { (m[r.item] = m[r.item] || []).push(r); });
+    return m;
+  }, [rows]);
+  // 값이 있는 제품만
+  const items = Object.keys(byItem).filter((k) => byItem[k].some((r) => r.this_stoc || r.move_in || r.move_out || r.rental_in || r.return_out)).sort();
+  const cur = items.includes(item) ? item : items[0];
+  const lastDate = rows.length ? rows[rows.length - 1].stoc_date : null;
+  const complete = lastDate && lastDate >= per.to;
+  const covered = new Set(rows.map((r) => r.stoc_date)).size;
+  const divisor = complete ? per.days : Math.max(covered, 1);
+
+  const calc = items.map((k) => {
+    const list = byItem[k];
+    const held = list.map((r) => negMode === "zero" ? Math.max(r.this_stoc, 0) : r.this_stoc);
+    const sum = held.reduce((a, b) => a + b, 0);
+    const avg = Math.ceil(sum / divisor);
+    const neg = list.filter((r) => r.this_stoc < 0).length;
+    return { item: k, sum, avg, amount: avg * unit, neg };
+  });
+  const total = calc.reduce((a, c) => a + c.amount, 0);
+
+  const list = byItem[cur] || [];
+  const mismatch = list.filter((r) => r.last_stoc + r.rental_in + r.move_in - r.move_out - r.return_out !== r.this_stoc);
+  const jumps = list.filter((r) => Math.max(r.move_in, r.move_out) >= 3000);
+  const negDays = list.filter((r) => r.this_stoc < 0);
+
+  const chart = (() => {
+    if (list.length < 2) return null;
+    const vals = list.map((r) => r.this_stoc); const mn = Math.min(0, ...vals), mx = Math.max(...vals, 1);
+    const W = 600, H = 150, x = (i) => 10 + (i * (W - 20)) / (list.length - 1), y = (v) => 10 + ((mx - v) * (H - 20)) / (mx - mn || 1);
+    return { W, H, pts: list.map((r, i) => `${x(i)},${y(r.this_stoc)}`).join(" "), zero: y(0), mx, mn };
+  })();
+  const numC = (v) => ({ color: v < 0 ? C.red : C.text, fontWeight: v < 0 ? 600 : 400 });
+
+  return (
+    <>
+      <Head title="EDI 재고·정산" sub="AJ EDI 일별 재고 기반 · 매일 전일자까지 자동 반영" />
+      {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장 검색 (이름·번호)" style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, width: 170 }} />
+        <select value={wpNo} onChange={(e) => setWpNo(Number(e.target.value))} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, maxWidth: 260 }}>
+          {wp && !shown.some((w) => w.no === wpNo) && <option value={wpNo}>{wp.no}. {wp.name}</option>}
+          {shown.map((w) => <option key={w.no} value={w.no}>{w.no}. {w.closed ? "(폐쇄) " : ""}{w.name} · {w.kind}</option>)}
+        </select>
+        <label style={{ fontSize: 12, color: C.sub }}><input type="checkbox" checked={onlyData} onChange={(e) => setOnlyData(e.target.checked)} /> 데이터·동기화 대상만 ({wps.filter((w) => w.last_synced || w.sync_enabled).length}/{wps.length})</label>
+        {caps.users && wp && (
+          <button onClick={toggleSync} style={{ ...btnGhost, padding: "6px 12px", fontSize: 12, background: wp.sync_enabled ? C.teal : "transparent", color: wp.sync_enabled ? "#04342C" : C.text }}>
+            {wp.sync_enabled ? "✓ 자동 동기화 대상" : "동기화 대상으로 지정"}
+          </button>
+        )}
+        <span style={{ fontSize: 13, color: C.sub, marginLeft: 6 }}>정산월</span>
+        <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }}>
+          {months.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+        <span style={{ fontSize: 12, color: C.hint }}>{per.from} ~ {per.to} ({per.days}일)</span>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <Metric label="집계 기준일" value={lastDate ? lastDate.slice(5) : "—"} tone="plain" />
+        <Metric label={complete ? "청구 예상액" : "청구 예상액 (진행중)"} value={won(total)} tone="info" />
+        <Metric label="마이너스 재고" value={negDays.length} unit="일" tone={negDays.length ? "warn" : "success"} />
+        <Metric label="수식 불일치" value={mismatch.length} unit="건" tone={mismatch.length ? "warn" : "success"} />
+      </div>
+
+      {busy ? <Splash text="불러오는 중…" /> : !rows.length ? (
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 20, fontSize: 13, color: C.sub, lineHeight: 1.7 }}>
+          이 작업장·기간의 EDI 데이터가 아직 없어요. {wp && !wp.last_synced ? "이 작업장은 아직 동기화 대상이 아니에요." : "동기화가 돌면 자동으로 채워져요."}
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 8, fontSize: 12, color: C.sub }}>
+            <span>마이너스 재고는</span>
+            <select value={negMode} onChange={(e) => setNegMode(e.target.value)} style={{ fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }}>
+              <option value="zero">0장으로 계산</option><option value="raw">음수 그대로 계산</option>
+            </select>
+            <span>단가</span>
+            <input type="number" value={unit} onChange={(e) => setUnit(Number(e.target.value) || 0)} style={{ width: 80, fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
+            <span>원 · {complete ? `${per.days}일 기준` : `진행중: ${covered}일 기준 잠정`}</span>
+          </div>
+          <div style={{ overflowX: "auto", marginBottom: 18 }}>
+            <table style={tbl}>
+              <thead><tr><Th>제품</Th><Th r>일별 보유합계</Th><Th r>사용장수</Th><Th r>금액</Th><Th r>마이너스일</Th></tr></thead>
+              <tbody>
+                {calc.map((c) => (
+                  <tr key={c.item} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <Td b>{c.item}</Td><Td r>{c.sum.toLocaleString()}</Td><Td r>{c.avg.toLocaleString()}</Td><Td r b>{c.amount.toLocaleString()}</Td><Td r><span style={numC(c.neg ? -1 : 0)}>{c.neg}</span></Td>
+                  </tr>
+                ))}
+                <tr style={{ borderTop: `1px solid ${C.border}`, background: "#eef0f3" }}>
+                  <td colSpan={3} style={{ padding: "11px 6px", fontSize: 12, fontWeight: 600 }}>합계</td>
+                  <td style={{ padding: "11px 6px", fontSize: 12, fontWeight: 600, textAlign: "right" }}>{won(total)}</td><td />
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            {items.map((k) => <button key={k} onClick={() => setItem(k)} style={{ ...btnGhost, padding: "6px 14px", background: k === cur ? C.teal : "transparent", color: k === cur ? "#04342C" : C.text }}>{k}</button>)}
+          </div>
+          {chart && (
+            <svg viewBox={`0 0 ${chart.W} ${chart.H}`} style={{ width: "100%", maxHeight: 170, background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, marginBottom: 6 }}>
+              <line x1="10" x2={chart.W - 10} y1={chart.zero} y2={chart.zero} stroke={C.border} strokeDasharray="4 3" />
+              <polyline points={chart.pts} fill="none" stroke={C.teal} strokeWidth="2" />
+              <text x="12" y="16" fontSize="10" fill={C.hint}>{chart.mx.toLocaleString()}</text>
+              <text x="12" y={chart.H - 4} fontSize="10" fill={C.hint}>{chart.mn.toLocaleString()}</text>
+            </svg>
+          )}
+          {(jumps.length > 0 || mismatch.length > 0) && (
+            <div style={{ fontSize: 12, color: C.sub, marginBottom: 8, lineHeight: 1.7 }}>
+              {jumps.length > 0 && <div>⚠ 대량 이동일(3,000장 이상, 수기조정 의심): {jumps.map((r) => r.stoc_date.slice(5)).join(", ")}</div>}
+              {mismatch.length > 0 && <div>⚠ 전일+입고−출고−반납 ≠ 금일: {mismatch.map((r) => r.stoc_date.slice(5)).join(", ")}</div>}
+            </div>
+          )}
+          <div style={{ overflowX: "auto" }}>
+            <table style={tbl}>
+              <thead><tr><Th>일자</Th><Th r>전일</Th><Th r>렌탈입고</Th><Th r>이동입고</Th><Th r>이동출고</Th><Th r>반납/회수</Th><Th r>금일재고</Th></tr></thead>
+              <tbody>
+                {list.map((r) => (
+                  <tr key={r.stoc_date} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <Td>{r.stoc_date.slice(5)}</Td><Td r>{r.last_stoc.toLocaleString()}</Td><Td r>{r.rental_in || ""}</Td><Td r>{r.move_in || ""}</Td><Td r>{r.move_out || ""}</Td><Td r>{r.return_out || ""}</Td>
+                    <Td r b><span style={numC(r.this_stoc)}>{r.this_stoc.toLocaleString()}</span></Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </>
   );
 }
