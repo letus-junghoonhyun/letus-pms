@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      1.4
+// @version      1.5
 // @description  EDI 로그인 후 메인 화면이 열리면, PMS에 없는 날짜부터 어제까지의 일별 재고를 조회해 PMS로 보냅니다.
 // @match        http://edi.ajuprs.com/main_frame.do
 // @grant        GM_xmlhttpRequest
@@ -57,10 +57,11 @@
 
   async function demdInfo() {
     const html = await (await fetch("/edi/stoc/STOC_CLNT_LIST.do", { credentials: "same-origin" })).text();
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const code = doc.getElementById("demdCode"), name = doc.getElementById("demdName");
-    if (!code) throw new Error("EDI 로그인 상태가 아니에요");
-    return { code: code.getAttribute("value") || "", name: name ? name.getAttribute("value") || "" : "" };
+    // 작업장 코드는 HTML 속성이 아니라 페이지 스크립트의 $("#demdCode").val('P123456') 문장에 들어 있다
+    const c = html.match(/\$\(\s*["']#demdCode["']\s*\)\.val\(\s*'([^']*)'\s*\)/);
+    const n = html.match(/\$\(\s*["']#demdName["']\s*\)\.val\(\s*'([^']*)'\s*\)/);
+    if (!c || !c[1]) throw new Error("EDI 작업장 코드를 못 찾았어요(로그인 상태 확인)");
+    return { code: c[1], name: n ? n[1] : "" };
   }
 
   async function pull(demd, no, from, to) {
@@ -104,7 +105,7 @@
       if (!t) return;
       GM_setValue("token", t.trim());
     }
-    if (Date.now() - (GM_getValue("lastRun") || 0) < MIN_INTERVAL_MS) return;
+    if (Date.now() - (GM_getValue("lastRun2") || 0) < MIN_INTERVAL_MS) return;
 
     say("동기화 준비 중…", true);
     const demd = await demdInfo();
@@ -112,7 +113,7 @@
     if (!workplaces || !workplaces.length) { say("동기화 대상 작업장이 없어요 (PMS에서 지정)"); return; }
 
     const yesterday = addDays(new Date(), -1);
-    let total = 0, done = 0;
+    let total = 0, done = 0, empty = 0;
     for (const w of workplaces) {
       let from = w.last_synced ? addDays(parse(w.last_synced), 1) : addDays(yesterday, -60); // 처음이면 60일 전부터
       let guard = 0;
@@ -121,12 +122,13 @@
         say(`${w.name} ${fmt(from)}~${fmt(to)} 조회 중… (${done + 1}/${workplaces.length})`, true);
         const rows = await pull(demd, w.no, fmt(from), fmt(to));
         if (rows.length) { await call("upsert", { rows, note: "userscript " + w.name }); total += rows.length; }
+        else empty++; // EDI 는 값이 0이어도 제품별 행을 주므로, 0행이면 이상 신호
         from = addDays(to, 1);
       }
       done++;
     }
-    GM_setValue("lastRun", Date.now());
-    say(total ? `동기화 완료 · ${total}행 반영 (어제까지)` : "이미 최신이에요 (어제까지 반영됨)");
+    GM_setValue("lastRun2", empty && !total ? 0 : Date.now()); // 빈 응답뿐이면 다음 접속 때 바로 재시도
+    say(empty ? `완료 ${total}행 반영 · 빈 응답 ${empty}건(확인 필요)` : total ? `동기화 완료 · ${total}행 반영 (어제까지)` : "이미 최신이에요 (어제까지 반영됨)");
   }
 
   run().catch((e) => say("동기화 실패: " + e.message));
