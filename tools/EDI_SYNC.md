@@ -7,10 +7,10 @@ EDI 로그인에는 SMS 인증번호가 있어 서버가 대신 로그인할 수
 
 1. **DB**: Supabase SQL 편집기에서 `letus_edi.sql` 실행 (작업장 491곳 + 양지 9월 재고 시드 포함).
 2. **수신 함수**: Supabase > Edge Functions > 새 함수 `edi-ingest` 생성, `supabase/functions/edi-ingest/index.ts` 내용 붙여넣기.
-   - 함수 설정에서 **Verify JWT 끄기** (토큰으로 자체 인증).
+   - Verify JWT 는 **켠 채로 두기** (앱의 anon 키가 통과용, 실제 잠금은 토큰).
    - Edge Functions > Secrets 에 `EDI_INGEST_TOKEN` = 임의의 긴 문자열 등록.
 3. **브라우저 스크립트**: Chrome/Edge에 Tampermonkey 설치 → 새 스크립트에 `tools/edi-sync.user.js` 붙여넣기.
-   - EDI 메인 화면을 처음 열 때 함수 주소(`https://<프로젝트>.supabase.co/functions/v1/edi-ingest`)와 토큰을 묻습니다. 브라우저에만 저장됩니다.
+   - EDI 메인 화면을 처음 열 때 함수 주소(`https://<프로젝트>.supabase.co/functions/v1/edi-ingest`), anon 키(`src/supabase.js`의 값), 토큰을 묻습니다. 브라우저에만 저장됩니다.
 4. **대상 작업장**: PMS > EDI 재고·정산 에서 작업장을 고르고 “동기화 대상으로 지정” (관리자).
 
 ## 매일 동작

@@ -12,7 +12,8 @@
 // ==/UserScript==
 //
 // 설치: Chrome/Edge 에 Tampermonkey 확장 설치 → 새 스크립트에 이 파일 내용 붙여넣기 → 저장.
-// 첫 실행 때 "함수 주소"와 "토큰"을 한 번 묻습니다(브라우저에만 저장, 파일에는 남지 않음).
+// 첫 실행 때 "함수 주소", "anon 키", "토큰"을 한 번 묻습니다(브라우저에만 저장, 파일에는 남지 않음).
+// 함수는 Verify JWT 를 켠 채로 두면 됩니다(anon 키가 통과용, 진짜 잠금은 토큰).
 // 토큰은 Supabase 함수 비밀값 EDI_INGEST_TOKEN 과 같은 값입니다.
 
 (function () {
@@ -36,7 +37,7 @@
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: "POST", url: GM_getValue("fnUrl"),
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", apikey: GM_getValue("anon"), Authorization: "Bearer " + GM_getValue("anon") },
         data: JSON.stringify({ token: GM_getValue("token"), action, ...payload }),
         timeout: 120000,
         onload: (r) => { let j = {}; try { j = JSON.parse(r.responseText); } catch (e) {} r.status === 200 ? resolve(j) : reject(new Error(j.error || "HTTP " + r.status)); },
@@ -81,6 +82,11 @@
       const u = prompt("PMS 수신 함수 주소 (예: https://xxxx.supabase.co/functions/v1/edi-ingest)");
       if (!u) return;
       GM_setValue("fnUrl", u.trim());
+    }
+    if (!GM_getValue("anon")) {
+      const a = prompt("Supabase anon public 키 (src/supabase.js 의 SUPABASE_ANON_KEY 와 같은 값. 공개돼도 되는 키)");
+      if (!a) return;
+      GM_setValue("anon", a.trim());
     }
     if (!GM_getValue("token")) {
       const t = prompt("수신 토큰 (Supabase 함수 비밀값 EDI_INGEST_TOKEN 과 같은 값)");
