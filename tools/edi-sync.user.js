@@ -40,7 +40,15 @@
         headers: { "Content-Type": "application/json", apikey: GM_getValue("anon"), Authorization: "Bearer " + GM_getValue("anon") },
         data: JSON.stringify({ token: GM_getValue("token"), action, ...payload }),
         timeout: 120000,
-        onload: (r) => { let j = {}; try { j = JSON.parse(r.responseText); } catch (e) {} r.status === 200 ? resolve(j) : reject(new Error(j.error || "HTTP " + r.status)); },
+        onload: (r) => {
+          let j = {}; try { j = JSON.parse(r.responseText); } catch (e) {}
+          if (r.status === 200) return resolve(j);
+          // 틀린 설정값은 지워서 다음 새로고침 때 입력창이 다시 뜨게 한다
+          if (r.status === 404) { GM_setValue("fnUrl", ""); return reject(new Error("함수 주소가 틀렸어요. EDI를 새로고침하면 주소를 다시 물어봅니다")); }
+          if (r.status === 401 && j.error === "unauthorized") { GM_setValue("token", ""); return reject(new Error("토큰이 틀렸어요. EDI를 새로고침하면 다시 물어봅니다")); }
+          if (r.status === 401) { GM_setValue("anon", ""); return reject(new Error("anon 키가 틀렸어요. EDI를 새로고침하면 다시 물어봅니다")); }
+          reject(new Error(j.error || "HTTP " + r.status));
+        },
         onerror: () => reject(new Error("PMS 서버 연결 실패")), ontimeout: () => reject(new Error("PMS 서버 응답 시간 초과")),
       });
     });
