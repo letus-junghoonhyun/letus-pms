@@ -2007,7 +2007,7 @@ function EdiStockView({ caps = {} }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [item, setItem] = useState("");
-  const [negMode, setNegMode] = useState("zero");
+  const [negMode, setNegMode] = useState("raw"); // 마이너스 재고는 음수 그대로 계산(2026-10-01 결정)
   const [unit, setUnit] = useState(AJ_UNIT_DEFAULT);
 
   useEffect(() => {
@@ -2111,7 +2111,7 @@ function EdiStockView({ caps = {} }) {
           <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 8, fontSize: 12, color: C.sub }}>
             <span>마이너스 재고는</span>
             <select value={negMode} onChange={(e) => setNegMode(e.target.value)} style={{ fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }}>
-              <option value="zero">0장으로 계산</option><option value="raw">음수 그대로 계산</option>
+              <option value="raw">음수 그대로 계산</option><option value="zero">0장으로 계산</option>
             </select>
             <span>단가</span>
             <input type="number" value={unit} onChange={(e) => setUnit(Number(e.target.value) || 0)} style={{ width: 80, fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
