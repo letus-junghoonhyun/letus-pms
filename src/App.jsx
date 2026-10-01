@@ -1870,6 +1870,133 @@ const periodOf = (ym) => {
 const billingMonthOf = (d) => { const x = new Date(d.getTime() + 9 * 3600000); const y = x.getUTCFullYear(), m = x.getUTCMonth(), dd = x.getUTCDate(); const t = new Date(Date.UTC(y, dd >= 26 ? m + 1 : m, 1)); return isoD(t).slice(0, 7); };
 
 function EdiStock({ caps = {} }) {
+  const [view, setView] = useState("stock");
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {[["stock", "재고·정산"], ["move", "이동 현황 (어디서 → 어디로)"]].map(([k, l]) => (
+          <button key={k} onClick={() => setView(k)} style={{ ...btnGhost, padding: "7px 16px", background: view === k ? C.teal : "transparent", color: view === k ? "#04342C" : C.text, fontWeight: view === k ? 600 : 400 }}>{l}</button>
+        ))}
+      </div>
+      {view === "stock" ? <EdiStockView caps={caps} /> : <EdiMoves />}
+    </>
+  );
+}
+
+// 건별 이동 현황: EDI 거래처 입출고 조회 기반. 누가 누구에게 몇 장 보냈는지, 입고확인 상태까지
+function EdiMoves() {
+  const [from, setFrom] = useState(isoD(new Date(Date.now() - 6 * 86400000)));
+  const [to, setTo] = useState(isoD(new Date()));
+  const [q, setQ] = useState("");
+  const [item, setItem] = useState("");
+  const [iner, setIner] = useState("");
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setBusy(true); setMsg("");
+      const all = [];
+      for (let p = 0; p < 40; p++) { // 한 번에 1000행까지만 주므로 페이지를 넘겨 받는다
+        const { data, error } = await supabase.from("aj_move").select("move_code,move_date,item,from_name,to_name,move_type,iner,qty,chng,conf,note")
+          .gte("move_date", from).lte("move_date", to).order("move_date", { ascending: false }).order("move_code").range(p * 1000, p * 1000 + 999);
+        if (error) { if (alive) { setMsg("이동 내역을 불러오지 못했어요. letus_edi3.sql 실행 여부를 확인해주세요. (" + error.message + ")"); setBusy(false); } return; }
+        all.push(...(data || []));
+        if (!data || data.length < 1000) break;
+      }
+      if (alive) { setRows(all); setBusy(false); }
+    })();
+    return () => { alive = false; };
+  }, [from, to]);
+
+  const items = [...new Set(rows.map((r) => r.item))].sort();
+  const view = rows.filter((r) => (!item || r.item === item) && (!iner || r.iner === iner) && (!q || (r.from_name + " " + r.to_name + " " + (r.note || "")).includes(q)));
+  const sumQty = view.reduce((a, r) => a + r.qty, 0);
+  const unconf = view.filter((r) => r.conf !== "승인").length;
+  const corr = view.filter((r) => r.qty < 0 || r.chng === "수정").length;
+
+  const flows = useMemo(() => {
+    const m = {};
+    view.forEach((r) => { const k = r.from_name + "→" + r.to_name + "|" + r.item; m[k] = m[k] || { from: r.from_name, to: r.to_name, item: r.item, qty: 0, n: 0 }; m[k].qty += r.qty; m[k].n++; });
+    return Object.values(m).sort((a, b) => Math.abs(b.qty) - Math.abs(a.qty)).slice(0, 15);
+  }, [view]);
+  const net = useMemo(() => {
+    const m = {};
+    view.forEach((r) => {
+      (m[r.from_name] = m[r.from_name] || { out: 0, inn: 0 }).out += r.qty;
+      (m[r.to_name] = m[r.to_name] || { out: 0, inn: 0 }).inn += r.qty;
+    });
+    return Object.entries(m).map(([name, v]) => ({ name, ...v, net: v.inn - v.out })).sort((a, b) => Math.abs(b.net) - Math.abs(a.net)).slice(0, 12);
+  }, [view]);
+  const numC = (v) => ({ color: v < 0 ? C.red : C.text, fontWeight: v < 0 ? 600 : 400 });
+  const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
+
+  return (
+    <>
+      <Head title="이동 현황" sub="AJ EDI 건별 이동 · 출발지 → 도착지, 수량, 입고확인 상태" />
+      {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={inp} />
+        <span style={{ color: C.sub }}>~</span>
+        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={inp} />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="출발지·도착지 검색" style={{ ...inp, width: 170 }} />
+        <select value={item} onChange={(e) => setItem(e.target.value)} style={inp}><option value="">전체 제품</option>{items.map((i) => <option key={i} value={i}>{i}</option>)}</select>
+        <select value={iner} onChange={(e) => setIner(e.target.value)} style={inp}><option value="">내부·외부 전체</option><option value="내부">내부(센터·사업장 간)</option><option value="외부">외부(수요처 간)</option></select>
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <Metric label="이동 건수" value={view.length.toLocaleString()} unit="건" tone="plain" />
+        <Metric label="이동 수량" value={sumQty.toLocaleString()} unit="장" tone="info" />
+        <Metric label="입고 미확인" value={unconf.toLocaleString()} unit="건" tone={unconf ? "warn" : "success"} />
+        <Metric label="수정·정정" value={corr.toLocaleString()} unit="건" tone={corr ? "warn" : "success"} />
+      </div>
+
+      {busy ? <Splash text="불러오는 중…" /> : !rows.length ? (
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 20, fontSize: 13, color: C.sub, lineHeight: 1.7 }}>이 기간의 이동 데이터가 아직 없어요. EDI 로그인 후 동기화가 돌면 채워져요.</div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))", gap: 14, marginBottom: 18 }}>
+            <div style={{ overflowX: "auto" }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>주요 흐름 (수량 상위 15)</div>
+              <table style={tbl}>
+                <thead><tr><Th>출발지</Th><Th>도착지</Th><Th>제품</Th><Th r>건</Th><Th r>수량</Th></tr></thead>
+                <tbody>{flows.map((f, i) => (
+                  <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td>{f.from}</Td><Td>{f.to}</Td><Td>{f.item}</Td><Td r>{f.n}</Td><Td r b>{f.qty.toLocaleString()}</Td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>순증감 (받은 수량 − 보낸 수량, 상위 12)</div>
+              <table style={tbl}>
+                <thead><tr><Th>작업장</Th><Th r>받음</Th><Th r>보냄</Th><Th r>순증감</Th></tr></thead>
+                <tbody>{net.map((n) => (
+                  <tr key={n.name} style={{ borderTop: `1px solid ${C.border}` }}><Td>{n.name}</Td><Td r>{n.inn.toLocaleString()}</Td><Td r>{n.out.toLocaleString()}</Td><Td r b><span style={numC(n.net)}>{n.net > 0 ? "+" : ""}{n.net.toLocaleString()}</span></Td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>이동 내역 {view.length > 300 ? `(최근 300건 / 전체 ${view.length.toLocaleString()}건)` : ""}</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={tbl}>
+              <thead><tr><Th>일자</Th><Th>출발지</Th><Th>도착지</Th><Th>제품</Th><Th r>수량</Th><Th>구분</Th><Th>입고확인</Th><Th>비고</Th></tr></thead>
+              <tbody>{view.slice(0, 300).map((r, i) => (
+                <tr key={r.move_code + i} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <Td>{r.move_date.slice(5)}</Td><Td>{r.from_name}</Td><Td>{r.to_name}</Td><Td>{r.item}</Td>
+                  <Td r b><span style={numC(r.qty)}>{r.qty.toLocaleString()}</span></Td><Td>{r.iner}{r.move_type === "반납출고" ? " · 반납" : ""}{r.chng === "수정" ? " · 수정" : ""}</Td>
+                  <Td><span style={{ color: r.conf === "승인" ? C.green : C.sub }}>{r.conf}</span></Td><Td>{r.note || ""}</Td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function EdiStockView({ caps = {} }) {
   const nowMonth = billingMonthOf(new Date());
   const [wps, setWps] = useState([]);
   const [wpNo, setWpNo] = useState(1);
