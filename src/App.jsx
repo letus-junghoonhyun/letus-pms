@@ -2007,7 +2007,9 @@ function EdiStockView({ caps = {} }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [item, setItem] = useState("");
-  const [negMode, setNegMode] = useState("raw"); // 마이너스 재고는 음수 그대로 계산(2026-10-01 결정)
+  const [negMode, setNegMode] = useState("zero"); // 데이터는 음수 그대로 저장, 정산 계산에서만 0 처리(가이드: 마이너스 재고는 청구 대상 아님)
+  const [basis, setBasis] = useState("this");   // 정산에 쓰는 재고 열: 전체/계약/회수/확인
+  const [detail, setDetail] = useState(false);   // 일별 표에 계약·회수·확인재고 열 표시
   const [unit, setUnit] = useState(AJ_UNIT_DEFAULT);
 
   useEffect(() => {
@@ -2022,7 +2024,7 @@ function EdiStockView({ caps = {} }) {
   useEffect(() => {
     let alive = true;
     setBusy(true);
-    supabase.from("aj_stock_daily").select("stoc_date,item,last_stoc,rental_in,move_in,move_out,return_out,this_stoc")
+    supabase.from("aj_stock_daily").select("stoc_date,item,last_stoc,rental_in,move_in,move_out,return_out,this_stoc,raw")
       .eq("workplace_no", wpNo).gte("stoc_date", per.from).lte("stoc_date", per.to).order("stoc_date").limit(3000)
       .then(({ data, error }) => { if (!alive) return; setBusy(false); if (error) setMsg(error.message); else { setRows(data || []); } });
     return () => { alive = false; };
@@ -2049,12 +2051,15 @@ function EdiStockView({ caps = {} }) {
   const covered = new Set(rows.map((r) => r.stoc_date)).size;
   const divisor = complete ? per.days : Math.max(covered, 1);
 
+  // EDI 원본(raw)에 있는 재고 열. 없으면(초기 시드 행) 금일재고 전체로 대신한다
+  const rawN = (r, k) => { const v = r.raw && r.raw[k]; return v === undefined || v === null || v === "" ? null : parseInt(v, 10); };
+  const stk = (r) => { const m = { cont: "CONT_STOC", back: "BACK_STOC", conf: "CONF_STOC" }[basis]; if (!m) return r.this_stoc; const v = rawN(r, m); return v === null ? r.this_stoc : v; };
   const calc = items.map((k) => {
     const list = byItem[k];
-    const held = list.map((r) => negMode === "zero" ? Math.max(r.this_stoc, 0) : r.this_stoc);
+    const held = list.map((r) => negMode === "zero" ? Math.max(stk(r), 0) : stk(r));
     const sum = held.reduce((a, b) => a + b, 0);
     const avg = Math.ceil(sum / divisor);
-    const neg = list.filter((r) => r.this_stoc < 0).length;
+    const neg = list.filter((r) => stk(r) < 0).length;
     return { item: k, sum, avg, amount: avg * unit, neg };
   });
   const total = calc.reduce((a, c) => a + c.amount, 0);
@@ -2111,8 +2116,13 @@ function EdiStockView({ caps = {} }) {
           <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", marginBottom: 8, fontSize: 12, color: C.sub }}>
             <span>마이너스 재고는</span>
             <select value={negMode} onChange={(e) => setNegMode(e.target.value)} style={{ fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }}>
-              <option value="raw">음수 그대로 계산</option><option value="zero">0장으로 계산</option>
+              <option value="zero">0장으로 계산</option><option value="raw">음수 그대로 계산</option>
             </select>
+            <span>재고 기준</span>
+            <select value={basis} onChange={(e) => setBasis(e.target.value)} style={{ fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }}>
+              <option value="this">금일재고 전체</option><option value="cont">계약재고</option><option value="back">회수재고</option><option value="conf">확인재고</option>
+            </select>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><input type="checkbox" checked={detail} onChange={(e) => setDetail(e.target.checked)} /> 일별 표에 계약·회수·확인재고 보기</label>
             <span>단가</span>
             <input type="number" value={unit} onChange={(e) => setUnit(Number(e.target.value) || 0)} style={{ width: 80, fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
             <span>원 · {complete ? `${per.days}일 기준` : `진행중: ${covered}일 기준 잠정`}</span>
@@ -2153,12 +2163,13 @@ function EdiStockView({ caps = {} }) {
           )}
           <div style={{ overflowX: "auto" }}>
             <table style={tbl}>
-              <thead><tr><Th>일자</Th><Th r>전일</Th><Th r>렌탈입고</Th><Th r>이동입고</Th><Th r>이동출고</Th><Th r>반납/회수</Th><Th r>금일재고</Th></tr></thead>
+              <thead><tr><Th>일자</Th><Th r>전일</Th><Th r>렌탈입고</Th><Th r>이동입고</Th><Th r>이동출고</Th><Th r>반납/회수</Th><Th r>금일재고</Th>{detail && <><Th r>계약재고</Th><Th r>회수재고</Th><Th r>확인재고</Th></>}</tr></thead>
               <tbody>
                 {list.map((r) => (
                   <tr key={r.stoc_date} style={{ borderTop: `1px solid ${C.border}` }}>
                     <Td>{r.stoc_date.slice(5)}</Td><Td r>{r.last_stoc.toLocaleString()}</Td><Td r>{r.rental_in || ""}</Td><Td r>{r.move_in || ""}</Td><Td r>{r.move_out || ""}</Td><Td r>{r.return_out || ""}</Td>
                     <Td r b><span style={numC(r.this_stoc)}>{r.this_stoc.toLocaleString()}</span></Td>
+                    {detail && [rawN(r, "CONT_STOC"), rawN(r, "BACK_STOC"), rawN(r, "CONF_STOC")].map((v, i) => <Td key={i} r>{v === null ? "-" : <span style={numC(v)}>{v.toLocaleString()}</span>}</Td>)}
                   </tr>
                 ))}
               </tbody>
