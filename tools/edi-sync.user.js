@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      1.9
+// @version      2.0
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, PMS에 없는 날짜부터 어제까지의 일별 재고를 조회해 PMS로 보냅니다.
@@ -156,10 +156,36 @@
     if (!workplaces || !workplaces.length) { say("동기화 대상 작업장이 없어요 (PMS에서 지정)"); return; }
 
     const yesterday = parse(fmt(addDays(new Date(), -1))); // 시각을 뺀 어제 날짜
-    // 아직 어제까지 못 받은 작업장만 대상으로 한다
-    const todo = workplaces.filter((w) => !w.last_synced || parse(w.last_synced) < yesterday);
     const st = { total: 0, done: 0, failed: 0, idle: 0, lastErr: "", abort: false };
+    let todo = [];
     const label = () => `${st.done}/${todo.length}곳 · ${st.total}행` + (st.failed ? ` · 실패 ${st.failed}` : "");
+
+    // ── 1) 건별 이동(거래처 입출고 조회): 모든작업장을 한 번에. 수정·소급 등록을 잡으려고 최근 3일은 다시 받는다 ──
+    let mv = 0, mvErr = "";
+    const movedNames = new Set(); // 이번에 받은 이동에 등장한 작업장(재고가 바뀌었을 수 있는 곳)
+    try {
+      const inst = await instEmpn();
+      const { last_date } = await call("move_status", {});
+      let from = last_date ? addDays(parse(last_date), -3) : parse(START_DATE);
+      if (from < parse(START_DATE)) from = parse(START_DATE);
+      let guard = 0;
+      while (from <= yesterday && guard++ < 60) {
+        const to = new Date(Math.min(addDays(from, MOVE_CHUNK_DAYS - 1), yesterday));
+        say(`이동 내역 ${fmt(from)}~${fmt(to)} 조회 중…`, true);
+        const rows = await pullMoves(demd, inst, fmt(from), fmt(to));
+        rows.forEach((r) => { movedNames.add(r.from_name); movedNames.add(r.to_name); });
+        if (rows.length) { await call("moves_upsert", { rows, note: fmt(from) + "~" + fmt(to) }); mv += rows.length; }
+        from = addDays(to, 1);
+      }
+    } catch (e) {
+      mvErr = e.message;
+      if (/로그인 만료|토큰이|주소가|anon 키가/.test(e.message)) st.abort = true;
+    }
+
+    // ── 2) 재고: 못 받은 작업장 + 이동이 있었던 작업장(최근 3일 다시) + 전체 합계(0번) ──
+    const refreshFrom = new Date(Math.max(addDays(yesterday, -3), parse(START_DATE)));
+    const refresh = new Set(workplaces.filter((w) => w.no === 0 || movedNames.has(w.name)).map((w) => w.no));
+    todo = st.abort ? [] : workplaces.filter((w) => !w.last_synced || parse(w.last_synced) < yesterday || refresh.has(w.no));
     let next = 0;
     async function worker() {
       while (!st.abort) {
@@ -167,6 +193,7 @@
         if (!w) return;
         try {
           let from = w.last_synced ? addDays(parse(w.last_synced), 1) : parse(START_DATE);
+          if (w.last_synced && refresh.has(w.no) && refreshFrom < from) from = refreshFrom;
           let guard = 0, any = false;
           while (from <= yesterday && guard++ < 10) {
             const to = new Date(Math.min(addDays(from, CHUNK_DAYS - 1), yesterday));
@@ -179,7 +206,7 @@
             if (rows.length) { await call("upsert", { rows, note: "userscript " + w.name }); st.total += rows.length; any = true; }
             from = addDays(to, 1);
           }
-          if (!any) { // 재고가 전혀 없는 작업장: 조회했다는 표시만 남겨 다음부터 건너뛴다
+          if (!any && !w.last_synced) { // 재고가 전혀 없는 작업장: 조회했다는 표시만 남겨 다음부터 건너뛴다
             const z = { stoc_date: fmt(yesterday), workplace_no: w.no, item: "-", last_stoc: 0, rental_in: 0, move_in: 0, move_out: 0, return_out: 0, this_stoc: 0, raw: null };
             await call("upsert", { rows: [z], note: "userscript(빈 작업장) " + w.name }); st.idle++;
           }
@@ -193,31 +220,11 @@
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-    // ── 건별 이동(거래처 입출고 조회): 모든작업장을 한 번에. 수정·입고확인 변경을 잡으려고 최근 3일은 다시 받는다 ──
-    let mv = 0, mvErr = "";
-    if (!st.abort) {
-      try {
-        const inst = await instEmpn();
-        const { last_date } = await call("move_status", {});
-        let from = last_date ? addDays(parse(last_date), -3) : parse(START_DATE);
-        if (from < parse(START_DATE)) from = parse(START_DATE);
-        let guard = 0;
-        while (from <= yesterday && guard++ < 60) {
-          const to = new Date(Math.min(addDays(from, MOVE_CHUNK_DAYS - 1), yesterday));
-          say(`이동 내역 ${fmt(from)}~${fmt(to)} 조회 중… (${label()})`, true);
-          const rows = await pullMoves(demd, inst, fmt(from), fmt(to));
-          if (rows.length) { await call("moves_upsert", { rows, note: fmt(from) + "~" + fmt(to) }); mv += rows.length; }
-          from = addDays(to, 1);
-        }
-      } catch (e) { mvErr = e.message; }
-    }
-
     GM_setValue("lastRun2", st.failed || mvErr ? 0 : Date.now()); // 실패가 있으면 다음 접속 때 바로 이어서 재시도
     const mvTxt = mvErr ? ` · 이동내역 실패: ${mvErr}` : ` · 이동 ${mv}건`;
-    say(st.abort ? `중단됨 · ${label()} — ${st.lastErr} (다시 접속하면 이어서 받아요)`
+    say(st.abort ? `중단됨 · ${label()} — ${st.lastErr || mvErr} (다시 접속하면 이어서 받아요)`
       : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}${mvTxt}`
-      : (todo.length || mv || mvErr) ? `동기화 완료 · ${st.done}곳 ${st.total}행${mvTxt} (어제까지)`
-      : "이미 최신이에요 (어제까지 반영됨)", st.abort || st.failed || !!mvErr);
+      : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행${mvTxt} (어제까지)`, st.abort || st.failed || !!mvErr);
   }
 
   run().catch((e) => say("동기화 실패: " + e.message));
