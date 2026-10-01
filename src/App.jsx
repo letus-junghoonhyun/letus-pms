@@ -2060,7 +2060,8 @@ function EdiStockView({ caps = {} }) {
     const sum = held.reduce((a, b) => a + b, 0);
     const avg = Math.ceil(sum / divisor);
     const neg = list.filter((r) => stk(r) < 0).length;
-    return { item: k, sum, avg, amount: avg * unit, neg };
+    const lastRow = list[list.length - 1];
+    return { item: k, sum, avg, amount: avg * unit, neg, back: lastRow ? rawN(lastRow, "BACK_STOC") : null };
   });
   const total = calc.reduce((a, c) => a + c.amount, 0);
 
@@ -2122,23 +2123,23 @@ function EdiStockView({ caps = {} }) {
             <select value={basis} onChange={(e) => setBasis(e.target.value)} style={{ fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }}>
               <option value="this">금일재고 전체</option><option value="cont">계약재고</option><option value="back">회수재고</option><option value="conf">확인재고</option>
             </select>
-            <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><input type="checkbox" checked={detail} onChange={(e) => setDetail(e.target.checked)} /> 일별 표에 계약·회수·확인재고 보기</label>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><input type="checkbox" checked={detail} onChange={(e) => setDetail(e.target.checked)} /> 일별 표에 계약·확인재고도 보기</label>
             <span>단가</span>
             <input type="number" value={unit} onChange={(e) => setUnit(Number(e.target.value) || 0)} style={{ width: 80, fontSize: 12, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
             <span>원 · {complete ? `${per.days}일 기준` : `진행중: ${covered}일 기준 잠정`}</span>
           </div>
           <div style={{ overflowX: "auto", marginBottom: 18 }}>
             <table style={tbl}>
-              <thead><tr><Th>제품</Th><Th r>일별 보유합계</Th><Th r>사용장수</Th><Th r>금액</Th><Th r>마이너스일</Th></tr></thead>
+              <thead><tr><Th>제품</Th><Th r>일별 보유합계</Th><Th r>사용장수</Th><Th r>금액</Th><Th r>마이너스일</Th><Th r>회수재고(최근)</Th></tr></thead>
               <tbody>
                 {calc.map((c) => (
                   <tr key={c.item} style={{ borderTop: `1px solid ${C.border}` }}>
-                    <Td b>{c.item}</Td><Td r>{c.sum.toLocaleString()}</Td><Td r>{c.avg.toLocaleString()}</Td><Td r b>{c.amount.toLocaleString()}</Td><Td r><span style={numC(c.neg ? -1 : 0)}>{c.neg}</span></Td>
+                    <Td b>{c.item}</Td><Td r>{c.sum.toLocaleString()}</Td><Td r>{c.avg.toLocaleString()}</Td><Td r b>{c.amount.toLocaleString()}</Td><Td r><span style={numC(c.neg ? -1 : 0)}>{c.neg}</span></Td><Td r>{c.back ? c.back.toLocaleString() : ""}</Td>
                   </tr>
                 ))}
                 <tr style={{ borderTop: `1px solid ${C.border}`, background: "#eef0f3" }}>
                   <td colSpan={3} style={{ padding: "11px 6px", fontSize: 12, fontWeight: 600 }}>합계</td>
-                  <td style={{ padding: "11px 6px", fontSize: 12, fontWeight: 600, textAlign: "right" }}>{won(total)}</td><td />
+                  <td style={{ padding: "11px 6px", fontSize: 12, fontWeight: 600, textAlign: "right" }}>{won(total)}</td><td /><td />
                 </tr>
               </tbody>
             </table>
@@ -2163,13 +2164,14 @@ function EdiStockView({ caps = {} }) {
           )}
           <div style={{ overflowX: "auto" }}>
             <table style={tbl}>
-              <thead><tr><Th>일자</Th><Th r>전일</Th><Th r>렌탈입고</Th><Th r>이동입고</Th><Th r>이동출고</Th><Th r>반납/회수</Th><Th r>금일재고</Th>{detail && <><Th r>계약재고</Th><Th r>회수재고</Th><Th r>확인재고</Th></>}</tr></thead>
+              <thead><tr><Th>일자</Th><Th r>전일</Th><Th r>렌탈입고</Th><Th r>이동입고</Th><Th r>이동출고</Th><Th r>반납/회수</Th><Th r>금일재고</Th><Th r>회수재고</Th>{detail && <><Th r>계약재고</Th><Th r>확인재고</Th></>}</tr></thead>
               <tbody>
                 {list.map((r) => (
                   <tr key={r.stoc_date} style={{ borderTop: `1px solid ${C.border}` }}>
                     <Td>{r.stoc_date.slice(5)}</Td><Td r>{r.last_stoc.toLocaleString()}</Td><Td r>{r.rental_in || ""}</Td><Td r>{r.move_in || ""}</Td><Td r>{r.move_out || ""}</Td><Td r>{r.return_out || ""}</Td>
                     <Td r b><span style={numC(r.this_stoc)}>{r.this_stoc.toLocaleString()}</span></Td>
-                    {detail && [rawN(r, "CONT_STOC"), rawN(r, "BACK_STOC"), rawN(r, "CONF_STOC")].map((v, i) => <Td key={i} r>{v === null ? "-" : <span style={numC(v)}>{v.toLocaleString()}</span>}</Td>)}
+                    <Td r>{rawN(r, "BACK_STOC") ? <span style={numC(rawN(r, "BACK_STOC"))}>{rawN(r, "BACK_STOC").toLocaleString()}</span> : ""}</Td>
+                    {detail && [rawN(r, "CONT_STOC"), rawN(r, "CONF_STOC")].map((v, i) => <Td key={i} r>{v === null ? "-" : <span style={numC(v)}>{v.toLocaleString()}</span>}</Td>)}
                   </tr>
                 ))}
               </tbody>
