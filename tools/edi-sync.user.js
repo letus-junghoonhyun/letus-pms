@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      2.0
+// @version      2.1
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, PMS에 없는 날짜부터 어제까지의 일별 재고를 조회해 PMS로 보냅니다.
@@ -9,6 +9,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @connect      supabase.co
 // @connect      xtqblxitzzrjzeqniigp.supabase.co
 // @run-at       document-idle
@@ -23,6 +24,7 @@
   "use strict";
   const COLS = "STOC_DATE|DATE_NAME|DEMD_TYPE|ITEM_NAME|LAST_STOC|RD00_VOLM|RD01_VOLM|RD05_VOLM|RD08_VOLM|RD99_VOLM|MS00_VOLM|MSCF_VOLM|MSCT_VOLM|MSCX_VOLM|MSIN_VOLM|MSOT_VOLM|MD00_VOLM|MDCF_VOLM|MDCT_VOLM|MDCX_VOLM|MDIN_VOLM|MDOT_VOLM|RS00_VOLM|RS01_VOLM|RS05_VOLM|RS06_VOLM|RS99_VOLM|DEST_VOLM|THIS_STOC|CONT_STOC|BACK_STOC|CONF_STOC|SELF_VOLM|sStatus".split("|");
   const MCOLS = "sSeq|sStatus|sCheck|MOVE_CODE|DEMD_DATE|DATE_NAME|SHOT_NAME|DELV_POST_NAME|STOR_POST_NAME|SELF_CODE|INER_MOVE|MOVE_TYPE|MOVE_VOLM|ABS_MOVE_VOLM|CHNG_FLAG|CONF_FLAG|RETN_FLAG|BILL_NUMB|MOVE_DESC".split("|");
+  const REFRESH_DAYS = 7;     // 소급 등록·정정을 반영하려고 최근 7일은 다시 받는다 (이동이 있던 작업장만)
   const MOVE_CHUNK_DAYS = 7;  // 이동 내역은 하루 300건 안팎이라 7일씩 나눠 조회
   const CHUNK_DAYS = 40;      // 한 번에 조회할 최대 일수
   const START_DATE = "2026-09-26"; // 실제 데이터 사용 시작일(정산기간 26일 시작). 처음 받는 작업장은 여기서부터
@@ -166,7 +168,7 @@
     try {
       const inst = await instEmpn();
       const { last_date } = await call("move_status", {});
-      let from = last_date ? addDays(parse(last_date), -3) : parse(START_DATE);
+      let from = last_date ? addDays(parse(last_date), -(REFRESH_DAYS - 1)) : parse(START_DATE);
       if (from < parse(START_DATE)) from = parse(START_DATE);
       let guard = 0;
       while (from <= yesterday && guard++ < 60) {
@@ -183,7 +185,7 @@
     }
 
     // ── 2) 재고: 못 받은 작업장 + 이동이 있었던 작업장(최근 3일 다시) + 전체 합계(0번) ──
-    const refreshFrom = new Date(Math.max(addDays(yesterday, -3), parse(START_DATE)));
+    const refreshFrom = new Date(Math.max(addDays(yesterday, -(REFRESH_DAYS - 1)), parse(START_DATE)));
     const refresh = new Set(workplaces.filter((w) => w.no === 0 || movedNames.has(w.name)).map((w) => w.no));
     todo = st.abort ? [] : workplaces.filter((w) => !w.last_synced || parse(w.last_synced) < yesterday || refresh.has(w.no));
     let next = 0;
@@ -206,7 +208,7 @@
             if (rows.length) { await call("upsert", { rows, note: "userscript " + w.name }); st.total += rows.length; any = true; }
             from = addDays(to, 1);
           }
-          if (!any && !w.last_synced) { // 재고가 전혀 없는 작업장: 조회했다는 표시만 남겨 다음부터 건너뛴다
+          if (!any) { // 재고가 전혀 없는 작업장: 조회했다는 표시만 남겨 다음부터 건너뛴다
             const z = { stoc_date: fmt(yesterday), workplace_no: w.no, item: "-", last_stoc: 0, rental_in: 0, move_in: 0, move_out: 0, return_out: 0, this_stoc: 0, raw: null };
             await call("upsert", { rows: [z], note: "userscript(빈 작업장) " + w.name }); st.idle++;
           }
@@ -226,6 +228,9 @@
       : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}${mvTxt}`
       : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행${mvTxt} (어제까지)`, st.abort || st.failed || !!mvErr);
   }
+
+  // Tampermonkey 메뉴: 1시간 제한을 무시하고 지금 다시 동기화
+  GM_registerMenuCommand("LETUS PMS · 지금 다시 동기화", () => { GM_setValue("lastRun2", 0); location.reload(); });
 
   run().catch((e) => say("동기화 실패: " + e.message));
 })();
