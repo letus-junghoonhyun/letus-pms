@@ -73,7 +73,7 @@ CREATE OR REPLACE FUNCTION aj_billing_close_month(p_month text, p_unit int, p_ne
 RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE y int; m int; f date; t date; tot bigint; qty bigint;
 BEGIN
-  IF my_role() NOT IN ('관리자','정산담당') THEN RAISE EXCEPTION '마감 권한이 없어요'; END IF;
+  IF COALESCE(my_role(), '') NOT IN ('관리자','정산담당') THEN RAISE EXCEPTION '마감 권한이 없어요'; END IF;
   IF EXISTS (SELECT 1 FROM aj_billing_close WHERE month = p_month) THEN RAISE EXCEPTION '이미 마감된 달이에요 (재오픈 후 다시 확정)'; END IF;
   y := split_part(p_month,'-',1)::int; m := split_part(p_month,'-',2)::int;
   f := make_date(y, m, 1) - interval '1 month' + interval '25 days';  -- 전월 26일
@@ -95,10 +95,13 @@ END $$;
 CREATE OR REPLACE FUNCTION aj_billing_reopen(p_month text)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF my_role() <> '관리자' THEN RAISE EXCEPTION '재오픈은 관리자만 할 수 있어요'; END IF;
+  IF COALESCE(my_role(), '') <> '관리자' THEN RAISE EXCEPTION '재오픈은 관리자만 할 수 있어요'; END IF;
   DELETE FROM aj_billing_close WHERE month = p_month;
 END $$;
 
+REVOKE ALL ON FUNCTION aj_billing_calc(date, date, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION aj_billing_close_month(text, int, text, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION aj_billing_reopen(text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION aj_billing_calc(date, date, text, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION aj_billing_close_month(text, int, text, text, text) TO authenticated;
 GRANT EXECUTE ON FUNCTION aj_billing_reopen(text) TO authenticated;
