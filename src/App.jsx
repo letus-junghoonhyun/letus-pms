@@ -748,7 +748,7 @@ function Shell({ session, initialConfirm }) {
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
             {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, ships, caps, centers: centerList }} />}
-            {nav === "EDI" && caps.inventory && <EdiStock caps={caps} />}
+            {nav === "EDI" && caps.inventory && <EdiStock {...{ caps, ships, ajReqs, palletTypes, centers: centerList }} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner, centers, addCenter, toggleCenter }} />}
             {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId: session.user.id }} />}
@@ -1869,16 +1869,303 @@ const periodOf = (ym) => {
 };
 const billingMonthOf = (d) => { const x = new Date(d.getTime() + 9 * 3600000); const y = x.getUTCFullYear(), m = x.getUTCMonth(), dd = x.getUTCDate(); const t = new Date(Date.UTC(y, dd >= 26 ? m + 1 : m, 1)); return isoD(t).slice(0, 7); };
 
-function EdiStock({ caps = {} }) {
+// ─── 작업장 검색 선택창: 입력하면 바로 후보가 뜨고, 클릭/엔터로 선택 ───────────
+function WorkplacePicker({ wps, value, onChange, filter, placeholder = "작업장 검색 (이름·번호)", width = 280 }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [hi, setHi] = useState(0);
+  const cur = wps.find((w) => w.no === value);
+  const list = useMemo(() => {
+    const t = q.trim().toLowerCase();
+    return wps.filter((w) => (!filter || filter(w)) && (!t || (w.no + " " + w.name + " " + (w.kind || "")).toLowerCase().includes(t))).slice(0, 60);
+  }, [wps, q, filter]);
+  const pick = (w) => { onChange(w.no); setOpen(false); setQ(""); };
+  const label = (w) => `${w.no}. ${w.closed ? "(폐쇄) " : ""}${w.name}`;
+  return (
+    <div style={{ position: "relative", width }}>
+      <input
+        value={open ? q : cur ? label(cur) : ""}
+        placeholder={placeholder}
+        onFocus={(e) => { setOpen(true); setQ(""); setHi(0); e.target.select(); }}
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        onChange={(e) => { setQ(e.target.value); setHi(0); setOpen(true); }}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, list.length - 1)); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)); }
+          else if (e.key === "Enter" && list[hi]) { e.preventDefault(); pick(list[hi]); e.target.blur(); }
+          else if (e.key === "Escape") { setOpen(false); e.target.blur(); }
+        }}
+        style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }}
+      />
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4, maxHeight: 300, overflowY: "auto", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 6px 18px rgba(0,0,0,.12)", zIndex: 50 }}>
+          {list.length === 0 && <div style={{ padding: 10, fontSize: 12, color: C.sub }}>검색 결과가 없어요</div>}
+          {list.map((w, i) => (
+            <div key={w.no} onMouseDown={(e) => { e.preventDefault(); pick(w); }} onMouseEnter={() => setHi(i)}
+              style={{ padding: "7px 10px", fontSize: 13, cursor: "pointer", background: i === hi ? "#eef6f4" : "transparent", display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span>{label(w)}</span><span style={{ color: C.hint, fontSize: 11 }}>{w.kind}{w.last_synced ? "" : " · 미수집"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ediRecentMonths = (nowMonth) => { const out = []; let [y, m] = nowMonth.split("-").map(Number); for (let i = 0; i < 9; i++) { out.push(`${y}-${String(m).padStart(2, "0")}`); m--; if (m === 0) { m = 12; y--; } } return out; };
+
+// ─── 월 마감·정산서 ─────────────────────────────────────────────────────────
+function EdiBilling({ caps = {} }) {
+  const nowMonth = billingMonthOf(new Date());
+  const [month, setMonth] = useState(nowMonth);
+  const [unit, setUnit] = useState(AJ_UNIT_DEFAULT);
+  const [neg, setNeg] = useState("zero");
+  const [basis, setBasis] = useState("this");
+  const [kindF, setKindF] = useState("bill"); // bill=청구 대상(시공팀·업체) / center / all
+  const [q, setQ] = useState("");
+  const [calc, setCalc] = useState([]);
+  const [closed, setClosed] = useState(null);
+  const [lines, setLines] = useState([]);
+  const [maxDate, setMaxDate] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [note, setNote] = useState("");
+  const [tick, setTick] = useState(0);
+  const per = useMemo(() => periodOf(month), [month]);
+  const complete = maxDate && maxDate >= per.to;
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setBusy(true); setMsg("");
+      const [h, md] = await Promise.all([
+        supabase.from("aj_billing_close").select("*").eq("month", month).maybeSingle(),
+        supabase.from("aj_stock_daily").select("stoc_date").neq("item", "-").order("stoc_date", { ascending: false }).limit(1),
+      ]);
+      if (!alive) return;
+      if (h.error) { setMsg("정산 테이블을 못 불러왔어요. letus_edi4.sql 실행 여부를 확인해주세요. (" + h.error.message + ")"); setBusy(false); return; }
+      setClosed(h.data || null);
+      setMaxDate(md.data && md.data[0] ? md.data[0].stoc_date : null);
+      const useUnit = h.data ? h.data.unit : unit, useNeg = h.data ? h.data.neg_mode : neg, useBasis = h.data ? h.data.basis : basis;
+      if (h.data) { setUnit(useUnit); setNeg(useNeg); setBasis(useBasis); }
+      const c = await supabase.rpc("aj_billing_calc", { p_from: per.from, p_to: per.to, p_neg: useNeg, p_basis: useBasis });
+      if (!alive) return;
+      if (c.error) { setMsg("정산 계산에 실패했어요: " + c.error.message); setBusy(false); return; }
+      setCalc(c.data || []);
+      if (h.data) {
+        const all = [];
+        for (let p = 0; p < 20; p++) {
+          const { data } = await supabase.from("aj_billing_line").select("*").eq("month", month).order("workplace_no").range(p * 1000, p * 1000 + 999);
+          all.push(...(data || [])); if (!data || data.length < 1000) break;
+        }
+        if (alive) setLines(all);
+      } else setLines([]);
+      if (alive) setBusy(false);
+    })();
+    return () => { alive = false; };
+  }, [month, per.from, per.to, tick, neg, basis]); // eslint-disable-line
+
+  const isBill = (k) => k === "시공팀" || k === "업체";
+  // 마감된 달은 저장된 스냅샷을, 아니면 현재 계산값을 보여준다
+  const base = closed ? lines.map((l) => ({ workplace_no: l.workplace_no, workplace_name: l.workplace_name, kind: l.kind, item: l.item, sum_qty: l.sum_qty, avg_qty: l.avg_qty, amount: l.amount })) : calc.map((c) => ({ ...c, amount: c.avg_qty * unit }));
+  const shown = base.filter((r) => (kindF === "all" || (kindF === "bill" ? isBill(r.kind) : r.kind === "센터")) && (!q || (r.workplace_name + " " + r.item).includes(q)));
+  const totBill = base.filter((r) => isBill(r.kind)).reduce((a, r) => a + Number(r.amount), 0);
+  const qtyBill = base.filter((r) => isBill(r.kind)).reduce((a, r) => a + Number(r.avg_qty), 0);
+  const wpsBill = new Set(base.filter((r) => isBill(r.kind)).map((r) => r.workplace_no)).size;
+  const curTot = calc.filter((c) => isBill(c.kind)).reduce((a, c) => a + c.avg_qty * (closed ? closed.unit : unit), 0);
+  const drift = closed ? curTot - Number(closed.total_amount || 0) : 0;
+
+  const doClose = async () => {
+    if (!window.confirm(`${month} 정산(${per.from} ~ ${per.to})을 마감 확정할까요?\n청구 대상 ${wpsBill}곳, ${won(totBill)}\n확정 후 변동분은 다음 달에 반영돼요.`)) return;
+    setBusy(true);
+    const { error } = await supabase.rpc("aj_billing_close_month", { p_month: month, p_unit: unit, p_neg: neg, p_basis: basis, p_note: note || null });
+    if (error) { setMsg(error.message); setBusy(false); return; }
+    setTick((t) => t + 1);
+  };
+  const doReopen = async () => {
+    if (!window.confirm(`${month} 마감을 취소(재오픈)할까요? 저장된 정산 내역이 삭제돼요.`)) return;
+    setBusy(true);
+    const { error } = await supabase.rpc("aj_billing_reopen", { p_month: month });
+    if (error) { setMsg(error.message); setBusy(false); return; }
+    setTick((t) => t + 1);
+  };
+  const exportXlsx = () => {
+    const u = closed ? closed.unit : unit;
+    const detail = base.filter((r) => kindF === "all" || (kindF === "bill" ? isBill(r.kind) : r.kind === "센터"))
+      .map((r) => ({ 작업장: r.workplace_name, 구분: r.kind, 제품: r.item, "일별 보유합계(장·일)": Number(r.sum_qty), "사용 장수": Number(r.avg_qty), "단가(원)": u, "금액(원)": Number(r.amount) }));
+    const byWp = {};
+    detail.forEach((r) => { const k = r.작업장; byWp[k] = byWp[k] || { 작업장: k, 구분: r.구분, "사용 장수": 0, "금액(원)": 0 }; byWp[k]["사용 장수"] += r["사용 장수"]; byWp[k]["금액(원)"] += r["금액(원)"]; });
+    const sum = Object.values(byWp).sort((a, b) => b["금액(원)"] - a["금액(원)"]);
+    sum.push({ 작업장: "합계", 구분: "", "사용 장수": sum.reduce((a, r) => a + r["사용 장수"], 0), "금액(원)": sum.reduce((a, r) => a + r["금액(원)"], 0) });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sum), "업체별 합계");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detail), "제품별 상세");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([{ 정산월: month, 기간: `${per.from} ~ ${per.to}`, 일수: per.days, 단가: u, 마이너스: neg === "zero" ? "0장 처리" : "그대로", 재고기준: { this: "금일재고 전체", cont: "계약재고", back: "회수재고", conf: "확인재고" }[basis], 상태: closed ? `마감 확정 ${fmtDT(closed.closed_at)}` : "진행중(잠정)" }]), "기준");
+    XLSX.writeFile(wb, `LETUS_EDI정산_${month}${closed ? "" : "_잠정"}.xlsx`);
+  };
+  const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
+  const locked = !!closed;
+
+  return (
+    <>
+      <Head title="월 마감·정산서" sub={`정산 기간 ${per.from} ~ ${per.to} (${per.days}일) · 일별 보유합계 ÷ ${per.days}일(올림) × 단가`} action={
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={exportXlsx} disabled={!shown.length} style={{ ...btnGhost, padding: "8px 14px", opacity: shown.length ? 1 : 0.5 }}>⬇ 정산서 엑셀</button>
+          {caps.billing && !closed && <button onClick={doClose} disabled={busy || !complete || !calc.length} title={complete ? "" : "재고 데이터가 마감일까지 들어와야 해요"} style={{ ...btnGreen, opacity: busy || !complete || !calc.length ? 0.5 : 1 }}>마감 확정</button>}
+          {caps.users && closed && <button onClick={doReopen} disabled={busy} style={{ ...btnGhost, padding: "8px 14px", color: C.red }}>마감 취소(재오픈)</button>}
+        </div>} />
+      {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+        <span style={{ fontSize: 13, color: C.sub }}>정산월</span>
+        <select value={month} onChange={(e) => setMonth(e.target.value)} style={inp}>{ediRecentMonths(nowMonth).map((m) => <option key={m} value={m}>{m}</option>)}</select>
+        <span style={{ fontSize: 13, color: C.sub }}>단가</span>
+        <input type="number" value={unit} disabled={locked} onChange={(e) => setUnit(Number(e.target.value) || 0)} style={{ ...inp, width: 90 }} />
+        <select value={neg} disabled={locked} onChange={(e) => setNeg(e.target.value)} style={inp}><option value="zero">마이너스 0장 처리</option><option value="raw">마이너스 그대로</option></select>
+        <select value={basis} disabled={locked} onChange={(e) => setBasis(e.target.value)} style={inp}><option value="this">금일재고 전체</option><option value="cont">계약재고</option><option value="back">회수재고</option><option value="conf">확인재고</option></select>
+        <select value={kindF} onChange={(e) => setKindF(e.target.value)} style={inp}><option value="bill">청구 대상(시공팀·업체)</option><option value="center">센터(참고)</option><option value="all">전체</option></select>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·제품 검색" style={{ ...inp, width: 160 }} />
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <Metric label="상태" value={closed ? "마감 확정" : complete ? "마감 가능" : "진행중(잠정)"} tone={closed ? "success" : complete ? "info" : "warn"} />
+        <Metric label="청구 대상" value={wpsBill.toLocaleString()} unit="곳" tone="plain" />
+        <Metric label="사용 장수" value={qtyBill.toLocaleString()} unit="장" tone="plain" />
+        <Metric label="청구 금액" value={won(totBill)} tone="info" />
+        {closed && <Metric label="마감 후 변동(다음 달 반영)" value={(drift > 0 ? "+" : "") + won(drift)} tone={drift ? "warn" : "success"} />}
+      </div>
+      {!complete && !closed && <div style={{ fontSize: 12, color: C.sub, marginBottom: 10 }}>재고 데이터가 {maxDate || "—"}까지 들어와 있어요. {per.to}까지 들어오면 마감할 수 있어요. 지금 금액은 진행 중인 잠정값(전체 {per.days}일로 나눔)이에요.</div>}
+      {closed && <div style={{ fontSize: 12, color: C.sub, marginBottom: 10 }}>{fmtDT(closed.closed_at)} {closed.closed_by || ""} 확정{closed.note ? ` · ${closed.note}` : ""}</div>}
+      {caps.billing && !closed && <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="마감 메모(선택)" style={{ ...inp, width: 280, marginBottom: 12 }} />}
+      {busy ? <Splash text="불러오는 중…" /> : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={tbl}>
+            <thead><tr><Th>작업장</Th><Th>구분</Th><Th>제품</Th><Th r>보유합계(장·일)</Th><Th r>사용 장수</Th><Th r>금액</Th></tr></thead>
+            <tbody>
+              {shown.slice(0, 400).map((r, i) => (
+                <tr key={r.workplace_no + r.item + i} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <Td>{r.workplace_name}</Td><Td>{r.kind}</Td><Td>{r.item}</Td><Td r>{Number(r.sum_qty).toLocaleString()}</Td><Td r>{Number(r.avg_qty).toLocaleString()}</Td><Td r b>{Number(r.amount).toLocaleString()}</Td>
+                </tr>
+              ))}
+              {!shown.length && <tr><td colSpan={6} style={{ padding: 16, fontSize: 13, color: C.sub }}>표시할 내역이 없어요.</td></tr>}
+            </tbody>
+          </table>
+          {shown.length > 400 && <div style={{ fontSize: 12, color: C.sub, padding: 8 }}>상위 400줄만 표시해요(엑셀에는 전체가 들어가요). 검색으로 좁혀 보세요.</div>}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── 대사·이상 징후: EDI 재고 vs PMS 센터 장부, 마이너스·불일치 점검 ───────────────
+function EdiRecon({ caps = {}, ships = [], ajReqs = [], centers = [], palletTypes = [] }) {
+  const [wps, setWps] = useState([]);
+  const [date, setDate] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(true);
+  const [msg, setMsg] = useState("");
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setBusy(true);
+      const w = await supabase.from("aj_workplace").select("*").order("no").limit(1000);
+      const md = await supabase.from("aj_stock_daily").select("stoc_date").neq("item", "-").order("stoc_date", { ascending: false }).limit(1);
+      if (!alive) return;
+      if (w.error) { setMsg(w.error.message); setBusy(false); return; }
+      const d = md.data && md.data[0] ? md.data[0].stoc_date : null;
+      let r = [];
+      if (d) { const s = await supabase.from("aj_stock_daily").select("workplace_no,item,this_stoc").eq("stoc_date", d).neq("item", "-").limit(1000); r = s.data || []; }
+      if (!alive) return;
+      setWps(w.data || []); setDate(d); setRows(r); setBusy(false);
+    })();
+    return () => { alive = false; };
+  }, [tick]);
+
+  const byNo = useMemo(() => Object.fromEntries(wps.map((w) => [w.no, w])), [wps]);
+  const mapped = (c) => wps.find((w) => w.pms_center === c) || wps.find((w) => w.name === c && !w.closed);
+  const saveMap = async (center, no) => {
+    const a = await supabase.from("aj_workplace").update({ pms_center: null }).eq("pms_center", center);
+    const b = await supabase.from("aj_workplace").update({ pms_center: center }).eq("no", no);
+    if (a.error || b.error) setMsg((a.error || b.error).message); else setTick((t) => t + 1);
+  };
+  const ediOf = (no, item) => { const r = rows.find((x) => x.workplace_no === no && x.item === item); return r ? r.this_stoc : null; };
+  const codes = palletTypes.map((p) => p.code);
+  const ediItems = [...new Set(rows.map((r) => r.item))].sort();
+  const overlap = ediItems.filter((i) => codes.includes(i));
+
+  // 이상 징후
+  const items = ediItems;
+  const sumBy = (fn) => Object.fromEntries(items.map((i) => [i, rows.filter((r) => r.item === i && fn(r)).reduce((a, r) => a + r.this_stoc, 0)]));
+  const total0 = sumBy((r) => r.workplace_no === 0), sumWp = sumBy((r) => r.workplace_no !== 0);
+  const negs = rows.filter((r) => r.workplace_no !== 0 && r.this_stoc < 0).sort((a, b) => a.this_stoc - b.this_stoc);
+  const negByKind = {};
+  negs.forEach((r) => { const k = (byNo[r.workplace_no] || {}).kind || "?"; negByKind[k] = (negByKind[k] || 0) + r.this_stoc; });
+
+  return (
+    <>
+      <Head title="대사·이상 징후" sub={`EDI 재고(${date || "—"} 기준)와 PMS 장부를 맞춰 보고, 전산-실물 차이가 큰 곳을 찾아요`} />
+      {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      {busy ? <Splash text="불러오는 중…" /> : (
+        <>
+          <div style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 8px" }}>1. PMS 센터 ↔ EDI 작업장 맵핑과 재고 비교</div>
+          {!overlap.length && <div style={{ fontSize: 12, color: C.sub, marginBottom: 8, lineHeight: 1.6 }}>PMS 파렛트 유형 코드({codes.join(", ") || "없음"})와 EDI 제품({ediItems.join(", ") || "없음"})이 겹치지 않아 재고 수치를 직접 비교할 수 없어요. 맵핑만 먼저 해 두면, 유형 코드를 맞춘 뒤 바로 비교돼요.</div>}
+          <div style={{ overflowX: "auto", marginBottom: 20 }}>
+            <table style={tbl}>
+              <thead><tr><Th>PMS 센터</Th><Th>연결된 EDI 작업장</Th>{overlap.map((i) => <Th key={i} r>{i} PMS / EDI / 차이</Th>)}</tr></thead>
+              <tbody>
+                {centers.map((c) => {
+                  const w = mapped(c);
+                  return (
+                    <tr key={c} style={{ borderTop: `1px solid ${C.border}` }}>
+                      <Td b>{c}</Td>
+                      <Td>{caps.users ? <WorkplacePicker wps={wps} value={w ? w.no : null} filter={(x) => !x.closed} onChange={(no) => saveMap(c, no)} width={240} placeholder="EDI 작업장 선택" /> : (w ? w.name : "—")}</Td>
+                      {overlap.map((i) => {
+                        const pms = centerStock(ships, ajReqs, c, i), edi = w ? ediOf(w.no, i) : null, diff = edi === null ? null : pms - edi;
+                        return <Td key={i} r>{pms.toLocaleString()} / {edi === null ? "—" : edi.toLocaleString()} / <span style={{ color: diff ? C.red : C.green, fontWeight: 600 }}>{diff === null ? "—" : diff.toLocaleString()}</span></Td>;
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 8px" }}>2. 전체 합계 vs 작업장별 합 (EDI 내부 일치 여부)</div>
+          <div style={{ overflowX: "auto", marginBottom: 20 }}>
+            <table style={tbl}>
+              <thead><tr><Th>제품</Th><Th r>전체 합계(모든작업장)</Th><Th r>작업장별 합</Th><Th r>차이</Th></tr></thead>
+              <tbody>{items.map((i) => { const d = sumWp[i] - total0[i]; return (
+                <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td b>{i}</Td><Td r>{total0[i].toLocaleString()}</Td><Td r>{sumWp[i].toLocaleString()}</Td><Td r b><span style={{ color: d ? C.red : C.green }}>{d.toLocaleString()}</span></Td></tr>); })}</tbody>
+            </table>
+          </div>
+          <div style={{ fontSize: 12, color: C.sub, margin: "-12px 0 20px" }}>차이가 있으면 폐쇄 작업장(동기화 제외)에 남은 재고이거나 수집 누락일 수 있어요.</div>
+
+          <div style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 8px" }}>3. 마이너스 재고 작업장 — 전산-실물을 맞출 대상 ({negs.length}곳·제품, {date})</div>
+          <div style={{ fontSize: 12, color: C.sub, marginBottom: 8 }}>구분별 마이너스 합: {Object.entries(negByKind).map(([k, v]) => `${k} ${v.toLocaleString()}장`).join(" · ") || "없음"}</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={tbl}>
+              <thead><tr><Th>작업장</Th><Th>구분</Th><Th>제품</Th><Th r>금일재고</Th></tr></thead>
+              <tbody>{negs.slice(0, 60).map((r, i) => (
+                <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td>{(byNo[r.workplace_no] || {}).name || r.workplace_no}</Td><Td>{(byNo[r.workplace_no] || {}).kind}</Td><Td>{r.item}</Td><Td r b><span style={{ color: C.red }}>{r.this_stoc.toLocaleString()}</span></Td></tr>
+              ))}{!negs.length && <tr><td colSpan={4} style={{ padding: 14, fontSize: 13, color: C.sub }}>마이너스 재고가 없어요.</td></tr>}</tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function EdiStock({ caps = {}, ships = [], ajReqs = [], centers = [], palletTypes = [] }) {
   const [view, setView] = useState("stock");
   return (
     <>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-        {[["stock", "재고·정산"], ["move", "이동 현황 (어디서 → 어디로)"]].map(([k, l]) => (
+        {[["stock", "재고·정산"], ["bill", "월 마감·정산서"], ["move", "이동 현황 (어디서 → 어디로)"], ["recon", "대사·이상 징후"]].map(([k, l]) => (
           <button key={k} onClick={() => setView(k)} style={{ ...btnGhost, padding: "7px 16px", background: view === k ? C.teal : "transparent", color: view === k ? "#04342C" : C.text, fontWeight: view === k ? 600 : 400 }}>{l}</button>
         ))}
       </div>
-      {view === "stock" ? <EdiStockView caps={caps} /> : <EdiMoves />}
+      {view === "stock" ? <EdiStockView caps={caps} /> : view === "bill" ? <EdiBilling caps={caps} /> : view === "move" ? <EdiMoves /> : <EdiRecon {...{ caps, ships, ajReqs, centers, palletTypes }} />}
     </>
   );
 }
@@ -2083,11 +2370,7 @@ function EdiStockView({ caps = {} }) {
       <Head title="EDI 재고·정산" sub="AJ EDI 일별 재고 기반 · 매일 전일자까지 자동 반영" />
       {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장 검색 (이름·번호)" style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, width: 170 }} />
-        <select value={wpNo} onChange={(e) => setWpNo(Number(e.target.value))} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, maxWidth: 260 }}>
-          {wp && !shown.some((w) => w.no === wpNo) && <option value={wpNo}>{wp.no}. {wp.name}</option>}
-          {shown.map((w) => <option key={w.no} value={w.no}>{w.no}. {w.closed ? "(폐쇄) " : ""}{w.name} · {w.kind}</option>)}
-        </select>
+        <WorkplacePicker wps={wps} value={wpNo} onChange={setWpNo} filter={(w) => !onlyData || w.last_synced || w.sync_enabled || w.no === wpNo} />
         <label style={{ fontSize: 12, color: C.sub }}><input type="checkbox" checked={onlyData} onChange={(e) => setOnlyData(e.target.checked)} /> 데이터·동기화 대상만 ({wps.filter((w) => w.last_synced || w.sync_enabled).length}/{wps.length})</label>
         {caps.users && wp && (
           <button onClick={toggleSync} style={{ ...btnGhost, padding: "6px 12px", fontSize: 12, background: wp.sync_enabled ? C.teal : "transparent", color: wp.sync_enabled ? "#04342C" : C.text }}>
