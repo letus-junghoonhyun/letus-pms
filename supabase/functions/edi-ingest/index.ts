@@ -1,10 +1,9 @@
 // LETUS PMS — EDI 수신 함수 (계정별)
 // EDI 사이트에서 돌아가는 사용자 스크립트(tools/edi-sync.user.js)가 조회한 재고·이동을 받아 DB에 넣는다.
 // EDI 계정(14C·18F / 일반유형 11A·15A / 15A 전용 / 23E 전용)마다 로그인이 따로라서 요청마다 account(작업장코드)를 받는다.
-// 인증: 함수 비밀값 EDI_INGEST_TOKEN 과 요청의 token 이 같아야 한다. (JWT 검증은 켠 채 사용)
+// 인증: 함수 비밀값 EDI_INGEST_TOKEN 과 요청의 token 이 같아야 한다. (JWT 검증은 켠 채 사용). account 가 없는 요청은 거절한다.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const DEFAULT_ACCOUNT = "P156063"; // account 를 안 보내는 옛 스크립트용
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "content-type, authorization, apikey, x-client-info",
@@ -25,7 +24,9 @@ Deno.serve(async (req) => {
     if (!expected || body.token !== expected) return json({ error: "unauthorized" }, 401);
 
     const db = createClient(Deno.env.get("SUPABASE_URL"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"));
-    const account = String(body.account || DEFAULT_ACCOUNT);
+    // 계정 정보가 없는 요청(옛 스크립트 v2.x)은 거절한다: 다른 계정의 데이터가 기존 계정에 섞이는 것을 막기 위해
+    const account = String(body.account || "").trim();
+    if (!account) return json({ error: "스크립트가 오래됐어요. Tampermonkey에서 v3.0 이상으로 업데이트해 주세요" }, 400);
 
     // 계정별 작업장 번호(local) → 표준 작업장 번호(wp)
     const loadMap = async () => {
