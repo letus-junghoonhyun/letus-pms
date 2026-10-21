@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      2.1
+// @version      3.0
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
-// @description  EDI 로그인 후 메인 화면이 열리면, PMS에 없는 날짜부터 어제까지의 일별 재고를 조회해 PMS로 보냅니다.
+// @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
 // @match        http://edi.ajuprs.com/main_frame.do
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -29,13 +29,17 @@
   const CHUNK_DAYS = 40;      // 한 번에 조회할 최대 일수
   const START_DATE = "2026-09-26"; // 실제 데이터 사용 시작일(정산기간 26일 시작). 처음 받는 작업장은 여기서부터
   const CONCURRENCY = 3;      // 동시에 조회할 작업장 수 (EDI 서버 부담을 줄이려고 3개로 제한)
-  const MIN_INTERVAL_MS = 60 * 60 * 1000; // 1시간 안에 다시 열면 건너뜀
+  const MIN_INTERVAL_MS = 60 * 60 * 1000; // 같은 계정은 1시간 안에 다시 열면 건너뜀
+  const lastMap = () => { try { return JSON.parse(GM_getValue("lastRunMap") || "{}"); } catch (e) { return {}; } };
+  const getLast = (acc) => lastMap()[acc] || 0;
+  const setLast = (acc, v) => { const m = lastMap(); m[acc] = v; GM_setValue("lastRunMap", JSON.stringify(m)); };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // ── 작은 상태창 ──
   const box = document.createElement("div");
   box.style.cssText = "position:fixed;right:12px;bottom:12px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:10px 14px;border-radius:10px;max-width:320px;box-shadow:0 4px 14px rgba(0,0,0,.3)";
-  const say = (t, keep) => { box.textContent = "LETUS PMS · " + t; if (!box.parentNode) document.body.appendChild(box); if (!keep) setTimeout(() => box.remove(), 8000); };
+  let ACCOUNT = "", TAG = ""; // 로그인한 EDI 계정(작업장코드)과 표시 이름
+  const say = (t, keep) => { box.textContent = "LETUS PMS · " + (TAG ? "[" + TAG + "] " : "") + t; if (!box.parentNode) document.body.appendChild(box); if (!keep) setTimeout(() => box.remove(), 8000); };
 
   const pad = (n) => String(n).padStart(2, "0");
   const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -48,7 +52,7 @@
       GM_xmlhttpRequest({
         method: "POST", url: GM_getValue("fnUrl"),
         headers: { "Content-Type": "application/json", apikey: GM_getValue("anon"), Authorization: "Bearer " + GM_getValue("anon") },
-        data: JSON.stringify({ token: GM_getValue("token"), action, ...payload }),
+        data: JSON.stringify({ token: GM_getValue("token"), action, account: ACCOUNT || undefined, ...payload }),
         timeout: 120000,
         onload: (r) => {
           let j = {}; try { j = JSON.parse(r.responseText); } catch (e) {}
@@ -61,6 +65,37 @@
         },
         onerror: () => reject(new Error("PMS 서버 연결 실패 — 저장된 주소: " + GM_getValue("fnUrl"))), ontimeout: () => reject(new Error("PMS 서버 응답 시간 초과")),
       });
+    });
+  }
+
+  // 로그인한 계정에서 보이는 작업장 목록과 제품 목록 (EDI 재고조회 화면의 선택 목록)
+  function readCombos() {
+    return new Promise((resolve, reject) => {
+      const f = document.createElement("iframe");
+      f.style.cssText = "position:fixed;left:-9999px;top:0;width:1px;height:1px;visibility:hidden";
+      f.src = "/edi/stoc/STOC_CLNT_LIST.do";
+      document.body.appendChild(f);
+      const t0 = Date.now();
+      const tick = () => {
+        try {
+          const d = f.contentDocument, sel = d && d.getElementById("demdNumb"), it = d && d.getElementById("itemCode");
+          if (sel && sel.options.length > 1 && it && it.options.length > 0) {
+            const list = [...sel.options].filter((o) => o.value !== "").map((o) => ({ no: parseInt(o.value, 10), name: o.text.replace(/^\d+\./, "").trim() })).filter((w) => Number.isInteger(w.no));
+            const items = [...it.options].filter((o) => o.value).map((o) => o.text.trim());
+            f.remove(); return resolve({ list, items });
+          }
+        } catch (e) { /* 아직 로딩 중 */ }
+        if (Date.now() - t0 > 40000) {
+          // 작업장이 하나도 없는 계정(전체 합계만)이면 빈 목록으로 진행한다
+          try {
+            const d = f.contentDocument, sel = d && d.getElementById("demdNumb"), it = d && d.getElementById("itemCode");
+            if (sel) { const items = it ? [...it.options].filter((o) => o.value).map((o) => o.text.trim()) : []; f.remove(); return resolve({ list: [], items }); }
+          } catch (e) { /* 아래에서 실패 처리 */ }
+          f.remove(); return reject(new Error("EDI 작업장 목록을 읽지 못했어요"));
+        }
+        setTimeout(tick, 500);
+      };
+      f.onload = () => setTimeout(tick, 300);
     });
   }
 
@@ -150,10 +185,14 @@
       if (!t) return;
       GM_setValue("token", t.trim());
     }
-    if (Date.now() - (GM_getValue("lastRun2") || 0) < MIN_INTERVAL_MS) return;
+    const demd = await demdInfo();
+    ACCOUNT = demd.code; TAG = (demd.name || demd.code).replace(/^\(주\)/, "");
+    if (Date.now() - getLast(ACCOUNT) < MIN_INTERVAL_MS) return;
 
     say("동기화 준비 중…", true);
-    const demd = await demdInfo();
+    const combos = await readCombos();
+    await call("register_account", { name: demd.name, items: combos.items });
+    await call("register_workplaces", { list: combos.list });
     const { workplaces } = await call("status", {});
     if (!workplaces || !workplaces.length) { say("동기화 대상 작업장이 없어요 (PMS에서 지정)"); return; }
 
@@ -222,7 +261,7 @@
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-    GM_setValue("lastRun2", st.failed || mvErr ? 0 : Date.now()); // 실패가 있으면 다음 접속 때 바로 이어서 재시도
+    setLast(ACCOUNT, st.failed || mvErr ? 0 : Date.now()); // 실패가 있으면 다음 접속 때 바로 이어서 재시도
     const mvTxt = mvErr ? ` · 이동내역 실패: ${mvErr}` : ` · 이동 ${mv}건`;
     say(st.abort ? `중단됨 · ${label()} — ${st.lastErr || mvErr} (다시 접속하면 이어서 받아요)`
       : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}${mvTxt}`
@@ -230,7 +269,7 @@
   }
 
   // Tampermonkey 메뉴: 1시간 제한을 무시하고 지금 다시 동기화
-  GM_registerMenuCommand("LETUS PMS · 지금 다시 동기화", () => { GM_setValue("lastRun2", 0); location.reload(); });
+  GM_registerMenuCommand("LETUS PMS · 지금 다시 동기화", () => { GM_setValue("lastRunMap", "{}"); location.reload(); });
 
   run().catch((e) => say("동기화 실패: " + e.message));
 })();

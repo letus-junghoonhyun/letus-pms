@@ -5,7 +5,7 @@ EDI 로그인에는 SMS 인증번호가 있어 서버가 대신 로그인할 수
 
 ## 1회 설정 (관리자)
 
-1. **DB**: Supabase SQL 편집기에서 `letus_edi.sql`, `letus_edi2.sql`(전체 합계·센터), `letus_edi3.sql`(건별 이동) 순서로 실행.
+1. **DB**: Supabase SQL 편집기에서 `letus_edi.sql`, `letus_edi2.sql`(전체 합계·센터), `letus_edi3.sql`(건별 이동), `letus_edi4.sql`(정산·마감), `letus_edi5.sql`(규격·단가·명세서), `letus_edi6.sql`(EDI 계정 구분) 순서로 실행.
 2. **수신 함수**: Supabase > Edge Functions > 새 함수 `edi-ingest` 생성, `supabase/functions/edi-ingest/index.ts` 내용 붙여넣기.
    - Verify JWT 는 **켠 채로 두기** (앱의 anon 키가 통과용, 실제 잠금은 토큰).
    - Edge Functions > Secrets 에 `EDI_INGEST_TOKEN` = 임의의 긴 문자열 등록.
@@ -32,3 +32,11 @@ EDI 로그인 → 메인 화면이 열리면 화면 오른쪽 아래에 진행 �
 - 기간: 전월 26일 ~ 당월 25일 (공휴일 무관)
 - 사용장수 = 일별 금일재고 합계 ÷ 일수(올림), 금액 = 사용장수 × 단가(기본 2,400원)
 - 마이너스 재고는 화면에서 “0장으로 계산 / 음수 그대로” 선택 (AJ 실제 기준 확인 필요)
+
+## EDI 계정이 여러 개일 때 (v3.0~)
+
+- EDI 계정은 4개입니다: 14C·18F / 일반유형(11A·15A) / 15A 전용 / 23E 전용. 계정마다 아이디가 따로라서 **계정별로 EDI에 로그인**하면 됩니다(스크립트가 로그인한 계정을 자동 인식).
+- 첫 로그인 때 그 계정의 작업장 목록을 읽어 이름이 같은 표준 작업장에 연결하고, 없으면 새로 만듭니다.
+- 같은 제품(예: 15A)이 두 계정에 있어도 계정별로 따로 저장되고, 화면과 정산에서는 합산됩니다.
+- 수신 함수를 v3로 다시 배포해야 합니다(`supabase/functions/edi-ingest/index.ts`). **SQL 실행 → 함수 배포 → 스크립트 업데이트** 순서를 지키세요.
+- 계정 수집 현황은 PMS > EDI 재고·정산 > 대사·이상 징후 맨 위에서 확인합니다.

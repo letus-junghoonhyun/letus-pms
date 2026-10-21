@@ -2059,6 +2059,7 @@ function EdiBilling({ caps = {} }) {
 // ─── 대사·이상 징후: EDI 재고 vs PMS 센터 장부, 마이너스·불일치 점검 ───────────────
 function EdiRecon({ caps = {}, ships = [], ajReqs = [], centers = [], palletTypes = [] }) {
   const [wps, setWps] = useState([]);
+  const [accounts, setAccounts] = useState([]);
   const [date, setDate] = useState(null);
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(true);
@@ -2075,9 +2076,15 @@ function EdiRecon({ caps = {}, ships = [], ajReqs = [], centers = [], palletType
       if (w.error) { setMsg(w.error.message); setBusy(false); return; }
       const d = md.data && md.data[0] ? md.data[0].stoc_date : null;
       let r = [];
-      if (d) { const s = await supabase.from("aj_stock_daily").select("workplace_no,item,this_stoc").eq("stoc_date", d).neq("item", "-").limit(1000); r = s.data || []; }
+      if (d) { const s = await supabase.from("aj_stock_daily").select("workplace_no,item,this_stoc").eq("stoc_date", d).neq("item", "-").limit(3000); r = mergeByWorkplace(s.data || []); }
+      const ac = await supabase.from("aj_account").select("*").order("first_seen");
+      const accs = [];
+      for (const a of ac.data || []) {
+        const mx = await supabase.from("aj_stock_daily").select("stoc_date").eq("account", a.code).neq("item", "-").order("stoc_date", { ascending: false }).limit(1);
+        accs.push({ ...a, max_date: mx.data && mx.data[0] ? mx.data[0].stoc_date : null });
+      }
       if (!alive) return;
-      setWps(w.data || []); setDate(d); setRows(r); setBusy(false);
+      setAccounts(accs); setWps(w.data || []); setDate(d); setRows(r); setBusy(false);
     })();
     return () => { alive = false; };
   }, [tick]);
@@ -2108,6 +2115,26 @@ function EdiRecon({ caps = {}, ships = [], ajReqs = [], centers = [], palletType
       {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
       {busy ? <Splash text="불러오는 중…" /> : (
         <>
+          <div style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 8px" }}>0. EDI 계정별 수집 현황</div>
+          <div style={{ overflowX: "auto", marginBottom: 20 }}>
+            <table style={tbl}>
+              <thead><tr><Th>구분</Th><Th>EDI 계정</Th><Th>제품</Th><Th>최근 접속</Th><Th>최신 재고일</Th></tr></thead>
+              <tbody>
+                {accounts.map((a) => (
+                  <tr key={a.code} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <Td b>{caps.users ? <input defaultValue={a.label || ""} placeholder="예: 15A 전용" onBlur={async (e) => { if (e.target.value !== (a.label || "")) { await supabase.from("aj_account").update({ label: e.target.value || null }).eq("code", a.code); setTick((t) => t + 1); } }} style={{ fontSize: 13, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6, width: 150 }} /> : (a.label || "—")}</Td>
+                    <Td>{a.name || a.code}<div style={{ fontSize: 11, color: C.hint }}>{a.code}</div></Td>
+                    <Td>{(a.items || []).join(", ") || "—"}</Td>
+                    <Td>{a.last_seen ? fmtDT(a.last_seen) : "—"}</Td>
+                    <Td>{a.max_date || "아직 없음"}</Td>
+                  </tr>
+                ))}
+                {!accounts.length && <tr><td colSpan={5} style={{ padding: 14, fontSize: 13, color: C.sub }}>letus_edi6.sql 실행 후 EDI에 로그인하면 계정이 자동 등록돼요.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ fontSize: 12, color: C.sub, margin: "-12px 0 20px" }}>계정마다 EDI 로그인이 따로예요. 4개 계정(14C·18F / 일반유형 11A·15A / 15A 전용 / 23E 전용)이 모두 최근에 접속·수집돼야 재고가 완전해요.</div>
+
           <div style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 8px" }}>1. PMS 센터 ↔ EDI 작업장 맵핑과 재고 비교</div>
           {!overlap.length && <div style={{ fontSize: 12, color: C.sub, marginBottom: 8, lineHeight: 1.6 }}>PMS 파렛트 유형 코드({codes.join(", ") || "없음"})와 EDI 제품({ediItems.join(", ") || "없음"})이 겹치지 않아 재고 수치를 직접 비교할 수 없어요. 맵핑만 먼저 해 두면, 유형 코드를 맞춘 뒤 바로 비교돼요.</div>}
           <div style={{ overflowX: "auto", marginBottom: 20 }}>
@@ -2284,6 +2311,28 @@ function EdiMoves() {
   );
 }
 
+// 같은 날짜·제품이 여러 EDI 계정(예: 15A 일반유형 + 15A 전용)에 있으면 합산해서 한 줄로
+const mergeAccountRows = (rows) => {
+  const m = new Map();
+  rows.forEach((r) => {
+    const k = r.stoc_date + "|" + r.item;
+    const cur = m.get(k);
+    if (!cur) { m.set(k, { ...r, raw: r.raw ? { ...r.raw } : null }); return; }
+    ["last_stoc", "rental_in", "move_in", "move_out", "return_out", "this_stoc"].forEach((f) => { cur[f] = (cur[f] || 0) + (r[f] || 0); });
+    ["CONT_STOC", "BACK_STOC", "CONF_STOC"].forEach((f) => {
+      if (!cur.raw && !r.raw) return;
+      const a = parseInt(cur.raw && cur.raw[f], 10) || 0, b = parseInt(r.raw && r.raw[f], 10) || 0;
+      cur.raw = cur.raw || {}; cur.raw[f] = String(a + b);
+    });
+  });
+  return [...m.values()].sort((a, b) => (a.stoc_date < b.stoc_date ? -1 : a.stoc_date > b.stoc_date ? 1 : 0));
+};
+const mergeByWorkplace = (rows) => {
+  const m = new Map();
+  rows.forEach((r) => { const k = r.workplace_no + "|" + r.item; const c = m.get(k); if (c) c.this_stoc += r.this_stoc; else m.set(k, { workplace_no: r.workplace_no, item: r.item, this_stoc: r.this_stoc }); });
+  return [...m.values()];
+};
+
 function EdiStockView({ caps = {} }) {
   const nowMonth = billingMonthOf(new Date());
   const [wps, setWps] = useState([]);
@@ -2314,7 +2363,7 @@ function EdiStockView({ caps = {} }) {
     setBusy(true);
     supabase.from("aj_stock_daily").select("stoc_date,item,last_stoc,rental_in,move_in,move_out,return_out,this_stoc,raw")
       .eq("workplace_no", wpNo).gte("stoc_date", per.from).lte("stoc_date", per.to).order("stoc_date").limit(3000)
-      .then(({ data, error }) => { if (!alive) return; setBusy(false); if (error) setMsg(error.message); else { setRows(data || []); } });
+      .then(({ data, error }) => { if (!alive) return; setBusy(false); if (error) setMsg(error.message); else { setRows(mergeAccountRows(data || [])); } });
     return () => { alive = false; };
   }, [wpNo, per.from, per.to]);
 
@@ -2473,6 +2522,7 @@ function PalletPricing({ caps = {} }) {
   const [pallets, setPallets] = useState([]);
   const [rates, setRates] = useState({});
   const [invoices, setInvoices] = useState([]);
+  const [accts, setAccts] = useState([]);
   const [lines, setLines] = useState([]);
   const [busy, setBusy] = useState(true);
   const [msg, setMsg] = useState("");
@@ -2483,17 +2533,18 @@ function PalletPricing({ caps = {} }) {
     let alive = true;
     (async () => {
       setBusy(true);
-      const [p, r, iv, il] = await Promise.all([
+      const [p, r, iv, il, ac] = await Promise.all([
         supabase.from("aj_pallet").select("*").order("sort"),
         supabase.from("aj_cost_rate").select("*"),
         supabase.from("aj_invoice").select("*").order("month", { ascending: false }).order("account"),
         supabase.from("aj_invoice_line").select("*").order("id"),
+        supabase.from("aj_account").select("code,name,label").order("first_seen"),
       ]);
       if (!alive) return;
       const er = p.error || r.error || iv.error || il.error;
       if (er) { setMsg("불러오지 못했어요. letus_edi5.sql 실행 여부를 확인해주세요. (" + er.message + ")"); setBusy(false); return; }
       setPallets(p.data || []); setRates(Object.fromEntries((r.data || []).map((x) => [x.code, x])));
-      setInvoices(iv.data || []); setLines(il.data || []); setEdit({}); setBusy(false);
+      setInvoices(iv.data || []); setLines(il.data || []); setAccts(ac.data || []); setEdit({}); setBusy(false);
     })();
     return () => { alive = false; };
   }, [tick]);
@@ -2542,7 +2593,9 @@ function PalletPricing({ caps = {} }) {
       for (const iv of invs) {
         const items = [...new Set(lines.filter((l) => l.invoice_id === iv.id && l.kind === "구내용").flatMap((l) => l.item.split("+")))];
         if (!items.length || !iv.period_from) continue;
-        const { data } = await supabase.from("aj_stock_daily").select("stoc_date,item,this_stoc").eq("workplace_no", 0).in("item", items).gte("stoc_date", iv.period_from).lte("stoc_date", iv.period_to).limit(2000);
+        let qy = supabase.from("aj_stock_daily").select("stoc_date,item,this_stoc").eq("workplace_no", 0).in("item", items).gte("stoc_date", iv.period_from).lte("stoc_date", iv.period_to);
+        if (iv.account_code) qy = qy.eq("account", iv.account_code);
+        const { data } = await qy.limit(3000);
         const rows = data || [];
         out[iv.id] = { sum: rows.reduce((a, r) => a + r.this_stoc, 0), days: new Set(rows.map((r) => r.stoc_date)).size };
       }
@@ -2645,7 +2698,8 @@ function PalletPricing({ caps = {} }) {
             return (
               <div key={iv.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
-                  <div><b>{iv.account}</b> <span style={{ color: C.sub, fontSize: 12 }}>{iv.period_from} ~ {iv.period_to} ({iv.days}일){iv.note ? ` · ${iv.note}` : ""}</span></div>
+                  <div><b>{iv.account}</b> <span style={{ color: C.sub, fontSize: 12 }}>{iv.period_from} ~ {iv.period_to} ({iv.days}일){iv.note ? ` · ${iv.note}` : ""}</span>
+                    {caps.users && <select value={iv.account_code || ""} onChange={async (ev) => { await supabase.from("aj_invoice").update({ account_code: ev.target.value || null }).eq("id", iv.id); setTick((t) => t + 1); }} style={{ marginLeft: 8, fontSize: 12, padding: "3px 6px", border: `1px solid ${C.border}`, borderRadius: 6 }}><option value="">연결된 EDI 계정 없음</option>{accts.map((a) => <option key={a.code} value={a.code}>{a.label || a.name || a.code}</option>)}</select>}</div>
                   <div style={{ fontSize: 13 }}>공급가 {won(iv.supply)} + 부가세 {won(iv.vat)} = <b>{won(iv.total)}</b></div>
                 </div>
                 <table style={tbl}>
