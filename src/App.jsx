@@ -655,7 +655,7 @@ function Shell({ session, initialConfirm }) {
     { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
     { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
-    { key: "정산", label: "정산" }, { key: "마스터", label: "거래처·단가" }, { key: "단가", label: "파렛트·단가" },
+    { key: "정산", label: "정산" }, { key: "마스터", label: "거래처" }, { key: "단가", label: "파렛트·단가" },
     { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
   const allowed = NAV_BY_ROLE[role] || ["현황"];
@@ -2543,7 +2543,7 @@ function PalletPricing({ caps = {} }) {
       if (!alive) return;
       const er = p.error || r.error || iv.error || il.error;
       if (er) { setMsg("불러오지 못했어요. letus_edi5.sql 실행 여부를 확인해주세요. (" + er.message + ")"); setBusy(false); return; }
-      setPallets(p.data || []); setRates(Object.fromEntries((r.data || []).map((x) => [x.code, x])));
+      setPallets((p.data || []).filter((x) => x.active !== false)); setRates(Object.fromEntries((r.data || []).map((x) => [x.code, x])));
       setInvoices(iv.data || []); setLines(il.data || []); setAccts(ac.data || []); setEdit({}); setBusy(false);
     })();
     return () => { alive = false; };
@@ -2849,20 +2849,8 @@ function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, ca
   };
   return (
     <>
-      <Head title="거래처 · 단가" sub="거래처를 등록하면 출고 등록 검색에 바로 잡혀요" />
+      <Head title="거래처" sub="EDI 작업장(시공팀·업체)이 거래처로 반영돼 있어요. 단가는 '파렛트·단가' 메뉴에서 관리해요" />
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
-        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px" }}>
-          <h3 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 600 }}>파렛트 유형 · 단가{caps.priceEdit && <span style={{ color: C.hint, fontWeight: 400, fontSize: 11 }}> · 단가 클릭해서 수정</span>}</h3>
-          <table style={tbl}>
-            <thead><tr><Th>유형</Th><Th>용도</Th><Th r>단가(원)</Th></tr></thead>
-            <tbody>
-              {palletTypes.map((p) => (
-                <PriceRow key={p.code} p={p} price={prices[p.code] || 0} editable={!!caps.priceEdit} onSave={setPrice} />
-              ))}
-            </tbody>
-          </table>
-          <p style={{ fontSize: 11, color: C.hint, marginTop: 10 }}>모든 파렛트 유형은 거래처 구분 없이 어디로든 출고할 수 있어요.{caps.priceEdit && " 단가를 바꾸면 정산에 즉시 반영돼요."}</p>
-        </div>
         <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px" }}>
           <h3 style={{ margin: "0 0 10px", fontSize: 14, fontWeight: 600 }}>거래처 <span style={{ color: C.hint, fontWeight: 400 }}>({filtered.length}/{partners.length})</span></h3>
           <input value={pq} onChange={(e) => setPq(e.target.value)} placeholder="이름으로 검색…" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 8 }} />
@@ -2872,11 +2860,11 @@ function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, ca
               return <button key={f} onClick={() => setPf(f)} style={{ fontSize: 12, padding: "4px 11px", borderRadius: 20, cursor: "pointer", border: on ? "none" : `1px solid ${C.border}`, background: on ? C.teal : "#fff", color: on ? "#fff" : C.sub }}>{f}</button>;
             })}
           </div>
-          <div style={{ maxHeight: 240, overflow: "auto", marginBottom: 12 }}>
+          <div style={{ maxHeight: 420, overflow: "auto", marginBottom: 12 }}>
             <table style={tbl}><tbody>
-              {filtered.map((p) => { const locked = hasStock(p.code); return (
+              {filtered.slice(0, 500).map((p) => { const locked = hasStock(p.code); return (
                 <tr key={p.code} style={{ borderTop: `1px solid ${C.border}` }}>
-                  <Td>{p.name}</Td>
+                  <Td>{p.name}{/^[0-9]+$/.test(p.aj_code || "") && <span title={"EDI 작업장 " + p.aj_code} style={{ marginLeft: 6, fontSize: 10, color: C.teal, border: `1px solid ${C.teal}`, borderRadius: 4, padding: "0 4px" }}>EDI</span>}</Td>
                   <Td><TypeBadge t={p.type} /></Td>
                   {caps.master && <td style={{ padding: "8px 6px", textAlign: "right" }}>
                     {locked
