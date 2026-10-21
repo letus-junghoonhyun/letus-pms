@@ -2122,7 +2122,7 @@ function EdiRecon({ caps = {}, ships = [], ajReqs = [], centers = [], palletType
               <tbody>
                 {accounts.map((a) => (
                   <tr key={a.code} style={{ borderTop: `1px solid ${C.border}` }}>
-                    <Td b>{caps.users ? <input defaultValue={a.label || ""} placeholder="예: 15A 전용" onBlur={async (e) => { if (e.target.value !== (a.label || "")) { await supabase.from("aj_account").update({ label: e.target.value || null }).eq("code", a.code); setTick((t) => t + 1); } }} style={{ fontSize: 13, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6, width: 150 }} /> : (a.label || "—")}</Td>
+                    <Td b>{caps.users ? <input defaultValue={a.label || ""} placeholder="예: 일반유형(11A·15A)" onBlur={async (e) => { if (e.target.value !== (a.label || "")) { await supabase.from("aj_account").update({ label: e.target.value || null }).eq("code", a.code); setTick((t) => t + 1); } }} style={{ fontSize: 13, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6, width: 150 }} /> : (a.label || "—")}</Td>
                     <Td>{a.name || a.code}<div style={{ fontSize: 11, color: C.hint }}>{a.code}</div></Td>
                     <Td>{(a.items || []).join(", ") || "—"}</Td>
                     <Td>{a.last_seen ? fmtDT(a.last_seen) : "—"}</Td>
@@ -2133,7 +2133,7 @@ function EdiRecon({ caps = {}, ships = [], ajReqs = [], centers = [], palletType
               </tbody>
             </table>
           </div>
-          <div style={{ fontSize: 12, color: C.sub, margin: "-12px 0 20px" }}>계정마다 EDI 로그인이 따로예요. 4개 계정(14C·18F / 일반유형 11A·15A / 15A 전용 / 23E 전용)이 모두 최근에 접속·수집돼야 재고가 완전해요.</div>
+          <div style={{ fontSize: 12, color: C.sub, margin: "-12px 0 20px" }}>계정마다 EDI 로그인이 따로예요. 3개 계정(14C·18F / 일반유형 11A·15A / 23E)이 모두 최근에 접속·수집돼야 재고가 완전해요.</div>
 
           <div style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 8px" }}>1. PMS 센터 ↔ EDI 작업장 맵핑과 재고 비교</div>
           {!overlap.length && <div style={{ fontSize: 12, color: C.sub, marginBottom: 8, lineHeight: 1.6 }}>PMS 파렛트 유형 코드({codes.join(", ") || "없음"})와 EDI 제품({ediItems.join(", ") || "없음"})이 겹치지 않아 재고 수치를 직접 비교할 수 없어요. 맵핑만 먼저 해 두면, 유형 코드를 맞춘 뒤 바로 비교돼요.</div>}
