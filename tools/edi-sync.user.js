@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.1
+// @version      3.2
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -233,9 +233,11 @@
     }
 
     // ── 2) 재고: 못 받은 작업장 + 이동이 있었던 작업장(최근 3일 다시) + 전체 합계(0번) ──
-    const refreshFrom = new Date(Math.max(addDays(yesterday, -(REFRESH_DAYS - 1)), parse(START_DATE)));
+    const refreshFrom = new Date(Math.max(addDays(yesterday, -(REFRESH_DAYS - 1)), parse(START_DATE))); // 이동이 있던 작업장: 7일
+    // EDI는 "어제" 재고를 이동이 있었던 작업장부터 먼저 채우고 나머지는 하루 뒤에 채운다 → 모든 작업장은 최근 2일을 항상 다시 받는다
+    const recentFrom = new Date(Math.max(addDays(yesterday, -1), parse(START_DATE)));
     const refresh = new Set(workplaces.filter((w) => w.no === 0 || movedNames.has(w.name)).map((w) => w.no));
-    todo = st.abort ? [] : workplaces.filter((w) => !w.last_synced || parse(w.last_synced) < yesterday || refresh.has(w.no));
+    todo = st.abort ? [] : workplaces.slice(); // 모든 작업장을 확인한다(최근 2일은 다시 받음)
     let next = 0;
     async function worker() {
       while (!st.abort) {
@@ -243,7 +245,7 @@
         if (!w) return;
         try {
           let from = w.last_synced ? addDays(parse(w.last_synced), 1) : parse(START_DATE);
-          if (w.last_synced && refresh.has(w.no) && refreshFrom < from) from = refreshFrom;
+          if (w.last_synced) { const rf = refresh.has(w.no) ? refreshFrom : recentFrom; if (rf < from) from = rf; }
           let guard = 0, any = false;
           while (from <= yesterday && guard++ < 10) {
             const to = new Date(Math.min(addDays(from, CHUNK_DAYS - 1), yesterday));
@@ -256,7 +258,7 @@
             if (rows.length) { await assertAccount(); await call("upsert", { rows, note: "userscript " + w.name }); st.total += rows.length; any = true; }
             from = addDays(to, 1);
           }
-          if (!any) { // 재고가 전혀 없는 작업장: 조회했다는 표시만 남겨 다음부터 건너뛴다
+          if (!any && (!w.last_synced || parse(w.last_synced) < yesterday)) { // 재고가 전혀 없는 작업장: 조회했다는 표시만 남겨 다음부터 건너뛴다
             const z = { stoc_date: fmt(yesterday), workplace_no: w.no, item: "-", last_stoc: 0, rental_in: 0, move_in: 0, move_out: 0, return_out: 0, this_stoc: 0, raw: null };
             await assertAccount(); await call("upsert", { rows: [z], note: "userscript(빈 작업장) " + w.name }); st.idle++;
           }
