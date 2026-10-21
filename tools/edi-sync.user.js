@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.2
+// @version      3.3
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -29,7 +29,7 @@
   const CHUNK_DAYS = 40;      // 한 번에 조회할 최대 일수
   const START_DATE = "2026-09-26"; // 실제 데이터 사용 시작일(정산기간 26일 시작). 처음 받는 작업장은 여기서부터
   const CONCURRENCY = 3;      // 동시에 조회할 작업장 수 (EDI 서버 부담을 줄이려고 3개로 제한)
-  const MIN_INTERVAL_MS = 60 * 60 * 1000; // 같은 계정은 1시간 안에 다시 열면 건너뜀
+  const MIN_INTERVAL_MS = 20 * 60 * 1000; // 같은 계정은 20분 안에 다시 열면 건너뜀(건너뛴다고 화면에 알려준다)
   const lastMap = () => { try { return JSON.parse(GM_getValue("lastRunMap") || "{}"); } catch (e) { return {}; } };
   const getLast = (acc) => lastMap()[acc] || 0;
   const setLast = (acc, v) => { const m = lastMap(); m[acc] = v; GM_setValue("lastRunMap", JSON.stringify(m)); };
@@ -196,7 +196,11 @@
     }
     const demd = await demdInfo();
     ACCOUNT = demd.code; TAG = (demd.name || demd.code).replace(/^\(주\)/, "");
-    if (Date.now() - getLast(ACCOUNT) < MIN_INTERVAL_MS) return;
+    if (Date.now() - getLast(ACCOUNT) < MIN_INTERVAL_MS) {
+      const ago = Math.max(1, Math.round((Date.now() - getLast(ACCOUNT)) / 60000));
+      say("방금(" + ago + "분 전) 동기화했어요. 지금 다시 하려면 Tampermonkey 메뉴의 'LETUS PMS · 지금 다시 동기화'를 누르세요");
+      return;
+    }
 
     say("동기화 준비 중…", true);
     const combos = await readCombos();
