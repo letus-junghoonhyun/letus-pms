@@ -2650,7 +2650,7 @@ function PalletPricing({ caps = {} }) {
         <>
           <div style={{ fontSize: 12, color: C.sub, lineHeight: 1.7, marginBottom: 10 }}>
             <b>임대료</b>는 우리가 브랜드(시공팀·업체)에 청구하는 장당 월 단가, <b>임차료</b>는 AJ가 우리에게 청구하는 단가예요. 구내용은 일 단가(원/장·일)이고, 운송비·수송용은 건별 비용이라 월 마진 계산에는 넣지 않았어요.
-            15A는 이케아 전용이라 <b>실비</b>로 AJ 임차료를 그대로 청구해요.
+            15A는 시디즈 쿠팡출고분을 11A와 같은 13,200원으로 청구하고, 이케아 15A는 별도 계산서(15A 전용 계정)로 풀필에 <b>실비</b> 청구해요. 둘을 나누는 기준은 AJ 문의 후 정리할 예정이에요.
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={tbl}>
@@ -2677,7 +2677,7 @@ function PalletPricing({ caps = {} }) {
               </tbody>
             </table>
           </div>
-          <div style={{ fontSize: 12, color: C.hint, marginTop: 8 }}>단가 근거: AJ 거래명세서(2026-09, 사용기간 8/26~9/25). 임대료는 현행 청구 단가(14C·18F 2,400 / 11A 13,200 / 23E 7,000 / 15A 실비). 12A는 단가가 아직 없어요.</div>
+          <div style={{ fontSize: 12, color: C.hint, marginTop: 8 }}>단가 근거: AJ 거래명세서(2026-09, 사용기간 8/26~9/25). 임대료는 현행 청구 단가(14C·18F 2,400 / 11A·15A 13,200 / 23E 7,000). 12A는 단가가 아직 없어요.</div>
         </>
       ) : (
         <>

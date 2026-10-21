@@ -73,7 +73,7 @@ INSERT INTO aj_pallet (code, name, category, width_mm, depth_mm, height_mm, weig
  ('18F','대형 파렛트 18F형','대형',1800,1130,150,56.0,'https://ajnetworks.co.kr/assets/uploads/product/product_18F_1.png','https://ajnetworks.co.kr/Product/L/1?cate=파렛트',2400,'fixed',NULL,2),
  ('11A','표준형 파렛트 11A형','표준형',1100,1100,150,19.5,'https://ajnetworks.co.kr/assets/uploads/product/product_11A_1.png','https://ajnetworks.co.kr/Product/L/1?cate=파렛트',13200,'fixed',NULL,3),
  ('12A','표준형 파렛트 12A형','표준형',1200,1000,150,19.0,'https://ajnetworks.co.kr/assets/uploads/product/product_12A_1.png','https://ajnetworks.co.kr/Product/L/1?cate=파렛트',NULL,'fixed','단가 미정(사용 시 입력)',4),
- ('15A','표준형 파렛트 15A','표준형',1460,1130,150,27.5,'https://ajnetworks.co.kr/assets/uploads/product/product_15A_1.png','https://ajnetworks.co.kr/Product/L/1?cate=파렛트',NULL,'actual','이케아 전용 — AJ 임차료 실비를 그대로 청구',5),
+ ('15A','표준형 파렛트 15A','표준형',1460,1130,150,27.5,'https://ajnetworks.co.kr/assets/uploads/product/product_15A_1.png','https://ajnetworks.co.kr/Product/L/1?cate=파렛트',13200,'fixed','시디즈 쿠팡출고 사용분은 11A와 같은 13,200원으로 임대료 청구. 이케아 15A는 별도 계산서(15A 전용 계정)로 풀필에 실비 청구 — AJ 문의 후 계정별 단가로 정리 예정',5),
  ('23E','대형 파렛트 23E형','대형',2300,1600,140,66.0,'https://ajnetworks.co.kr/assets/uploads/product/product_23E_1.png','https://ajnetworks.co.kr/Product/L/1?cate=파렛트',7000,'fixed',NULL,6)
 ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name, category=EXCLUDED.category, width_mm=EXCLUDED.width_mm, depth_mm=EXCLUDED.depth_mm,
   height_mm=EXCLUDED.height_mm, weight_kg=EXCLUDED.weight_kg, image_url=EXCLUDED.image_url, source_url=EXCLUDED.source_url;
