@@ -113,7 +113,7 @@ const toOf = (s) => isMove(s) ? (s.to_center || "—") : isReturn(s) ? (s.center
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
 const NAV_BY_ROLE = {
-  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "정산", "마스터", "사용자", "설정"],
+  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "정산", "마스터", "단가", "사용자", "설정"],
   운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "정산", "마스터", "설정"],
   정산담당: ["현황", "재고", "EDI", "정산", "마스터", "설정"],
   협력업체: ["현황", "반납", "확인", "설정"],
@@ -655,7 +655,7 @@ function Shell({ session, initialConfirm }) {
     { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
     { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
-    { key: "정산", label: "정산" }, { key: "마스터", label: "거래처·단가" },
+    { key: "정산", label: "정산" }, { key: "마스터", label: "거래처·단가" }, { key: "단가", label: "파렛트·단가" },
     { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
   const allowed = NAV_BY_ROLE[role] || ["현황"];
@@ -749,6 +749,7 @@ function Shell({ session, initialConfirm }) {
             {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, ships, caps, centers: centerList }} />}
             {nav === "EDI" && caps.inventory && <EdiStock {...{ caps, ships, ajReqs, palletTypes, centers: centerList }} />}
+            {nav === "단가" && caps.users && <PalletPricing caps={caps} />}
             {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner, centers, addCenter, toggleCenter }} />}
             {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId: session.user.id }} />}
@@ -1948,7 +1949,7 @@ function EdiBilling({ caps = {} }) {
       setMaxDate(md.data && md.data[0] ? md.data[0].stoc_date : null);
       const useUnit = h.data ? h.data.unit : unit, useNeg = h.data ? h.data.neg_mode : neg, useBasis = h.data ? h.data.basis : basis;
       if (h.data) { setUnit(useUnit); setNeg(useNeg); setBasis(useBasis); }
-      const c = await supabase.rpc("aj_billing_calc", { p_from: per.from, p_to: per.to, p_neg: useNeg, p_basis: useBasis });
+      const c = await supabase.rpc("aj_billing_calc", { p_from: per.from, p_to: per.to, p_neg: useNeg, p_basis: useBasis, p_default_unit: useUnit });
       if (!alive) return;
       if (c.error) { setMsg("정산 계산에 실패했어요: " + c.error.message); setBusy(false); return; }
       setCalc(c.data || []);
@@ -1967,12 +1968,12 @@ function EdiBilling({ caps = {} }) {
 
   const isBill = (k) => k === "시공팀" || k === "업체";
   // 마감된 달은 저장된 스냅샷을, 아니면 현재 계산값을 보여준다
-  const base = closed ? lines.map((l) => ({ workplace_no: l.workplace_no, workplace_name: l.workplace_name, kind: l.kind, item: l.item, sum_qty: l.sum_qty, avg_qty: l.avg_qty, amount: l.amount })) : calc.map((c) => ({ ...c, amount: c.avg_qty * unit }));
+  const base = closed ? lines.map((l) => ({ workplace_no: l.workplace_no, workplace_name: l.workplace_name, kind: l.kind, item: l.item, sum_qty: l.sum_qty, avg_qty: l.avg_qty, unit: l.unit, unit_mode: "fixed", amount: l.amount })) : calc.map((c) => ({ ...c, amount: c.avg_qty * (c.unit ?? unit) }));
   const shown = base.filter((r) => (kindF === "all" || (kindF === "bill" ? isBill(r.kind) : r.kind === "센터")) && (!q || (r.workplace_name + " " + r.item).includes(q)));
   const totBill = base.filter((r) => isBill(r.kind)).reduce((a, r) => a + Number(r.amount), 0);
   const qtyBill = base.filter((r) => isBill(r.kind)).reduce((a, r) => a + Number(r.avg_qty), 0);
   const wpsBill = new Set(base.filter((r) => isBill(r.kind)).map((r) => r.workplace_no)).size;
-  const curTot = calc.filter((c) => isBill(c.kind)).reduce((a, c) => a + c.avg_qty * (closed ? closed.unit : unit), 0);
+  const curTot = calc.filter((c) => isBill(c.kind)).reduce((a, c) => a + c.avg_qty * (c.unit ?? (closed ? closed.unit : unit)), 0);
   const drift = closed ? curTot - Number(closed.total_amount || 0) : 0;
 
   const doClose = async () => {
@@ -1992,7 +1993,7 @@ function EdiBilling({ caps = {} }) {
   const exportXlsx = () => {
     const u = closed ? closed.unit : unit;
     const detail = base.filter((r) => kindF === "all" || (kindF === "bill" ? isBill(r.kind) : r.kind === "센터"))
-      .map((r) => ({ 작업장: r.workplace_name, 구분: r.kind, 제품: r.item, "일별 보유합계(장·일)": Number(r.sum_qty), "사용 장수": Number(r.avg_qty), "단가(원)": u, "금액(원)": Number(r.amount) }));
+      .map((r) => ({ 작업장: r.workplace_name, 구분: r.kind, 제품: r.item, "일별 보유합계(장·일)": Number(r.sum_qty), "사용 장수": Number(r.avg_qty), "단가(원)": r.unit ?? u, "금액(원)": Number(r.amount) }));
     const byWp = {};
     detail.forEach((r) => { const k = r.작업장; byWp[k] = byWp[k] || { 작업장: k, 구분: r.구분, "사용 장수": 0, "금액(원)": 0 }; byWp[k]["사용 장수"] += r["사용 장수"]; byWp[k]["금액(원)"] += r["금액(원)"]; });
     const sum = Object.values(byWp).sort((a, b) => b["금액(원)"] - a["금액(원)"]);
@@ -2018,7 +2019,7 @@ function EdiBilling({ caps = {} }) {
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
         <span style={{ fontSize: 13, color: C.sub }}>정산월</span>
         <select value={month} onChange={(e) => setMonth(e.target.value)} style={inp}>{ediRecentMonths(nowMonth).map((m) => <option key={m} value={m}>{m}</option>)}</select>
-        <span style={{ fontSize: 13, color: C.sub }}>단가</span>
+        <span style={{ fontSize: 13, color: C.sub }} title="규격별 임대료가 없는 제품에만 적용돼요">기본 단가</span>
         <input type="number" value={unit} disabled={locked} onChange={(e) => setUnit(Number(e.target.value) || 0)} style={{ ...inp, width: 90 }} />
         <select value={neg} disabled={locked} onChange={(e) => setNeg(e.target.value)} style={inp}><option value="zero">마이너스 0장 처리</option><option value="raw">마이너스 그대로</option></select>
         <select value={basis} disabled={locked} onChange={(e) => setBasis(e.target.value)} style={inp}><option value="this">금일재고 전체</option><option value="cont">계약재고</option><option value="back">회수재고</option><option value="conf">확인재고</option></select>
@@ -2038,14 +2039,14 @@ function EdiBilling({ caps = {} }) {
       {busy ? <Splash text="불러오는 중…" /> : (
         <div style={{ overflowX: "auto" }}>
           <table style={tbl}>
-            <thead><tr><Th>작업장</Th><Th>구분</Th><Th>제품</Th><Th r>보유합계(장·일)</Th><Th r>사용 장수</Th><Th r>금액</Th></tr></thead>
+            <thead><tr><Th>작업장</Th><Th>구분</Th><Th>제품</Th><Th r>보유합계(장·일)</Th><Th r>사용 장수</Th><Th r>단가</Th><Th r>금액</Th></tr></thead>
             <tbody>
               {shown.slice(0, 400).map((r, i) => (
                 <tr key={r.workplace_no + r.item + i} style={{ borderTop: `1px solid ${C.border}` }}>
-                  <Td>{r.workplace_name}</Td><Td>{r.kind}</Td><Td>{r.item}</Td><Td r>{Number(r.sum_qty).toLocaleString()}</Td><Td r>{Number(r.avg_qty).toLocaleString()}</Td><Td r b>{Number(r.amount).toLocaleString()}</Td>
+                  <Td>{r.workplace_name}</Td><Td>{r.kind}</Td><Td>{r.item}</Td><Td r>{Number(r.sum_qty).toLocaleString()}</Td><Td r>{Number(r.avg_qty).toLocaleString()}</Td><Td r>{r.unit == null ? "" : Number(r.unit).toLocaleString()}{r.unit_mode === "actual" ? " (실비 추정)" : r.unit_mode === "default" ? " (기본)" : ""}</Td><Td r b>{Number(r.amount).toLocaleString()}</Td>
                 </tr>
               ))}
-              {!shown.length && <tr><td colSpan={6} style={{ padding: 16, fontSize: 13, color: C.sub }}>표시할 내역이 없어요.</td></tr>}
+              {!shown.length && <tr><td colSpan={7} style={{ padding: 16, fontSize: 13, color: C.sub }}>표시할 내역이 없어요.</td></tr>}
             </tbody>
           </table>
           {shown.length > 400 && <div style={{ fontSize: 12, color: C.sub, padding: 8 }}>상위 400줄만 표시해요(엑셀에는 전체가 들어가요). 검색으로 좁혀 보세요.</div>}
@@ -2460,6 +2461,207 @@ function EdiStockView({ caps = {} }) {
               </tbody>
             </table>
           </div>
+        </>
+      )}
+    </>
+  );
+}
+
+// ─── 파렛트·단가 (관리자 전용): 규격·이미지 / 임대료(청구)·임차료(AJ) 단가 / AJ 명세서 ───────────
+function PalletPricing({ caps = {} }) {
+  const [tab, setTab] = useState("spec");
+  const [pallets, setPallets] = useState([]);
+  const [rates, setRates] = useState({});
+  const [invoices, setInvoices] = useState([]);
+  const [lines, setLines] = useState([]);
+  const [busy, setBusy] = useState(true);
+  const [msg, setMsg] = useState("");
+  const [tick, setTick] = useState(0);
+  const [edit, setEdit] = useState({}); // code -> 편집 중인 값
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setBusy(true);
+      const [p, r, iv, il] = await Promise.all([
+        supabase.from("aj_pallet").select("*").order("sort"),
+        supabase.from("aj_cost_rate").select("*"),
+        supabase.from("aj_invoice").select("*").order("month", { ascending: false }).order("account"),
+        supabase.from("aj_invoice_line").select("*").order("id"),
+      ]);
+      if (!alive) return;
+      const er = p.error || r.error || iv.error || il.error;
+      if (er) { setMsg("불러오지 못했어요. letus_edi5.sql 실행 여부를 확인해주세요. (" + er.message + ")"); setBusy(false); return; }
+      setPallets(p.data || []); setRates(Object.fromEntries((r.data || []).map((x) => [x.code, x])));
+      setInvoices(iv.data || []); setLines(il.data || []); setEdit({}); setBusy(false);
+    })();
+    return () => { alive = false; };
+  }, [tick]);
+
+  const setE = (code, k, v) => setEdit((e) => ({ ...e, [code]: { ...(e[code] || {}), [k]: v } }));
+  const val = (p, k) => (edit[p.code] && edit[p.code][k] !== undefined ? edit[p.code][k] : p[k] ?? "");
+  const rv = (code, k) => (edit[code] && edit[code]["r_" + k] !== undefined ? edit[code]["r_" + k] : (rates[code] || {})[k] ?? "");
+  const numOrNull = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
+
+  const saveSpec = async (p) => {
+    const e = edit[p.code] || {};
+    const patch = {};
+    ["name", "category", "image_url"].forEach((k) => { if (e[k] !== undefined) patch[k] = e[k] || null; });
+    ["width_mm", "depth_mm", "height_mm", "weight_kg"].forEach((k) => { if (e[k] !== undefined) patch[k] = numOrNull(e[k]); });
+    if (!Object.keys(patch).length) return;
+    const { error } = await supabase.from("aj_pallet").update({ ...patch, updated_at: new Date().toISOString() }).eq("code", p.code);
+    if (error) setMsg(error.message); else setTick((t) => t + 1);
+  };
+  const savePrice = async (p) => {
+    const e = edit[p.code] || {};
+    const a = {};
+    if (e.rent_price !== undefined) a.rent_price = numOrNull(e.rent_price);
+    if (e.rent_mode !== undefined) a.rent_mode = e.rent_mode;
+    if (e.rent_note !== undefined) a.rent_note = e.rent_note || null;
+    const r = {};
+    ["daily_rate", "move_fee", "ship_fee"].forEach((k) => { if (e["r_" + k] !== undefined) r[k] = numOrNull(e["r_" + k]); });
+    let er = null;
+    if (Object.keys(a).length) { const x = await supabase.from("aj_pallet").update({ ...a, updated_at: new Date().toISOString() }).eq("code", p.code); er = x.error; }
+    if (!er && Object.keys(r).length) { const x = await supabase.from("aj_cost_rate").upsert({ code: p.code, ...(rates[p.code] || {}), ...r, updated_at: new Date().toISOString() }, { onConflict: "code" }); er = x.error; }
+    if (er) setMsg(er.message); else setTick((t) => t + 1);
+  };
+
+  const inp = { fontSize: 13, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 6, width: "100%", boxSizing: "border-box" };
+  const volume = (p) => (p.width_mm && p.depth_mm && p.height_mm ? ((p.width_mm * p.depth_mm * p.height_mm) / 1e9).toFixed(3) : "—");
+
+  // ── AJ 명세서 탭 데이터 ──
+  const months = [...new Set(invoices.map((i) => i.month))];
+  const [mon, setMon] = useState("");
+  const curMon = mon || months[0] || "";
+  const invs = invoices.filter((i) => i.month === curMon);
+  const [edi, setEdi] = useState({});
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const out = {};
+      for (const iv of invs) {
+        const items = [...new Set(lines.filter((l) => l.invoice_id === iv.id && l.kind === "구내용").flatMap((l) => l.item.split("+")))];
+        if (!items.length || !iv.period_from) continue;
+        const { data } = await supabase.from("aj_stock_daily").select("stoc_date,item,this_stoc").eq("workplace_no", 0).in("item", items).gte("stoc_date", iv.period_from).lte("stoc_date", iv.period_to).limit(2000);
+        const rows = data || [];
+        out[iv.id] = { sum: rows.reduce((a, r) => a + r.this_stoc, 0), days: new Set(rows.map((r) => r.stoc_date)).size };
+      }
+      if (alive) setEdi(out);
+    })();
+    return () => { alive = false; };
+  }, [curMon, invoices.length, lines.length]); // eslint-disable-line
+
+  return (
+    <>
+      <Head title="파렛트·단가" sub="관리자 전용 · 규격, 임대료(우리가 청구), 임차료(AJ가 청구), AJ 명세서" />
+      {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+        {[["spec", "규격·이미지"], ["price", "단가 (임대료·임차료)"], ["inv", "AJ 임차료 명세서"]].map(([k, l]) => (
+          <button key={k} onClick={() => setTab(k)} style={{ ...btnGhost, padding: "7px 16px", background: tab === k ? C.teal : "transparent", color: tab === k ? "#04342C" : C.text, fontWeight: tab === k ? 600 : 400 }}>{l}</button>
+        ))}
+      </div>
+      {busy ? <Splash text="불러오는 중…" /> : tab === "spec" ? (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(290px, 1fr))", gap: 14 }}>
+          {pallets.map((p) => (
+            <div key={p.code} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14 }}>
+              <div style={{ height: 150, display: "flex", alignItems: "center", justifyContent: "center", background: "#f6f7f9", borderRadius: 8, marginBottom: 10, overflow: "hidden" }}>
+                {p.image_url ? <img src={p.image_url} alt={p.code} loading="lazy" referrerPolicy="no-referrer" style={{ maxWidth: "100%", maxHeight: 150, objectFit: "contain" }} onError={(e) => { e.currentTarget.style.display = "none"; }} /> : <span style={{ color: C.hint, fontSize: 12 }}>이미지 없음</span>}
+              </div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ fontSize: 22, fontWeight: 700 }}>{p.code}</span>
+                <span style={{ fontSize: 12, color: C.sub }}>{p.category}</span>
+              </div>
+              <div style={{ fontSize: 13, color: C.sub, marginBottom: 8 }}>{p.name}</div>
+              <div style={{ fontSize: 13, lineHeight: 1.8 }}>
+                <div>규격 <b>{p.width_mm?.toLocaleString() ?? "—"} × {p.depth_mm?.toLocaleString() ?? "—"} × {p.height_mm ?? "—"}</b> mm</div>
+                <div>중량 <b>{p.weight_kg ?? "—"}</b> kg · 부피 {volume(p)} m³</div>
+              </div>
+              {caps.users && (
+                <details style={{ marginTop: 8 }}>
+                  <summary style={{ cursor: "pointer", fontSize: 12, color: C.teal }}>정보 수정</summary>
+                  <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+                    <input style={inp} value={val(p, "name")} onChange={(e) => setE(p.code, "name", e.target.value)} placeholder="이름" />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+                      {[["width_mm", "가로"], ["depth_mm", "세로"], ["height_mm", "높이"], ["weight_kg", "kg"]].map(([k, l]) => <input key={k} style={inp} type="number" step="any" value={val(p, k)} onChange={(e) => setE(p.code, k, e.target.value)} placeholder={l} />)}
+                    </div>
+                    <input style={inp} value={val(p, "image_url")} onChange={(e) => setE(p.code, "image_url", e.target.value)} placeholder="이미지 주소" />
+                    <button onClick={() => saveSpec(p)} style={{ ...btnGreen, justifyContent: "center" }}>저장</button>
+                  </div>
+                </details>
+              )}
+            </div>
+          ))}
+          <div style={{ gridColumn: "1 / -1", fontSize: 12, color: C.hint }}>규격·중량·이미지 출처: AJ네트웍스 제품안내 (ajnetworks.co.kr)</div>
+        </div>
+      ) : tab === "price" ? (
+        <>
+          <div style={{ fontSize: 12, color: C.sub, lineHeight: 1.7, marginBottom: 10 }}>
+            <b>임대료</b>는 우리가 브랜드(시공팀·업체)에 청구하는 장당 월 단가, <b>임차료</b>는 AJ가 우리에게 청구하는 단가예요. 구내용은 일 단가(원/장·일)이고, 운송비·수송용은 건별 비용이라 월 마진 계산에는 넣지 않았어요.
+            15A는 이케아 전용이라 <b>실비</b>로 AJ 임차료를 그대로 청구해요.
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={tbl}>
+              <thead><tr><Th>규격</Th><Th r>임대료(청구) 원/월</Th><Th>방식</Th><Th r>구내용 원/장·일</Th><Th r>월환산(30일)</Th><Th r>운송비 원/장</Th><Th r>수송용 원/장</Th><Th r>월 마진(구내용 기준)</Th><Th /></tr></thead>
+              <tbody>
+                {pallets.map((p) => {
+                  const mode = val(p, "rent_mode") || "fixed";
+                  const daily = Number(rv(p.code, "daily_rate")) || 0, rent = Number(val(p, "rent_price")) || 0;
+                  const dirty = edit[p.code] && Object.keys(edit[p.code]).length;
+                  return (
+                    <tr key={p.code} style={{ borderTop: `1px solid ${C.border}` }}>
+                      <Td b>{p.code}</Td>
+                      <Td r>{mode === "actual" ? <span style={{ color: C.sub }}>실비</span> : <input style={{ ...inp, width: 100, textAlign: "right" }} type="number" value={val(p, "rent_price")} disabled={!caps.users} onChange={(e) => setE(p.code, "rent_price", e.target.value)} placeholder="미정" />}</Td>
+                      <Td><select style={{ ...inp, width: 90 }} value={mode} disabled={!caps.users} onChange={(e) => setE(p.code, "rent_mode", e.target.value)}><option value="fixed">고정</option><option value="actual">실비</option></select></Td>
+                      <Td r><input style={{ ...inp, width: 80, textAlign: "right" }} type="number" step="any" value={rv(p.code, "daily_rate")} disabled={!caps.users} onChange={(e) => setE(p.code, "r_daily_rate", e.target.value)} /></Td>
+                      <Td r>{daily ? Math.round(daily * 30).toLocaleString() : "—"}</Td>
+                      <Td r><input style={{ ...inp, width: 80, textAlign: "right" }} type="number" value={rv(p.code, "move_fee")} disabled={!caps.users} onChange={(e) => setE(p.code, "r_move_fee", e.target.value)} /></Td>
+                      <Td r><input style={{ ...inp, width: 80, textAlign: "right" }} type="number" value={rv(p.code, "ship_fee")} disabled={!caps.users} onChange={(e) => setE(p.code, "r_ship_fee", e.target.value)} /></Td>
+                      <Td r b>{mode === "actual" ? <span style={{ color: C.sub }}>실비(0)</span> : rent && daily ? <span style={{ color: rent - daily * 30 < 0 ? C.red : C.green }}>{Math.round(rent - daily * 30).toLocaleString()}</span> : "—"}</Td>
+                      <Td>{caps.users && dirty ? <button onClick={() => savePrice(p)} style={{ ...btnGreen, padding: "5px 12px" }}>저장</button> : null}</Td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ fontSize: 12, color: C.hint, marginTop: 8 }}>단가 근거: AJ 거래명세서(2026-09, 사용기간 8/26~9/25). 임대료는 현행 청구 단가(14C·18F 2,400 / 11A 13,200 / 23E 7,000 / 15A 실비). 12A는 단가가 아직 없어요.</div>
+        </>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontSize: 13, color: C.sub }}>정산월</span>
+            <select value={curMon} onChange={(e) => setMon(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }}>{months.map((m) => <option key={m} value={m}>{m}</option>)}</select>
+          </div>
+          {!invs.length && <div style={{ color: C.sub, fontSize: 13 }}>등록된 명세서가 없어요.</div>}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+            <Metric label="임차료 공급가 합계" value={won(invs.reduce((a, i) => a + Number(i.supply || 0), 0))} tone="plain" />
+            <Metric label="부가세 포함 청구 합계" value={won(invs.reduce((a, i) => a + Number(i.total || 0), 0))} tone="info" />
+          </div>
+          {invs.map((iv) => {
+            const ls = lines.filter((l) => l.invoice_id === iv.id);
+            const e = edi[iv.id];
+            const gu = ls.find((l) => l.kind === "구내용");
+            const gap = e && gu ? ((e.sum - Number(gu.qty)) / Number(gu.qty)) * 100 : null;
+            return (
+              <div key={iv.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+                  <div><b>{iv.account}</b> <span style={{ color: C.sub, fontSize: 12 }}>{iv.period_from} ~ {iv.period_to} ({iv.days}일){iv.note ? ` · ${iv.note}` : ""}</span></div>
+                  <div style={{ fontSize: 13 }}>공급가 {won(iv.supply)} + 부가세 {won(iv.vat)} = <b>{won(iv.total)}</b></div>
+                </div>
+                <table style={tbl}>
+                  <thead><tr><Th>제품</Th><Th>구분</Th><Th r>수량</Th><Th r>단가</Th><Th r>금액</Th></tr></thead>
+                  <tbody>{ls.map((l) => <tr key={l.id} style={{ borderTop: `1px solid ${C.border}` }}><Td>{l.item}</Td><Td>{l.kind}</Td><Td r>{Number(l.qty).toLocaleString()}</Td><Td r>{l.unit_price == null ? "" : Number(l.unit_price).toLocaleString()}</Td><Td r b>{Number(l.amount).toLocaleString()}</Td></tr>)}</tbody>
+                </table>
+                {gu && (
+                  <div style={{ fontSize: 12, color: C.sub, marginTop: 8, lineHeight: 1.7 }}>
+                    구내용 장·일 대조: 명세서 {Number(gu.qty).toLocaleString()} · EDI 전체합계 {e ? `${e.sum.toLocaleString()} (${e.days}일치)` : "계산 중/데이터 없음"}
+                    {gap !== null && e.days >= iv.days ? <b style={{ color: Math.abs(gap) < 1 ? C.green : C.red }}> · 차이 {gap.toFixed(2)}%</b> : e && e.days < iv.days ? " · EDI 수집 기간이 짧아 비교 불가" : ""}
+                    {!e || e.sum === 0 ? <span> · 이 계정의 EDI 데이터가 아직 수집되지 않았어요</span> : null}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </>
       )}
     </>
