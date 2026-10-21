@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.0
+// @version      3.1
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -97,6 +97,15 @@
       };
       f.onload = () => setTimeout(tick, 300);
     });
+  }
+
+  // 동기화 도중 다른 계정으로 바뀌면(로그아웃 후 재로그인) 데이터가 섞이므로, 저장 직전에 계정을 다시 확인한다
+  let lastCheck = 0;
+  async function assertAccount() {
+    if (Date.now() - lastCheck < 5000) return;
+    const d = await demdInfo();
+    if (d.code !== ACCOUNT) throw new Error("로그인 계정이 바뀌었어요(" + ACCOUNT + " → " + d.code + "). 데이터가 섞이지 않게 중단합니다");
+    lastCheck = Date.now();
   }
 
   async function demdInfo() {
@@ -215,12 +224,12 @@
         say(`이동 내역 ${fmt(from)}~${fmt(to)} 조회 중…`, true);
         const rows = await pullMoves(demd, inst, fmt(from), fmt(to));
         rows.forEach((r) => { movedNames.add(r.from_name); movedNames.add(r.to_name); });
-        if (rows.length) { await call("moves_upsert", { rows, note: fmt(from) + "~" + fmt(to) }); mv += rows.length; }
+        if (rows.length) { await assertAccount(); await call("moves_upsert", { rows, note: fmt(from) + "~" + fmt(to) }); mv += rows.length; }
         from = addDays(to, 1);
       }
     } catch (e) {
       mvErr = e.message;
-      if (/로그인 만료|토큰이|주소가|anon 키가/.test(e.message)) st.abort = true;
+      if (/로그인 만료|토큰이|주소가|anon 키가|로그인 계정이 바뀌었어요/.test(e.message)) st.abort = true;
     }
 
     // ── 2) 재고: 못 받은 작업장 + 이동이 있었던 작업장(최근 3일 다시) + 전체 합계(0번) ──
@@ -244,18 +253,18 @@
               try { rows = await pull(demd, w.no, fmt(from), fmt(to)); break; }
               catch (e) { if (/로그인 만료/.test(e.message) || t >= 2) throw e; await sleep(4000 * (t + 1)); }
             }
-            if (rows.length) { await call("upsert", { rows, note: "userscript " + w.name }); st.total += rows.length; any = true; }
+            if (rows.length) { await assertAccount(); await call("upsert", { rows, note: "userscript " + w.name }); st.total += rows.length; any = true; }
             from = addDays(to, 1);
           }
           if (!any) { // 재고가 전혀 없는 작업장: 조회했다는 표시만 남겨 다음부터 건너뛴다
             const z = { stoc_date: fmt(yesterday), workplace_no: w.no, item: "-", last_stoc: 0, rental_in: 0, move_in: 0, move_out: 0, return_out: 0, this_stoc: 0, raw: null };
-            await call("upsert", { rows: [z], note: "userscript(빈 작업장) " + w.name }); st.idle++;
+            await assertAccount(); await call("upsert", { rows: [z], note: "userscript(빈 작업장) " + w.name }); st.idle++;
           }
           st.done++;
         } catch (e) {
           st.failed++; st.lastErr = w.name + ": " + e.message;
           if (/로그인 만료|EDI 작업장 코드/.test(e.message)) st.abort = true; // EDI 세션이 끊기면 전체 중단(다음 접속 때 이어서)
-          if (/토큰이|주소가|anon 키가/.test(e.message)) st.abort = true;
+          if (/토큰이|주소가|anon 키가|로그인 계정이 바뀌었어요/.test(e.message)) st.abort = true;
         }
       }
     }
