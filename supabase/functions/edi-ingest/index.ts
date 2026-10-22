@@ -191,6 +191,21 @@ Deno.serve(async (req) => {
       }
       return json({ ok: true, saved: n });
     }
+    // 8) AJ 공급요청 → EDI 납품요청 대기열 (납품요청/조회 화면 스크립트가 읽는다)
+    if (body.action === "req_list") {
+      const { data, error } = await db.from("aj_request").select("id,pallet_code,qty,center,wp_no,want_date,want_time,cars_oper,cars_tons,cars_type,phone,note,edi_group,edi_local,requested_at")
+        .eq("edi_account", account).eq("edi_status", "대기").order("requested_at").limit(500);
+      if (error) return json({ error: error.message }, 500);
+      return json({ rows: data || [] });
+    }
+    // 9) EDI에 등록됨: 묶음 전체를 '등록'으로
+    if (body.action === "req_saved") {
+      if (!body.group) return json({ error: "group 없음" }, 400);
+      const { data, error } = await db.from("aj_request").update({ edi_status: "등록", edi_call_code: String(body.call_code || "").slice(0, 200) })
+        .eq("edi_account", account).eq("edi_group", body.group).eq("edi_status", "대기").select("id");
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true, saved: (data || []).length });
+    }
     return json({ error: "unknown action" }, 400);
   } catch (e) {
     return json({ error: String(e) }, 500);

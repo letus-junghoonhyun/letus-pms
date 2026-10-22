@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.7
+// @version      3.8
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
 // @match        http://edi.ajuprs.com/main_frame.do
 // @match        http://edi.ajuprs.com/edi/ware/WARE_MOVE_DETL.do*
+// @match        http://edi.ajuprs.com/edi/othr/OTHR_SIGN_LIST.do*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -420,9 +421,108 @@
     render();
   }
 
+  // ── EDI 납품요청/조회 화면: PMS AJ 공급요청을 채운다. [등록]은 사람이 누른다 ──
+  async function runSign() {
+    const W = unsafeWindow;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (fn, ms = 15000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { try { if (fn()) return true; } catch (e) {} await wait(300); } return false; };
+    if (!(await until(() => W.mySheet2 && W.$ && W.$("#demdCode").val()))) return;
+    if (!GM_getValue("fnUrl") || !GM_getValue("anon") || !GM_getValue("token")) return;
+    ACCOUNT = W.$("#demdCode").val(); TAG = "납품요청";
+    const $ = W.$;
+    const panel = document.createElement("div");
+    panel.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:10px 12px;border-radius:10px;width:300px;max-height:70vh;overflow:auto;box-shadow:0 4px 14px rgba(0,0,0,.3)";
+    const pill = document.createElement("div");
+    pill.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;color:#fff;font:12px/1.5 sans-serif;padding:5px 12px;border-radius:14px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.3);display:none";
+    document.body.appendChild(panel); document.body.appendChild(pill);
+    let lastCount = 0, current = null;
+    const collapsed = () => GM_getValue("signCollapsed") === "1";
+    const applyCollapse = () => {
+      const c = collapsed();
+      panel.style.display = c ? "none" : "block"; pill.style.display = c ? "block" : "none";
+      pill.textContent = "LETUS ▾ " + (lastCount ? "요청 " + lastCount + "건" : "납품요청");
+      pill.style.background = lastCount ? "#1D9E75" : "#0f1424";
+    };
+    pill.onclick = () => { GM_setValue("signCollapsed", "0"); applyCollapse(); };
+    const TIME = { 오전: "10", 오후: "14" };
+
+    // EDI 등록 응답을 가로채서 PMS에 알린다 (화면의 원래 동작은 그대로)
+    const orig = W.ajaxExecute;
+    W.ajaxExecute = function (url) {
+      const rtn = orig.apply(this, arguments);
+      try {
+        if (/OTHR_SIGN_LIST_INST\.do/.test(String(url)) && String(rtn).substr(0, 2) === "OK" && current) {
+          const g = current; current = null;
+          call("req_saved", { group: g, call_code: String(rtn) }).then((r) => { say("납품요청 등록을 PMS에 반영했어요 (" + r.saved + "줄)"); render(); }).catch((e) => say("PMS 반영 실패: " + e.message));
+        }
+      } catch (e) { /* 원래 동작 우선 */ }
+      return rtn;
+    };
+
+    const render = async () => {
+      panel.innerHTML = "<b>LETUS PMS · 납품요청</b><div style='opacity:.7'>불러오는 중…</div>";
+      let rows;
+      try { rows = (await call("req_list", {})).rows || []; } catch (e) { panel.innerHTML = "<b>LETUS PMS</b><div>요청 목록을 못 읽었어요: " + e.message + "</div>"; return; }
+      const g = {};
+      rows.forEach((r) => { (g[r.edi_group] = g[r.edi_group] || { group: r.edi_group, local: r.edi_local, center: r.center, head: r, rows: [] }).rows.push(r); });
+      const list = Object.values(g);
+      lastCount = list.length; applyCollapse();
+      panel.innerHTML = "";
+      const h = document.createElement("div"); h.style.cssText = "display:flex;align-items:center;gap:6px";
+      h.innerHTML = "<b style='flex:1'>LETUS PMS · 납품요청 <span style='opacity:.7;font-weight:400'>(" + ACCOUNT + ")</span></b>";
+      const t = document.createElement("button"); t.textContent = "접기";
+      t.style.cssText = "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:1px 8px;cursor:pointer";
+      t.onclick = () => { GM_setValue("signCollapsed", "1"); applyCollapse(); };
+      h.appendChild(t); panel.appendChild(h);
+      panel.insertAdjacentHTML("beforeend", list.length ? "<div style='opacity:.75;margin:4px 0 6px'>[채우기] → 내용 확인 → EDI [등록]. 등록하면 PMS에 바로 반영돼요.</div>" : "<div style='opacity:.75;margin-top:4px'>PMS에서 보낸 공급요청이 없어요. (PMS › AJ 요청 › 공급요청)</div>");
+      list.forEach((x) => {
+        const d = document.createElement("div");
+        d.style.cssText = "display:flex;align-items:center;gap:6px;padding:5px 0;border-top:1px solid rgba(255,255,255,.12)";
+        const r = x.head;
+        d.innerHTML = "<div style='flex:1'>" + x.local + ". " + (x.center || "") + "<div style='opacity:.65'>" + x.rows.map((y) => y.pallet_code + " " + y.qty).join(" · ") + " · 희망 " + String(r.want_date || "").slice(5) + (r.want_time ? " " + r.want_time : "") + "</div></div>";
+        const b = document.createElement("button");
+        b.textContent = "채우기"; b.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:4px 10px;cursor:pointer";
+        b.onclick = () => { fill(x).then(() => { GM_setValue("signCollapsed", "1"); applyCollapse(); }).catch((e) => alert("채우기 실패: " + e.message)); };
+        d.appendChild(b); panel.appendChild(d);
+      });
+      const rb = document.createElement("button");
+      rb.textContent = "새로고침"; rb.style.cssText = "margin-top:6px;background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:3px 10px;cursor:pointer";
+      rb.onclick = render; panel.appendChild(rb);
+    };
+
+    const fill = async (x) => {
+      const S2 = W.mySheet2, r = x.head;
+      if (![...document.getElementById("demdNumb").options].some((o) => o.value === String(x.local))) throw new Error("작업장 " + x.local + "번이 이 계정 목록에 없어요");
+      W.doAction("New"); await wait(500);
+      $("#demdNumb").val(String(x.local)).trigger("change");
+      if (!(await until(() => S2.RowCount() > 0 && S2.GetCellText(S2.GetDataFirstRow(), "ITEM_CODE")))) throw new Error("제품 목록을 못 불러왔어요");
+      await wait(300);
+      const miss = [];
+      for (const y of x.rows) {
+        let hit = -1;
+        for (let i = S2.GetDataFirstRow(); i <= S2.LastRow(); i++) if (S2.GetCellText(i, "ITEM_CODE") === y.pallet_code) hit = i;
+        if (hit < 0) { miss.push(y.pallet_code); continue; }
+        S2.SetCellValue(hit, "CALL_VOLM", y.qty);
+      }
+      if (r.want_date) $("#WANT_DATE").val(r.want_date);
+      $("#WANT_TIME").val(TIME[r.want_time] || "");
+      if (r.cars_oper === "03") $("#carsOper2").prop("checked", true).trigger("click"); else $("#carsOper1").prop("checked", true).trigger("click");
+      $("#carsTons").val(r.cars_tons || "");
+      $("#carsType" + ({ "01": 1, "02": 2 }[r.cars_type] || 0)).prop("checked", true);
+      $("#demdTeln").val(r.phone || "");
+      const desc = ("PMS 요청 " + String(x.group).slice(0, 8) + (r.note ? " " + r.note : "")).replace(/[^가-힣ㄱ-ㅎㅏ-ㅣa-zA-Z0-9 \-,\/~:]/g, "").slice(0, 50);
+      $("#instDesc").val(desc).trigger("input");
+      current = x.group;
+      if (miss.length) alert("이 작업장에서 요청할 수 없는 제품이라 뺐어요: " + miss.join(", "));
+      if (r.cars_oper === "03") alert("내방은 EDI에서 '내방지점'을 직접 골라 주세요.");
+    };
+    render();
+  }
+
   // Tampermonkey 메뉴: 1시간 제한을 무시하고 지금 다시 동기화
   GM_registerMenuCommand("LETUS PMS · 지금 다시 동기화", () => { GM_setValue("lastRunMap", "{}"); location.reload(); });
 
+  if (/OTHR_SIGN_LIST.do/.test(location.pathname)) { runSign().catch((e) => say("납품요청 실패: " + e.message)); return; }
   if (/WARE_MOVE_DETL.do/.test(location.pathname)) { runFill().catch((e) => say("자동입력 실패: " + e.message)); return; }
   run().catch((e) => say("동기화 실패: " + e.message));
 })();

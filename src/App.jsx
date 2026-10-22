@@ -430,13 +430,21 @@ function Shell({ session, initialConfirm }) {
     const valid = (req.lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return false; }
     try {
-      const rows = valid.map((l) => ({
-        id: uid(), type: req.type, pallet_code: l.pallet, qty: l.qty,
-        center: req.center || null, partner_code: req.partner?.code || null, partner_name: req.partner?.name || null,
-        status: "요청", note: req.note || null, created_by: session.user.id,
-      }));
+      const groups = {}; // 공급요청은 EDI 계정마다 한 건(묶음)으로 납품요청한다
+      const rows = valid.map((l) => {
+        const row = {
+          id: uid(), type: req.type, pallet_code: l.pallet, qty: l.qty,
+          center: req.center || null, partner_code: req.partner?.code || null, partner_name: req.partner?.name || null,
+          status: "요청", note: req.note || null, created_by: session.user.id,
+        };
+        if (req.edi) {
+          Object.assign(row, { wp_no: req.edi.wp_no, want_date: req.edi.want_date || null, want_time: req.edi.want_time || null, cars_oper: req.edi.cars_oper, cars_tons: req.edi.cars_tons || null, cars_type: req.edi.cars_type, phone: req.edi.phone || null });
+          if (l.edi_account && l.edi_local) { groups[l.edi_account] = groups[l.edi_account] || uid().replace(/-/g, ""); Object.assign(row, { edi_account: l.edi_account, edi_local: l.edi_local, edi_group: groups[l.edi_account], edi_status: "대기" }); }
+        }
+        return row;
+      });
       const { error } = await supabase.from("aj_request").insert(rows);
-      if (error) throw error;
+      if (error) throw new Error(error.message + (/want_date|edi_/.test(error.message) ? " (letus_edi11.sql 실행 필요)" : ""));
       await loadAll(); return true;
     } catch (e) { alert("AJ 요청 실패: " + (e.message || e)); return false; }
   };
@@ -1169,7 +1177,8 @@ function EditShipmentModal({ s, palletTypes, onClose, onSave, onCancel }) {
 }
 
 // 여러 파렛트 유형 + 수량을 한 번에 입력 (혼합). maxOf 주면 그 한도까지만(보유수량 제한).
-function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf, maxLabel = "보유", hintOf, hintLabel = "EDI" }) {
+function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf, maxLabel = "보유", hintOf, hintLabel = "EDI", imgOf }) {
+  const [big, setBig] = useState(null);
   const set = (code, v) => setQtys((q) => ({ ...q, [code]: v }));
   return (
     <div style={{ display: "grid", gap: 8, marginBottom: 18 }}>
@@ -1179,8 +1188,10 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
         const v = qtys[p.code] || 0;
         return (
           <div key={p.code} style={{ display: "flex", alignItems: "center", gap: 10, opacity: disabled ? 0.4 : 1 }}>
+            {imgOf && (imgOf(p.code) ? <img src={imgOf(p.code).image_url} alt={p.code} title={imgOf(p.code).name || p.code} referrerPolicy="no-referrer" onClick={() => setBig(imgOf(p.code))} style={{ width: 52, height: 40, objectFit: "contain", flexShrink: 0, cursor: "zoom-in", background: "#f6f7f9", borderRadius: 6 }} onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} /> : <span style={{ width: 52, flexShrink: 0 }} />)}
             <div style={{ width: 104, flexShrink: 0 }}>
               <span style={{ fontSize: 14, fontWeight: 600 }}>{p.code}</span>
+              {imgOf && imgOf(p.code) && imgOf(p.code).name && <div style={{ fontSize: 10.5, color: C.hint, lineHeight: 1.3 }}>{imgOf(p.code).name}</div>}
               {maxOf && <span style={{ fontSize: 11, color: max <= 0 ? C.red : C.hint }}> · {maxLabel} {max}</span>}
               {hintOf && hintOf(p.code) !== null && <span style={{ fontSize: 11, color: v > hintOf(p.code) ? C.red : C.hint }}> · {hintLabel} {hintOf(p.code).toLocaleString()}</span>}
             </div>
@@ -1192,8 +1203,21 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
           </div>
         );
       })}
+      {big && <div onClick={() => setBig(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", cursor: "zoom-out" }}>
+        <div style={{ background: "#fff", borderRadius: 12, padding: 16, maxWidth: "90vw", textAlign: "center" }}>
+          <img src={big.image_url} alt={big.code} referrerPolicy="no-referrer" style={{ maxWidth: "80vw", maxHeight: "65vh", objectFit: "contain" }} />
+          <div style={{ fontSize: 14, fontWeight: 600, marginTop: 8 }}>{big.code} {big.name ? "· " + big.name : ""}</div>
+          {(big.width_mm || big.depth_mm) && <div style={{ fontSize: 12, color: C.sub }}>{[big.width_mm, big.depth_mm, big.height_mm].filter(Boolean).join(" × ")} mm{big.weight_kg ? " · " + big.weight_kg + "kg" : ""}</div>}
+        </div>
+      </div>}
     </div>
   );
+}
+// 파렛트·단가(aj_pallet)의 이미지·이름 (유형 헷갈림 방지)
+function usePalletInfo() {
+  const [m, setM] = useState({});
+  useEffect(() => { supabase.from("aj_pallet").select("code,name,image_url,width_mm,depth_mm,height_mm,weight_kg").then(({ data }) => { const o = {}; (data || []).forEach((r) => { if (r.image_url) o[r.code] = r; }); setM(o); }); }, []);
+  return m;
 }
 const qtysToLines = (qtys) => Object.entries(qtys).map(([pallet, qty]) => ({ pallet, qty: qty || 0 })).filter((l) => l.qty > 0);
 const qtysTotal = (qtys) => Object.values(qtys).reduce((a, n) => a + (n || 0), 0);
@@ -1353,7 +1377,7 @@ function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
 
 function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CENTERS, myCenters = CENTERS, onRegister, onTransfer, onFree, setNav }) {
   const today = new Date().toISOString().slice(0, 10);
-  const [dir, setDir] = useState("출고");
+  const [dir, setDir] = useState("자유");
   const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
   const [qtys, setQtys] = useState({});
   const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
@@ -1363,6 +1387,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
   const isRet = dir === "반납"; const isMv = dir === "이동"; const isFree = dir === "자유";
   const { idx: ediIdx } = useEdiIndex();
+  const pinfoOut = usePalletInfo();
   const wpList = useMemo(() => (ediIdx ? ediIdx.wps.filter((w) => w.no > 0 && !w.closed) : []), [ediIdx]);
   const [fromNo, setFromNo] = useState(null); const [toNo, setToNo] = useState(null);
   const fromWp = wpList.find((w) => w.no === fromNo) || null, toWp = wpList.find((w) => w.no === toNo) || null;
@@ -1397,18 +1422,18 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
       <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>방향</div>
         <div style={{ display: "flex", gap: 6, marginBottom: 18, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
-          {[["출고", "출고"], ["반납", "반납"], ["이동", "센터이동"], ["자유", "작업장 간"]].map(([v, label]) => (
+          {[["자유", "출고처 → 입고처"], ["출고", "센터→거래처"], ["반납", "반납"], ["이동", "센터이동"]].map(([v, label]) => (
             <button key={v} onClick={() => setDir(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: dir === v ? (v === "반납" ? C.amber : v === "이동" ? "#5b3aa6" : v === "자유" ? C.blue : C.teal) : "transparent", color: dir === v ? "#fff" : C.sub }}>{label}</button>
           ))}
         </div>
 
         {isFree ? (
           <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출발지 <span style={{ color: C.hint, fontSize: 11 }}>· EDI 작업장 검색 (센터·시공팀·업체 모두)</span></div>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출고처 <span style={{ color: C.hint, fontSize: 11 }}>· 보내는 곳 · EDI 작업장 전체 검색 (센터·시공팀·업체)</span></div>
             <WorkplacePicker wps={wpList} value={fromNo} onChange={setFromNo} width="100%" placeholder={ediIdx ? "보내는 곳 (이름·번호)" : "작업장 목록 불러오는 중…"} />
             {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>현재고(EDI {(fromStock.date || "").slice(5)} 기준 + 당일 이동·PMS 예정): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
             <div style={{ textAlign: "center", color: C.hint, margin: "6px 0" }}>↓</div>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>도착지</div>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>입고처 <span style={{ color: C.hint, fontSize: 11 }}>· 받는 곳</span></div>
             <WorkplacePicker wps={wpList} value={toNo} onChange={setToNo} width="100%" filter={(w) => w.no !== fromNo} placeholder="받는 곳 (이름·번호)" />
             {fromWp && toWp && <div style={{ fontSize: 11.5, color: C.blue, marginTop: 6 }}>{ediClean(fromWp.name)} → {ediClean(toWp.name)} · EDI 반영 탭에서 출고처 "{ediClean(fromWp.name)}"로 자동입력돼요</div>}
           </div>
@@ -1429,12 +1454,12 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>거래처 <span style={{ color: C.hint, fontSize: 11 }}>· 검색</span></div>
             {!sel ? (
               <div style={{ position: "relative", marginBottom: 18 }}>
-                <input value={q} onChange={(e) => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} placeholder="예: 쿠팡, 시공팀, 이케아…" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+                <input value={q} onChange={(e) => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)} onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }} placeholder="예: 쿠팡, 시공팀, 이케아…" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
                 {open && (
                   <div style={{ position: "absolute", top: 44, left: 0, right: 0, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, zIndex: 5, maxHeight: 240, overflow: "auto" }}>
                     {matches.length === 0 && <div style={{ padding: "10px 12px", fontSize: 13, color: C.hint }}>일치하는 거래처 없음</div>}
                     {matches.map((p) => (
-                      <button key={p.code} onClick={() => pick(p)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "10px 12px", border: "none", borderBottom: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", textAlign: "left" }}>
+                      <button key={p.code} onMouseDown={(e) => { e.preventDefault(); pick(p); }} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "10px 12px", border: "none", borderBottom: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", textAlign: "left" }}>
                         <span style={{ fontSize: 13 }}>{p.name}</span>
                         <TypeBadge t={p.type} />
                       </button>
@@ -1457,7 +1482,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
         )}
 
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : "현재고(EDI 기준)보다 많으면 빨갛게 표시"}</span></div>
-        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={themeColor} bg={themeBg} hintOf={isRet ? undefined : hintOf} hintLabel="현재고" />
+        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={themeColor} bg={themeBg} hintOf={isRet ? undefined : hintOf} hintLabel="현재고" imgOf={(c) => pinfoOut[c] || null} />
         {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
 
         {!isMv && (
@@ -1549,7 +1574,7 @@ function ReturnRegister({ partners, palletTypes, ships, ajReqs = [], centers = C
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
             <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="차량번호, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
-            <button disabled={total === 0 || busy} onClick={submit} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : (isAj ? "#7a4ad8" : C.amber), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isAj ? "AJ 회수요청" : "센터 반납 등록"}</button>
+            <button disabled={total === 0 || busy || !wp} onClick={submit} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : (isAj ? "#7a4ad8" : C.amber), color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "등록 중…" : isAj ? "AJ 회수요청" : "센터 반납 등록"}</button>
             <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isAj ? "AJ 직원이 확인하면 AJ로 회수 처리돼요" : "센터에서 입고확인 후 우리 재고로 정리돼요"}</p>
           </>
         )}
@@ -1812,8 +1837,19 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
   const canCreate = !!caps.aj; // 내부만 요청 생성, AJ직원은 처리만
   const [type, setType] = useState("공급");
   const [qtys, setQtys] = useState({});
-  const [center, setCenter] = useState(centers[0]);
   const [note, setNote] = useState(""); const [busy, setBusy] = useState(false);
+  const { idx: ediIdx } = useEdiIndex();
+  const pinfo = usePalletInfo();
+  const wpList = useMemo(() => (ediIdx ? ediIdx.wps.filter((w) => w.no > 0 && !w.closed).sort((a, b) => (a.kind === "센터" ? 0 : 1) - (b.kind === "센터" ? 0 : 1) || a.no - b.no) : []), [ediIdx]);
+  const [wpNo, setWpNo] = useState(null);
+  const wp = wpList.find((w) => w.no === wpNo) || null;
+  const center = wp ? (wp.pms_center || ediClean(wp.name)) : null;
+  const tomorrow = localD(new Date(Date.now() + 86400000).toISOString());
+  const [want, setWant] = useState({ date: tomorrow, time: "", oper: "01", tons: "05", ctype: "00", phone: "" });
+  const [toEdi, setToEdi] = useState(true);
+  const setW = (k, v) => setWant((o) => ({ ...o, [k]: v }));
+  // 제품 → EDI 계정, 받는 작업장 → 그 계정의 작업장 번호
+  const ediLine = (code) => { if (!ediIdx || !wp) return null; const a = ediIdx.accOf(code); const local = a && ediIdx.local[a.code + "|" + wp.no]; return a && local ? { edi_account: a.code, edi_local: local, accName: ediIdx.accName(a.code) } : { miss: !a ? "EDI 계정 없음" : "이 작업장이 " + ediIdx.accName(a.code) + " 계정에 없음" }; };
   const total = qtysTotal(qtys);
   const pending = ajReqs.filter((r) => r.status === "요청");          // AJ직원 처리 대기
   const inbound = ajReqs.filter((r) => r.type === "공급" && r.status === "발송"); // 우리 센터 입고 대기
@@ -1822,7 +1858,11 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
 
   const submit = async () => {
     setBusy(true);
-    const ok = await createAjRequest({ type, lines: qtysToLines(qtys), center, note });
+    if (!wp) { setBusy(false); alert("작업장을 고르세요."); return; }
+    const useEdi = isSupply && toEdi;
+    if (useEdi && want.date <= localD(new Date().toISOString())) { setBusy(false); alert("EDI 납품요청은 희망일이 내일 이후여야 해요."); return; }
+    const lines = qtysToLines(qtys).map((l) => { const e = useEdi ? ediLine(l.pallet) : null; return e && e.edi_account ? { ...l, edi_account: e.edi_account, edi_local: e.edi_local } : l; });
+    const ok = await createAjRequest({ type, lines, center, note, edi: isSupply ? { wp_no: wp.no, want_date: want.date, want_time: want.time, cars_oper: want.oper, cars_tons: want.oper === "03" ? null : want.tons, cars_type: want.ctype, phone: want.phone } : null });
     setBusy(false); if (ok) { setQtys({}); setNote(""); }
   };
 
@@ -1838,13 +1878,28 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
               <button key={v} onClick={() => setType(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: type === v ? (v === "공급" ? C.teal : C.amber) : "transparent", color: type === v ? "#fff" : C.sub }}>{label}</button>
             ))}
           </div>
-          <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isSupply ? "공급 받는 센터" : "회수 보내는 센터"}</div>
-          <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 16 }}>{centers.map((c) => <option key={c} value={c}>{c}</option>)}</select>
-          <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량</div>
-          <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isSupply ? C.teal : C.amber} bg={isSupply ? C.tealBg : C.amberBg} />
+          <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isSupply ? "공급 받는 작업장" : "회수 보내는 작업장"} <span style={{ color: C.hint, fontSize: 11 }}>· EDI 작업장 전체 검색</span></div>
+          <div style={{ marginBottom: 16 }}><WorkplacePicker wps={wpList} value={wpNo} onChange={setWpNo} width="100%" placeholder={ediIdx ? "센터·작업장 (이름·번호)" : "작업장 목록 불러오는 중…"} /></div>
+          <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· 사진을 누르면 크게 보여요</span></div>
+          <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isSupply ? C.teal : C.amber} bg={isSupply ? C.tealBg : C.amberBg} imgOf={(c) => pinfo[c] || null} />
+          {isSupply && <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14, background: "#fafbfc" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, marginBottom: toEdi ? 10 : 0 }}><input type="checkbox" checked={toEdi} onChange={(e) => setToEdi(e.target.checked)} /> EDI 납품요청으로 보내기</label>
+            {toEdi && <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                <label style={{ fontSize: 12, color: C.sub }}>희망일<input type="date" value={want.date} min={tomorrow} onChange={(e) => setW("date", e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 7, marginTop: 3 }} /></label>
+                <label style={{ fontSize: 12, color: C.sub }}>희망시간<select value={want.time} onChange={(e) => setW("time", e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 7, marginTop: 3 }}><option value="">선택 안 함</option><option>오전</option><option>오후</option></select></label>
+                <label style={{ fontSize: 12, color: C.sub }}>배차<select value={want.oper} onChange={(e) => setW("oper", e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 7, marginTop: 3 }}><option value="01">AJ배차</option><option value="03">내방 (지점은 EDI에서 선택)</option></select></label>
+                {want.oper !== "03" && <label style={{ fontSize: 12, color: C.sub }}>통행가능 최대톤수<select value={want.tons} onChange={(e) => setW("tons", e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 7, marginTop: 3 }}><option value="01">1톤 이하</option><option value="02">2.5톤 이하</option><option value="03">3.5톤 이하</option><option value="04">5톤 이하</option><option value="05">11톤 이하</option><option value="06">톤수 상관없음</option></select></label>}
+                <label style={{ fontSize: 12, color: C.sub }}>차량<select value={want.ctype} onChange={(e) => setW("ctype", e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 7, marginTop: 3 }}><option value="00">상관없음</option><option value="01">윙바디</option><option value="02">카고</option></select></label>
+                <label style={{ fontSize: 12, color: C.sub }}>현장 연락처<input value={want.phone} onChange={(e) => setW("phone", e.target.value)} placeholder="010-…" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 7, marginTop: 3 }} /></label>
+              </div>
+              {wp && qtysToLines(qtys).map((l) => { const e = ediLine(l.pallet); return <div key={l.pallet} style={{ fontSize: 11.5, color: e && e.edi_account ? C.sub : C.red }}>{l.pallet}: {e && e.edi_account ? e.accName + " 계정 · 작업장 " + e.edi_local : (e ? e.miss : "") + " → EDI로 안 보내져요"}</div>; })}
+              <div style={{ fontSize: 11, color: C.hint, marginTop: 6, lineHeight: 1.5 }}>접수하면 EDI 납품요청/조회 화면 오른쪽 위 LETUS 상자에 떠요 → [채우기] → [등록]. 마감시간 이후 익일 요청·휴일은 EDI가 막아요.</div>
+            </>}
+          </div>}
           {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 12, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
           <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="메모(선택)" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 14, resize: "vertical", fontFamily: "inherit" }} />
-          <button disabled={total === 0 || busy} onClick={submit} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : (isSupply ? C.teal : C.amber), color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 15, cursor: "pointer" }}>{busy ? "접수 중…" : `${type}요청 접수`}</button>
+          <button disabled={total === 0 || busy} onClick={submit} style={{ width: "100%", background: (total === 0 || busy) ? "#c7cad1" : (isSupply ? C.teal : C.amber), color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 15, cursor: "pointer" }}>{busy ? "접수 중…" : !wp ? "작업장을 고르세요" : `${type}요청 접수`}</button>
         </div>}
 
         {/* AJ 처리 대기 (요청) */}
@@ -1858,7 +1913,8 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
                     <div style={{ minWidth: 0 }}>
                       <span style={{ fontSize: 11, color: "#fff", background: r.type === "공급" ? C.teal : C.amber, padding: "1px 7px", borderRadius: 10 }}>{r.type}</span>
                       <span style={{ fontSize: 13, marginLeft: 6 }}>{r.pallet_code} · {r.qty}장</span>
-                      <div style={{ fontSize: 11, color: C.hint, marginTop: 2 }}>{r.partner_name || r.center} · {fmtDT(r.requested_at)}</div>
+                      <div style={{ fontSize: 11, color: C.hint, marginTop: 2 }}>{r.partner_name || r.center} · {fmtDT(r.requested_at)}{r.want_date ? " · 희망 " + r.want_date.slice(5) + (r.want_time ? " " + r.want_time : "") : ""}</div>
+                      {r.edi_status && <div style={{ fontSize: 11, marginTop: 2, color: r.edi_status === "등록" ? C.green : C.blue }}>EDI 납품요청: {r.edi_status === "등록" ? "등록됨" : "대기 (EDI 납품요청 화면에서 채우기 → 등록)"}</div>}
                     </div>
                     <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                       <button onClick={() => completeAjRequest(r)} style={btnTealSm}>{r.type === "공급" ? "발송" : "회수완료"}</button>
@@ -1998,6 +2054,24 @@ function EdiBilling({ caps = {} }) {
   const [tick, setTick] = useState(0);
   const per = useMemo(() => periodOf(month), [month]);
   const complete = maxDate && maxDate >= per.to;
+  const [cover, setCover] = useState(null); // 계정별 수집된 날짜(전체 합계 0번 행 기준)
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const [{ data: accs }, { data: rows }] = await Promise.all([
+        supabase.from("aj_account").select("code,label,name"),
+        supabase.from("aj_stock_daily").select("account,stoc_date").eq("workplace_no", 0).gte("stoc_date", per.from).lte("stoc_date", per.to).neq("item", "-").limit(5000),
+      ]);
+      if (!alive) return;
+      const days = []; for (let d = new Date(per.from + "T00:00:00"); localD(d.toISOString()) <= per.to; d.setDate(d.getDate() + 1)) days.push(localD(d.toISOString()));
+      const today = localD(new Date().toISOString());
+      const due = days.filter((d) => d < today); // 어제까지가 받을 수 있는 날
+      const have = {}; (rows || []).forEach((r) => { (have[r.account] = have[r.account] || new Set()).add(r.stoc_date); });
+      setCover((accs || []).map((a) => { const h = have[a.code] || new Set(); const missing = due.filter((d) => !h.has(d)); return { code: a.code, label: a.label || a.name || a.code, got: h.size, due: due.length, total: days.length, missing }; }));
+    })();
+    return () => { alive = false; };
+  }, [per.from, per.to, tick]);
+  const coverOk = cover && cover.every((c) => c.missing.length === 0 && c.due === c.total);
 
   useEffect(() => {
     let alive = true;
@@ -2041,6 +2115,7 @@ function EdiBilling({ caps = {} }) {
   const drift = closed ? curTot - Number(closed.total_amount || 0) : 0;
 
   const doClose = async () => {
+    if (cover && !coverOk && !window.confirm("수집이 끝나지 않았어요:\n" + cover.map((c) => `${c.label}: ${c.got}/${c.total}일${c.missing.length ? " (빠진 날 " + c.missing.map((d) => d.slice(5)).join(", ") + ")" : ""}`).join("\n") + "\n\n그래도 마감할까요?")) return;
     if (!window.confirm(`${month} 정산(${per.from} ~ ${per.to})을 마감 확정할까요?\n청구 대상 ${wpsBill}곳, ${won(totBill)}\n확정 후 변동분은 다음 달에 반영돼요.`)) return;
     setBusy(true);
     const { error } = await supabase.rpc("aj_billing_close_month", { p_month: month, p_unit: unit, p_neg: neg, p_basis: basis, p_note: note || null });
@@ -2097,6 +2172,10 @@ function EdiBilling({ caps = {} }) {
         <Metric label="청구 금액" value={won(totBill)} tone="info" />
         {closed && <Metric label="마감 후 변동(다음 달 반영)" value={(drift > 0 ? "+" : "") + won(drift)} tone={drift ? "warn" : "success"} />}
       </div>
+      {cover && !closed && <div style={{ background: coverOk ? C.greenBg : C.amberBg, color: coverOk ? C.green : C.amber, padding: "9px 12px", borderRadius: 8, fontSize: 12.5, marginBottom: 10, lineHeight: 1.7 }}>
+        <b>마감 전 수집 점검</b> ({per.from.slice(5)} ~ {per.to.slice(5)}, {cover[0] ? cover[0].total : 0}일){coverOk ? " · 3개 계정 모두 완료, 마감 가능" : ""}
+        {cover.map((c) => <div key={c.code}>{c.missing.length ? "⚠" : "✓"} {c.label}: {c.got}/{c.total}일 수집{c.missing.length ? " · 빠진 날 " + c.missing.map((d) => d.slice(5)).join(", ") + " → 그 계정으로 EDI 로그인해 동기화" : c.due < c.total ? " · 남은 날은 매일 동기화로 채워져요" : ""}</div>)}
+      </div>}
       {!complete && !closed && <div style={{ fontSize: 12, color: C.sub, marginBottom: 10 }}>재고 데이터가 {maxDate || "—"}까지 들어와 있어요. {per.to}까지 들어오면 마감할 수 있어요. 지금 금액은 진행 중인 잠정값(전체 {per.days}일로 나눔)이에요.</div>}
       {closed && <div style={{ fontSize: 12, color: C.sub, marginBottom: 10 }}>{fmtDT(closed.closed_at)} {closed.closed_by || ""} 확정{closed.note ? ` · ${closed.note}` : ""}</div>}
       {caps.billing && !closed && <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="마감 메모(선택)" style={{ ...inp, width: 280, marginBottom: 12 }} />}
