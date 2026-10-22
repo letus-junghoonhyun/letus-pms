@@ -154,6 +154,22 @@ Deno.serve(async (req) => {
       });
       return json({ ok: true, upserted: n });
     }
+    // 5) 이동등록 창의 입고처 목록 (엑셀 업로드의 입고처코드·순번 확인용). 계정 단위로 통째로 바꾼다
+    if (body.action === "dests_upsert") {
+      const now = new Date().toISOString();
+      const rows = (body.rows || []).filter((r) => r && r.demd_code && Number.isInteger(r.demd_numb)).map((r) => ({
+        account, demd_code: r.demd_code, demd_numb: r.demd_numb, grup_code: r.grup_code || null, demd_name: r.demd_name || null,
+        post_name: r.post_name || null, self_code: r.self_code || null, addr: r.addr || null, usag_flag: r.usag_flag || null,
+        blok_list: r.blok_list || null, updated_at: now,
+      }));
+      if (!rows.length) return json({ error: "입고처 목록이 비어 있어요" }, 400);
+      for (let i = 0; i < rows.length; i += 500) {
+        const { error } = await db.from("aj_dest").upsert(rows.slice(i, i + 500), { onConflict: "account,demd_code,demd_numb" });
+        if (error) return json({ error: error.message }, 500);
+      }
+      await db.from("aj_dest").delete().eq("account", account).lt("updated_at", now); // EDI에서 사라진 입고처 정리
+      return json({ ok: true, upserted: rows.length });
+    }
     return json({ error: "unknown action" }, 400);
   } catch (e) {
     return json({ error: String(e) }, 500);

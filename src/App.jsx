@@ -2316,11 +2316,235 @@ function EdiStock({ caps = {}, ships = [], ajReqs = [], centers = [], palletType
   return (
     <>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-        {[["stock", "재고 흐름"], ["bill", "임대료 정산(청구)"], ...(caps.users ? [["cost", "임차료 정산(AJ)"]] : []), ["move", "이동 현황 (어디서 → 어디로)"], ["recon", "대사·이상 징후"]].map(([k, l]) => (
+        {[["stock", "재고 흐름"], ["bill", "임대료 정산(청구)"], ...(caps.users ? [["cost", "임차료 정산(AJ)"]] : []), ["move", "이동 현황 (어디서 → 어디로)"], ["export", "EDI 반영(업로드)"], ["recon", "대사·이상 징후"]].map(([k, l]) => (
           <button key={k} onClick={() => setView(k)} style={{ ...btnGhost, padding: "7px 16px", background: view === k ? C.teal : "transparent", color: view === k ? "#04342C" : C.text, fontWeight: view === k ? 600 : 400 }}>{l}</button>
         ))}
       </div>
-      {view === "stock" ? <EdiStockView caps={caps} /> : view === "bill" ? <EdiBilling caps={caps} /> : view === "cost" ? <EdiCost caps={caps} /> : view === "move" ? <EdiMoves /> : <EdiRecon {...{ caps, ships, ajReqs, centers, palletTypes }} />}
+      {view === "stock" ? <EdiStockView caps={caps} /> : view === "bill" ? <EdiBilling caps={caps} /> : view === "cost" ? <EdiCost caps={caps} /> : view === "move" ? <EdiMoves /> : view === "export" ? <EdiExport ships={ships} /> : <EdiRecon {...{ caps, ships, ajReqs, centers, palletTypes }} />}
+    </>
+  );
+}
+
+// PMS 출고·반납·이동 → EDI 반영: 이동등록 창 [업로드]용 엑셀을 계정·출고처별로 만들고, EDI 이동 동기화 후 이동코드와 연결
+// 엑셀 형식(AJ 양식): 이동일자(YYYYMMDD) · 제품 · 수량 · 입고처코드 · 입고처순번 · 차량정보 · 인수증번호 · 비고. 출고처는 EDI 화면에서 고른다
+const ediClean = (n) => String(n || "").replace(/^\((폐쇄|차단_폐쇄)\)|^\[차단_폐쇄\]/, "").trim();
+const localD = (iso) => { const d = new Date(iso); const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+const EDI_ST = { 미반영: [C.amber, C.amberBg], 엑셀생성: [C.blue, C.blueBg], 반영: [C.green, C.greenBg], 제외: [C.sub, "#f1f2f4"] };
+function EdiExport({ ships = [] }) {
+  const [from, setFrom] = useState(localD(new Date(Date.now() - 6 * 86400000).toISOString()));
+  const [to, setTo] = useState(localD(new Date().toISOString()));
+  const [stF, setStF] = useState("open");
+  const [ref, setRef] = useState(null);
+  const [moves, setMoves] = useState([]);
+  const [over, setOver] = useState({}); // 화면에서 바꾼 상태 (새로고침 전까지)
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const page = async (q) => { const all = []; for (let p = 0; p < 20; p++) { const { data, error } = await q().range(p * 1000, p * 1000 + 999); if (error) throw error; all.push(...(data || [])); if (!data || data.length < 1000) break; } return all; };
+      try {
+        const [wps, maps, accs, dests] = await Promise.all([
+          page(() => supabase.from("aj_workplace").select("no,name,pms_center,partner_code,closed").order("no")),
+          page(() => supabase.from("aj_workplace_map").select("account,local_no,wp_no").order("account").order("local_no")),
+          supabase.from("aj_account").select("code,name,label,items").then((r) => { if (r.error) throw r.error; return r.data || []; }),
+          page(() => supabase.from("aj_dest").select("account,demd_code,demd_numb,post_name,usag_flag,blok_list,self_code").order("account").order("demd_code").order("demd_numb")),
+        ]);
+        if (alive) setRef({ wps, maps, accs, dests });
+      } catch (e) { if (alive) setMsg("기준 정보를 불러오지 못했어요. letus_edi8.sql 실행 여부를 확인해주세요. (" + (e.message || e) + ")"); }
+    })();
+    return () => { alive = false; };
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const all = [];
+      for (let p = 0; p < 20; p++) {
+        const { data, error } = await supabase.from("aj_move").select("account,move_code,move_date,item,from_name,to_name,qty,note")
+          .gte("move_date", from).lte("move_date", isoD(new Date(new Date(to).getTime() + 3 * 86400000))).order("move_date").order("move_code").range(p * 1000, p * 1000 + 999);
+        if (error) break;
+        all.push(...(data || []));
+        if (!data || data.length < 1000) break;
+      }
+      if (alive) setMoves(all);
+    })();
+    return () => { alive = false; };
+  }, [from, to]);
+
+  // 기준 정보 색인
+  const idx = useMemo(() => {
+    if (!ref) return null;
+    const wpByCenter = {}, wpByPartner = {};
+    ref.wps.forEach((w) => { if (w.partner_code) wpByPartner[w.partner_code] = w; });
+    ref.wps.forEach((w) => { const k = w.pms_center || ediClean(w.name); const cur = wpByCenter[k]; if (!cur || (!cur.pms_center && (w.pms_center || (cur.closed && !w.closed)))) wpByCenter[k] = w; });
+    const local = {}; ref.maps.forEach((m) => { if (m.local_no) local[m.account + "|" + m.wp_no] = m.local_no; });
+    const dest = {}, destByName = {};
+    ref.dests.forEach((d) => { dest[d.account + "|" + d.demd_code + "|" + d.demd_numb] = d; const k = d.account + "|" + ediClean(d.post_name); (destByName[k] = destByName[k] || []).push(d); });
+    const accOf = (item) => ref.accs.filter((a) => (a.items || []).includes(item)).sort((a, b) => /전용/.test(a.label || a.name || "") - /전용/.test(b.label || b.name || ""))[0];
+    return { wpByCenter, wpByPartner, local, dest, destByName, accOf, accName: (c) => { const a = ref.accs.find((x) => x.code === c); return (a && (a.label || a.name)) || c; } };
+  }, [ref]);
+
+  const rows = useMemo(() => {
+    if (!idx) return [];
+    const out = ships.filter((s) => !s.canceled && s.depart_at && localD(s.depart_at) >= from && localD(s.depart_at) <= to).map((s) => {
+      const o = over[s.id] || {};
+      const status = (o.status !== undefined ? o.status : s.edi_status) || "미반영";
+      const moveCode = o.move_code !== undefined ? o.move_code : s.edi_move_code;
+      const date = localD(s.depart_at);
+      const centerWp = idx.wpByCenter[s.center];
+      const partnerWp = s.to_partner ? idx.wpByPartner[s.to_partner] : null;
+      const toCenterWp = s.to_center ? idx.wpByCenter[s.to_center] : null;
+      let fromWp, toWp, fromLabel, toLabel;
+      if (s.direction === "반납") { fromWp = partnerWp; toWp = centerWp; fromLabel = s.to_partner_name; toLabel = s.center; }
+      else if (s.direction === "이동") { fromWp = centerWp; toWp = toCenterWp; fromLabel = s.center; toLabel = s.to_center || s.to_partner_name; }
+      else { fromWp = centerWp; toWp = partnerWp; fromLabel = s.center; toLabel = s.to_partner_name; }
+      const acc = idx.accOf(s.pallet_code);
+      const issues = [];
+      let fromLocal = null, ordeCode = null, ordeNumb = null;
+      if (!acc) issues.push(`${s.pallet_code}을 쓰는 EDI 계정이 없어요`);
+      if (!fromWp) issues.push(`출고처 '${fromLabel || "—"}'가 EDI 작업장과 연결돼 있지 않아요`);
+      if (!toWp) issues.push(`입고처 '${toLabel || "—"}'가 EDI 작업장과 연결돼 있지 않아요`);
+      if (acc && fromWp) { fromLocal = idx.local[acc.code + "|" + fromWp.no]; if (!fromLocal) issues.push(`출고처 '${fromWp.name}'가 ${idx.accName(acc.code)} 계정에 없어요`); }
+      if (acc && toWp) {
+        const own = idx.local[acc.code + "|" + toWp.no];
+        if (own) { ordeCode = acc.code; ordeNumb = own; }
+        else {
+          const c = (idx.destByName[acc.code + "|" + ediClean(toWp.name)] || []).filter((d) => d.usag_flag === "Y");
+          if (c.length === 1) { ordeCode = c[0].demd_code; ordeNumb = c[0].demd_numb; }
+          else issues.push(`입고처 '${toWp.name}'의 EDI 코드를 찾지 못했어요${c.length > 1 ? " (같은 이름 " + c.length + "곳)" : ""}`);
+        }
+        const d = ordeCode && idx.dest[acc.code + "|" + ordeCode + "|" + ordeNumb];
+        if (d && d.usag_flag !== "Y") issues.push(`EDI에서 입고처 '${d.post_name}'가 사용금지예요`);
+        else if (d && String(d.blok_list || "").includes("3")) issues.push(`EDI에서 입고처 '${d.post_name}'가 이동입고 차단이에요`);
+      }
+      if (fromWp && toWp && fromWp.no === toWp.no) issues.push("출고처와 입고처가 같아요");
+      // EDI 이동과 맞춰보기: 비고의 PMS 전표번호가 가장 확실, 없으면 같은 날·제품·수량·출발·도착이 하나뿐일 때
+      let match = null;
+      if (acc && status !== "반영" && status !== "제외") {
+        const cand = moves.filter((m) => m.account === acc.code && m.item === s.pallet_code);
+        match = (s.slip_no && cand.find((m) => (m.note || "").includes(String(s.slip_no)))) || null;
+        if (!match && fromWp && toWp) {
+          const f = cand.filter((m) => m.move_date === date && m.qty === s.qty && ediClean(m.from_name) === ediClean(fromWp.name) && ediClean(m.to_name) === ediClean(toWp.name));
+          if (f.length === 1) match = { ...f[0], fuzzy: true };
+        }
+      }
+      return { s, status, moveCode, date, acc, fromWp, toWp, fromLabel, toLabel, fromLocal, ordeCode, ordeNumb, issues, match };
+    }).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.s.slip_no).localeCompare(String(b.s.slip_no))));
+    // 같은 EDI 이동코드가 두 PMS 건에 붙지 않게
+    const used = new Set(out.filter((r) => r.status === "반영" && r.moveCode).map((r) => r.moveCode));
+    const seen = {}; out.forEach((r) => { if (r.match) seen[r.match.move_code] = (seen[r.match.move_code] || 0) + 1; });
+    out.forEach((r) => { if (r.match && (used.has(r.match.move_code) || seen[r.match.move_code] > 1)) r.match = null; });
+    return out;
+  }, [ships, idx, from, to, over, moves]);
+
+  const view = rows.filter((r) => stF === "all" || (stF === "open" ? r.status === "미반영" || r.status === "엑셀생성" : r.status === stF));
+  const ready = rows.filter((r) => r.status === "미반영" && !r.issues.length && !r.match);
+  const groups = useMemo(() => {
+    const m = {};
+    ready.forEach((r) => { const k = r.acc.code + "|" + r.fromLocal; (m[k] = m[k] || { acc: r.acc, fromWp: r.fromWp, fromLocal: r.fromLocal, rows: [] }).rows.push(r); });
+    return Object.values(m).sort((a, b) => a.acc.code.localeCompare(b.acc.code) || a.fromWp.name.localeCompare(b.fromWp.name));
+  }, [ready]);
+  const cnt = (st) => rows.filter((r) => r.status === st).length;
+  const bad = rows.filter((r) => r.status === "미반영" && r.issues.length).length;
+  const matchable = rows.filter((r) => r.match && (r.status === "미반영" || r.status === "엑셀생성"));
+
+  const mark = async (list, status, moveCode = null) => {
+    const { error } = await supabase.rpc("edi_mark", { p_ids: list.map((r) => String(r.s.id)), p_status: status, p_move_code: moveCode });
+    if (error) { alert("상태 저장 실패: " + error.message); return false; }
+    setOver((o) => { const n = { ...o }; list.forEach((r) => { n[r.s.id] = { status, move_code: moveCode }; }); return n; });
+    return true;
+  };
+  const download = async (g) => {
+    const data = g.rows.map((r) => ({ 이동일자: r.date.replace(/-/g, ""), 제품: r.s.pallet_code, 수량: String(r.s.qty), 입고처코드: r.ordeCode, 입고처순번: r.ordeNumb, 차량정보: r.s.vehicle_no || "", 인수증번호: "", 비고: "PMS " + r.s.slip_no }));
+    const ws = XLSX.utils.json_to_sheet(data, { header: ["이동일자", "제품", "수량", "입고처코드", "입고처순번", "차량정보", "인수증번호", "비고"] });
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+    const safe = (t) => String(t).replace(/[\\/:*?"<>|]/g, "_");
+    XLSX.writeFile(wb, `EDI업로드_${safe(idx.accName(g.acc.code))}_${safe(g.fromWp.name)}_${from.replace(/-/g, "")}-${to.replace(/-/g, "")}.xlsx`);
+    await mark(g.rows, "엑셀생성");
+  };
+  const downloadAll = async () => { setBusy(true); for (const g of groups) { await download(g); await new Promise((r) => setTimeout(r, 400)); } setBusy(false); };
+  const linkAll = async () => {
+    setBusy(true); let n = 0;
+    for (const r of matchable) { if (await mark([r], "반영", r.match.move_code)) n++; }
+    setBusy(false); setMsg(`${n}건을 EDI 이동과 연결했어요.`);
+  };
+  const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
+  const Pill = ({ st }) => { const [c, bg] = EDI_ST[st] || EDI_ST.미반영; return <span style={{ fontSize: 11, color: c, background: bg, padding: "2px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>{st}</span>; };
+  const sm = { ...btnGhost, padding: "3px 8px" };
+
+  return (
+    <>
+      <Head title="EDI 반영" sub="PMS 출고·반납·이동을 EDI 이동등록 [업로드]용 엑셀로 만들고, 동기화 후 EDI 이동코드와 자동 연결" />
+      <div style={{ background: C.blueBg, color: C.blue, padding: "10px 14px", borderRadius: 10, fontSize: 12.5, lineHeight: 1.7, marginBottom: 12 }}>
+        ① 엑셀 받기 (계정·출고처마다 파일 1개) → ② EDI에 그 계정으로 로그인 → 이동조회/관리 → <b>추가</b> → 위쪽 <b>출고처 작업장</b>을 파일 이름의 출고처로 선택 → <b>업로드</b> → 노란 줄(미등록·사용금지) 확인 → <b>저장</b> → ③ 다음 동기화 뒤 여기서 <b>자동 연결</b>. 비고에 PMS 전표번호가 들어가서 정확히 연결돼요.
+      </div>
+      {msg && <div style={{ background: /못|실패/.test(msg) ? C.redBg : C.greenBg, color: /못|실패/.test(msg) ? C.red : C.green, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={inp} />
+        <span style={{ color: C.sub }}>~</span>
+        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={inp} />
+        <select value={stF} onChange={(e) => setStF(e.target.value)} style={inp}>
+          <option value="open">처리 필요 (미반영·엑셀생성)</option><option value="미반영">미반영</option><option value="엑셀생성">엑셀생성</option><option value="반영">반영</option><option value="제외">제외</option><option value="all">전체</option>
+        </select>
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <Metric label="미반영" value={cnt("미반영")} unit="건" tone={cnt("미반영") ? "warn" : "success"} />
+        <Metric label="엑셀생성(EDI 저장 대기)" value={cnt("엑셀생성")} unit="건" tone="info" />
+        <Metric label="반영" value={cnt("반영")} unit="건" tone="success" />
+        <Metric label="연결 오류(확인 필요)" value={bad} unit="건" tone={bad ? "warn" : "plain"} />
+      </div>
+
+      {!idx ? (msg ? null : <Splash text="불러오는 중…" />) : (
+        <>
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>업로드 엑셀 ({groups.length}개 파일 · {ready.length}건)</div>
+              {groups.length > 1 && <button disabled={busy} onClick={downloadAll} style={btnTealSm}>전체 받기</button>}
+              {matchable.length > 0 && <button disabled={busy} onClick={linkAll} style={{ ...btnTealSm, background: C.green }}>EDI 이동과 자동 연결 ({matchable.length}건)</button>}
+            </div>
+            {!groups.length ? <div style={{ fontSize: 13, color: C.sub }}>엑셀로 만들 미반영 건이 없어요.</div> : (
+              <table style={tbl}>
+                <thead><tr><Th>EDI 계정</Th><Th>출고처 (EDI 화면에서 선택)</Th><Th r>건수</Th><Th r>수량</Th><Th></Th></tr></thead>
+                <tbody>{groups.map((g) => (
+                  <tr key={g.acc.code + g.fromLocal} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <Td>{idx.accName(g.acc.code)} <span style={{ color: C.hint, fontSize: 11 }}>{g.acc.code}</span></Td>
+                    <Td b>{g.fromWp.name} <span style={{ color: C.hint, fontSize: 11, fontWeight: 400 }}>작업장 {g.fromLocal}</span></Td>
+                    <Td r>{g.rows.length}</Td><Td r>{g.rows.reduce((a, r) => a + r.s.qty, 0).toLocaleString()}</Td>
+                    <Td r><button disabled={busy} onClick={() => download(g)} style={btnTealSm}>엑셀 받기</button></Td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            )}
+          </div>
+
+          <div style={{ overflowX: "auto" }}>
+            <table style={tbl}>
+              <thead><tr><Th>일자</Th><Th>전표</Th><Th>구분</Th><Th>출고처 → 입고처</Th><Th>제품</Th><Th r>수량</Th><Th>EDI 입고처</Th><Th>상태</Th><Th></Th></tr></thead>
+              <tbody>{view.slice(0, 500).map((r) => (
+                <tr key={r.s.id} style={{ borderTop: `1px solid ${C.border}`, verticalAlign: "top" }}>
+                  <Td>{r.date.slice(5)}</Td><Td>{r.s.slip_no}</Td><Td>{r.s.direction || "출고"}</Td>
+                  <Td>{r.fromWp ? r.fromWp.name : r.fromLabel} → {r.toWp ? r.toWp.name : r.toLabel}
+                    {r.issues.map((t, i) => <div key={i} style={{ fontSize: 11.5, color: C.red }}>{t}</div>)}
+                    {r.match && <div style={{ fontSize: 11.5, color: C.green }}>EDI 이동 {r.match.move_code} ({r.match.move_date.slice(5)}){r.match.fuzzy ? " · 날짜·수량·장소로 찾음" : " · 전표번호 일치"}</div>}
+                  </Td>
+                  <Td>{r.s.pallet_code}</Td><Td r b>{r.s.qty.toLocaleString()}</Td>
+                  <Td>{r.ordeCode ? <span style={{ fontSize: 12 }}>{r.ordeCode}·{r.ordeNumb}</span> : "—"}</Td>
+                  <Td><Pill st={r.status} />{r.moveCode && <div style={{ fontSize: 11, color: C.hint }}>{r.moveCode}</div>}</Td>
+                  <Td r>
+                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      {r.match && <button onClick={() => mark([r], "반영", r.match.move_code)} style={{ ...sm, color: C.green }}>연결</button>}
+                      {r.status === "미반영" && <button onClick={() => mark([r], "제외")} title="EDI에 올리지 않을 건(테스트·AJ가 직접 등록 등)" style={sm}>제외</button>}
+                      {r.status !== "미반영" && <button onClick={() => mark([r], null)} style={sm}>되돌리기</button>}
+                    </div>
+                  </Td>
+                </tr>
+              ))}</tbody>
+            </table>
+            {!view.length && <div style={{ fontSize: 13, color: C.sub, padding: 16 }}>이 기간·상태에 해당하는 PMS 건이 없어요.</div>}
+          </div>
+        </>
+      )}
     </>
   );
 }

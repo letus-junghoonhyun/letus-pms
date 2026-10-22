@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.3
+// @version      3.4
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -176,6 +176,23 @@
     return out;
   }
 
+  // 이동등록 창의 입고처 목록(엑셀 업로드의 입고처코드·순번). 하루 한 번만 받는다(약 1MB)
+  const DCOLS = "sStatus|sCheck|DEMD_CODE|DEMD_NUMB|GRUP_CODE|DEMD_NAME|POST_NAME|SELF_CODE|FULL_ADDR|FULL_ADR2|CHRG_NAME|CHRG_TELN|CHRG_HPNO|CHRG_FAXN|CHRG_MAIL|CHRG_ADDR|CHRG_SDDR|CHRG_ADR2|CHRG_SDR2|POST_CODE|POST_NUMB|MOVE_FLAG|USAG_FLAG|BLOK_LIST|FAVR_DEMD".split("|");
+  async function pullDests(demd, inst) {
+    const body = "S_SAVENAME=" + DCOLS.join("|") + "&userCode=" + encodeURIComponent(inst) + "&delvCode=" + encodeURIComponent(demd.code) + "&delvNumb=1";
+    const text = await (await fetch("/edi/ware/EDI_WARE_MOVE_DETL_SEARCH.do", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, body, credentials: "same-origin" })).text();
+    if (text.indexOf("<?xml") < 0) throw new Error("EDI 응답이 비정상이에요(로그인 만료?)");
+    const xml = new DOMParser().parseFromString(text.slice(text.indexOf("<?xml")), "text/xml");
+    const out = [];
+    xml.querySelectorAll("TR").forEach((tr) => {
+      const o = {};
+      tr.querySelectorAll("TD").forEach((td, i) => { o[DCOLS[i]] = td.textContent; });
+      if (!o.DEMD_CODE || !o.DEMD_NUMB) return;
+      out.push({ demd_code: o.DEMD_CODE, demd_numb: num(o.DEMD_NUMB), grup_code: o.GRUP_CODE, demd_name: o.DEMD_NAME, post_name: o.POST_NAME, self_code: o.SELF_CODE, addr: o.FULL_ADDR, usag_flag: o.USAG_FLAG, blok_list: o.BLOK_LIST });
+    });
+    return out;
+  }
+
   async function run() {
     // 형식이 틀린 주소(오타 등)는 지우고 다시 입력받는다
     if (GM_getValue("fnUrl") && !/^https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1\/[\w-]+$/.test(GM_getValue("fnUrl"))) GM_setValue("fnUrl", "");
@@ -236,6 +253,17 @@
       if (/로그인 만료|토큰이|주소가|anon 키가|로그인 계정이 바뀌었어요/.test(e.message)) st.abort = true;
     }
 
+    // ── 1-1) 입고처 목록 (하루 한 번) ──
+    let dsTxt = "";
+    const dkey = "dests_" + ACCOUNT;
+    if (!st.abort && GM_getValue(dkey) !== fmt(new Date())) {
+      try {
+        say("입고처 목록 받는 중…", true);
+        const rows = await pullDests(demd, await instEmpn());
+        if (rows.length) { await assertAccount(); await call("dests_upsert", { rows }); GM_setValue(dkey, fmt(new Date())); dsTxt = ` · 입고처 ${rows.length}곳`; }
+      } catch (e) { dsTxt = " · 입고처 목록 실패: " + e.message; }
+    }
+
     // ── 2) 재고: 못 받은 작업장 + 이동이 있었던 작업장(최근 3일 다시) + 전체 합계(0번) ──
     const refreshFrom = new Date(Math.max(addDays(yesterday, -(REFRESH_DAYS - 1)), parse(START_DATE))); // 이동이 있던 작업장: 7일
     // EDI는 "어제" 재고를 이동이 있었던 작업장부터 먼저 채우고 나머지는 하루 뒤에 채운다 → 모든 작업장은 최근 2일을 항상 다시 받는다
@@ -277,7 +305,7 @@
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
     setLast(ACCOUNT, st.failed || mvErr ? 0 : Date.now()); // 실패가 있으면 다음 접속 때 바로 이어서 재시도
-    const mvTxt = mvErr ? ` · 이동내역 실패: ${mvErr}` : ` · 이동 ${mv}건`;
+    const mvTxt = (mvErr ? ` · 이동내역 실패: ${mvErr}` : ` · 이동 ${mv}건`) + dsTxt;
     say(st.abort ? `중단됨 · ${label()} — ${st.lastErr || mvErr} (다시 접속하면 이어서 받아요)`
       : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}${mvTxt}`
       : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행${mvTxt} (어제까지)`, st.abort || st.failed || !!mvErr);
