@@ -1,15 +1,17 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.4
+// @version      3.5
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
 // @match        http://edi.ajuprs.com/main_frame.do
+// @match        http://edi.ajuprs.com/edi/ware/WARE_MOVE_DETL.do*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @connect      supabase.co
 // @connect      xtqblxitzzrjzeqniigp.supabase.co
 // @run-at       document-idle
@@ -311,8 +313,90 @@
       : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행${mvTxt} (어제까지)`, st.abort || st.failed || !!mvErr);
   }
 
+  // ── EDI 이동등록(추가) 창: PMS 대기열을 출고처별로 표에 채운다. 저장은 사람이 누른다 ──
+  async function runFill() {
+    const W = unsafeWindow;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (fn, ms = 15000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { try { if (fn()) return true; } catch (e) {} await wait(300); } return false; };
+    if (!(await until(() => W.mySheet2 && W.mySheet1 && W.$ && W.$("#delvCode").val()))) return;
+    if (!GM_getValue("fnUrl") || !GM_getValue("anon") || !GM_getValue("token")) return; // 메인 화면에서 먼저 설정
+    ACCOUNT = W.$("#delvCode").val(); TAG = "자동입력";
+    const panel = document.createElement("div");
+    panel.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:10px 12px;border-radius:10px;width:300px;max-height:70vh;overflow:auto;box-shadow:0 4px 14px rgba(0,0,0,.3)";
+    document.body.appendChild(panel);
+    const bySlip = {}; const reported = new Set();
+    const render = async () => {
+      panel.innerHTML = "<b>LETUS PMS · EDI 자동입력</b><div style='opacity:.7'>불러오는 중…</div>";
+      let rows;
+      try { rows = (await call("queue_list", {})).rows || []; } catch (e) { panel.innerHTML = "<b>LETUS PMS</b><div>대기열을 못 읽었어요: " + e.message + "</div>"; return; }
+      rows.forEach((r) => { bySlip[r.note] = r; });
+      const g = {};
+      rows.forEach((r) => { (g[r.from_local] = g[r.from_local] || { local: r.from_local, name: r.from_name, rows: [] }).rows.push(r); });
+      const list = Object.values(g);
+      panel.innerHTML = "<b>LETUS PMS · EDI 자동입력</b> <span style='opacity:.7'>(" + ACCOUNT + ")</span>" +
+        (list.length ? "<div style='opacity:.75;margin:4px 0 6px'>출고처를 골라 [채우기] → 노란 줄 확인 → EDI [저장]. 저장하면 PMS에 바로 반영돼요.</div>" : "<div style='opacity:.75;margin-top:4px'>PMS에서 보낸 대기 건이 없어요. (PMS › EDI 반영 › EDI 자동입력 보내기)</div>");
+      list.forEach((x) => {
+        const d = document.createElement("div");
+        d.style.cssText = "display:flex;align-items:center;gap:6px;padding:5px 0;border-top:1px solid rgba(255,255,255,.12)";
+        const qty = x.rows.reduce((a, r) => a + r.qty, 0);
+        d.innerHTML = "<div style='flex:1'>" + x.local + ". " + (x.name || "") + "<div style='opacity:.65'>" + x.rows.length + "건 · " + qty + "장</div></div>";
+        const b = document.createElement("button");
+        b.textContent = "채우기"; b.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:4px 10px;cursor:pointer";
+        b.onclick = () => fill(x).catch((e) => alert("채우기 실패: " + e.message));
+        d.appendChild(b); panel.appendChild(d);
+      });
+      const rb = document.createElement("button");
+      rb.textContent = "새로고침"; rb.style.cssText = "margin-top:6px;background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:3px 10px;cursor:pointer";
+      rb.onclick = render; panel.appendChild(rb);
+    };
+    const fill = async (x) => {
+      const S2 = W.mySheet2, S1 = W.mySheet1, $ = W.$;
+      if (![...document.getElementById("postName").options].some((o) => o.value === String(x.local))) throw new Error("출고처 작업장 " + x.local + "번이 이 계정 목록에 없어요");
+      if (S2.RowCount() > 0 && !confirm("아래 표에 이미 " + S2.RowCount() + "줄이 있어요. 비우고 '" + x.name + "' 건으로 채울까요?")) return;
+      $("#postName").val(String(x.local)); W.fnDelvNumb();
+      await until(() => $("#delvNumb").val() === String(x.local) && S2.GetComboInfo(0, "ITEM_CODE", "Text"));
+      await wait(800);
+      W.doAction("search");
+      if (!(await until(() => S1.SearchRows() > 0))) throw new Error("입고처 목록을 못 불러왔어요");
+      S2.RemoveAll();
+      const codes = S2.GetComboInfo(0, "ITEM_CODE", "Code").split("|"), texts = S2.GetComboInfo(0, "ITEM_CODE", "Text").split("|");
+      const miss = [];
+      for (const r of x.rows) {
+        const code = codes[texts.indexOf(r.item)];
+        if (!code) { miss.push(r.slip_no + "(" + r.item + ")"); continue; }
+        W.doAction("add"); const n = S2.LastRow();
+        const set = (c, v) => S2.SetCellValue(n, c, v, 0);
+        set("MOVE_DATE", r.move_date); set("TO_DATE", r.move_date); set("STOR_DATE", r.move_date);
+        set("ITEM_CODE", code); set("MOVE_VOLM", r.qty);
+        set("ORDE_CODE", r.orde_code); set("ORDE_NUMB", String(r.orde_numb)); set("STOR_CODE", r.orde_code); set("STOR_NUMB", String(r.orde_numb));
+        set("CARS_INFO", r.cars_info || ""); set("MOVE_DESC", r.note || "");
+      }
+      W.mySheet2_OnLoadExcel(true); // EDI가 엑셀 업로드 때 하는 점검(입고처 이름, 사용금지·차단 노란 줄)을 그대로 실행
+      if (miss.length) alert("이 출고처에서 쓸 수 없는 제품이라 뺀 건: " + miss.join(", "));
+    };
+    // 저장 후 EDI가 각 줄에 이동코드(M…)를 채우면 PMS에 바로 알린다
+    setInterval(async () => {
+      try {
+        const S2 = W.mySheet2; if (!S2 || !S2.RowCount()) return;
+        const out = [];
+        for (let i = S2.HeaderRows(); i <= S2.LastRow(); i++) {
+          const note = S2.GetCellValue(i, "MOVE_DESC"), mc = S2.GetCellValue(i, "MOVE_CODE");
+          const q = bySlip[note];
+          if (q && /^M/.test(String(mc || "")) && !reported.has(q.ship_id)) out.push({ ship_id: q.ship_id, move_code: mc });
+        }
+        if (!out.length) return;
+        out.forEach((o) => reported.add(o.ship_id));
+        const res = await call("queue_saved", { rows: out });
+        say("EDI 저장 " + res.saved + "건을 PMS에 반영했어요");
+        render();
+      } catch (e) { /* 다음 주기에 다시 */ }
+    }, 2000);
+    render();
+  }
+
   // Tampermonkey 메뉴: 1시간 제한을 무시하고 지금 다시 동기화
   GM_registerMenuCommand("LETUS PMS · 지금 다시 동기화", () => { GM_setValue("lastRunMap", "{}"); location.reload(); });
 
+  if (/WARE_MOVE_DETL.do/.test(location.pathname)) { runFill().catch((e) => say("자동입력 실패: " + e.message)); return; }
   run().catch((e) => say("동기화 실패: " + e.message));
 })();

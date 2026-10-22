@@ -170,6 +170,27 @@ Deno.serve(async (req) => {
       await db.from("aj_dest").delete().eq("account", account).lt("updated_at", now); // EDI에서 사라진 입고처 정리
       return json({ ok: true, upserted: rows.length });
     }
+    // 6) 자동 입력 대기열: 이 계정에서 EDI에 넣을 PMS 출고 (이동등록 창 스크립트가 읽는다)
+    if (body.action === "queue_list") {
+      const { data, error } = await db.from("aj_upload_queue").select("*").eq("account", account).eq("status", "대기")
+        .order("from_local").order("move_date").order("slip_no").limit(2000);
+      if (error) return json({ error: error.message }, 500);
+      return json({ rows: data || [] });
+    }
+
+    // 7) EDI에 저장된 행: EDI가 돌려준 이동코드로 바로 반영 처리
+    if (body.action === "queue_saved") {
+      let n = 0;
+      for (const r of body.rows || []) {
+        if (!r || !r.ship_id || !/^M/.test(String(r.move_code || ""))) continue;
+        const { data: q } = await db.from("aj_upload_queue").select("ship_id").eq("ship_id", r.ship_id).eq("account", account).maybeSingle();
+        if (!q) continue; // 이 계정 대기열에 없는 건은 무시
+        await db.from("aj_upload_queue").update({ status: "저장", move_code: r.move_code, saved_at: new Date().toISOString() }).eq("ship_id", r.ship_id);
+        const { error } = await db.from("shipment").update({ edi_status: "반영", edi_move_code: r.move_code }).eq("id", r.ship_id);
+        if (!error) n++;
+      }
+      return json({ ok: true, saved: n });
+    }
     return json({ error: "unknown action" }, 400);
   } catch (e) {
     return json({ error: String(e) }, 500);

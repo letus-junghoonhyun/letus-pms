@@ -2343,6 +2343,7 @@ function EdiStock({ caps = {}, ships = [], ajReqs = [], centers = [], palletType
 // 엑셀 형식(AJ 양식): 이동일자(YYYYMMDD) · 제품 · 수량 · 입고처코드 · 입고처순번 · 차량정보 · 인수증번호 · 비고. 출고처는 EDI 화면에서 고른다
 const ediClean = (n) => String(n || "").replace(/^\((폐쇄|차단_폐쇄)\)|^\[차단_폐쇄\]/, "").trim();
 const localD = (iso) => { const d = new Date(iso); const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+const EDI_LABEL = { 엑셀생성: "EDI 대기" };
 const EDI_ST = { 미반영: [C.amber, C.amberBg], 엑셀생성: [C.blue, C.blueBg], 반영: [C.green, C.greenBg], 제외: [C.sub, "#f1f2f4"] };
 function EdiExport({ ships = [] }) {
   const [from, setFrom] = useState(localD(new Date(Date.now() - 6 * 86400000).toISOString()));
@@ -2485,6 +2486,18 @@ function EdiExport({ ships = [] }) {
     XLSX.writeFile(wb, `EDI업로드_${safe(idx.accName(g.acc.code))}_${safe(g.fromWp.name)}_${from.replace(/-/g, "")}-${to.replace(/-/g, "")}.xlsx`);
     await mark(g.rows, "엑셀생성");
   };
+  // EDI 이동등록 창의 스크립트(v3.5)가 읽어 가는 대기열로 보내기 (엑셀 없이 자동으로 표를 채움)
+  const sendQueue = async (gs) => {
+    const list = gs.flatMap((g) => g.rows);
+    if (!list.length) return;
+    setBusy(true);
+    const payload = list.map((r) => ({ ship_id: String(r.s.id), slip_no: r.s.slip_no, account: r.acc.code, from_local: r.fromLocal, from_name: r.fromWp.name, move_date: r.date.replace(/-/g, ""), item: r.s.pallet_code, qty: r.s.qty, orde_code: r.ordeCode, orde_numb: r.ordeNumb, to_name: r.toWp ? r.toWp.name : null, cars_info: r.s.vehicle_no || "", note: "PMS " + r.s.slip_no }));
+    const { error } = await supabase.rpc("edi_queue", { p_rows: payload });
+    setBusy(false);
+    if (error) { alert("자동입력 보내기 실패: " + error.message + (/edi_queue/.test(error.message) ? " (letus_edi9.sql 실행 필요)" : "")); return; }
+    setOver((o) => { const n = { ...o }; list.forEach((r) => { n[r.s.id] = { status: "엑셀생성", move_code: null }; }); return n; });
+    setMsg(`${list.length}건을 EDI 자동입력으로 보냈어요. EDI 이동조회/관리 → [추가] 창 오른쪽 위 LETUS 상자에서 출고처별 [채우기] → [저장].`);
+  };
   const downloadAll = async () => { setBusy(true); for (const g of groups) { await download(g); await new Promise((r) => setTimeout(r, 400)); } setBusy(false); };
   const linkAll = async () => {
     setBusy(true); let n = 0;
@@ -2492,20 +2505,20 @@ function EdiExport({ ships = [] }) {
     setBusy(false); setMsg(`${n}건을 EDI 이동과 연결했어요.`);
   };
   const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
-  const Pill = ({ st }) => { const [c, bg] = EDI_ST[st] || EDI_ST.미반영; return <span style={{ fontSize: 11, color: c, background: bg, padding: "2px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>{st}</span>; };
+  const Pill = ({ st }) => { const [c, bg] = EDI_ST[st] || EDI_ST.미반영; return <span style={{ fontSize: 11, color: c, background: bg, padding: "2px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>{EDI_LABEL[st] || st}</span>; };
   const sm = { ...btnGhost, padding: "3px 8px" };
 
   return (
     <>
       <Head title="EDI 반영" sub="PMS 출고·반납·이동을 EDI 이동등록 [업로드]용 엑셀로 만들고, 동기화 후 EDI 이동코드와 자동 연결" />
       <div style={{ background: C.blueBg, color: C.blue, padding: "10px 14px", borderRadius: 10, fontSize: 12.5, lineHeight: 1.7, marginBottom: 12 }}>
-        ① 엑셀 받기 (계정·출고처마다 파일 1개) → ② EDI에 그 계정으로 로그인 → 이동조회/관리 → <b>추가</b> → 위쪽 <b>출고처 작업장</b>을 파일 이름의 출고처로 선택 → <b>업로드</b> → 노란 줄(미등록·사용금지) 확인 → <b>저장</b> → ③ 다음 동기화 뒤 여기서 <b>자동 연결</b>. 비고에 PMS 전표번호가 들어가서 정확히 연결돼요.
+        <b>자동입력(추천)</b>: ① <b>EDI 자동입력 보내기</b> → ② EDI에 그 계정으로 로그인 → 이동조회/관리 → <b>추가</b> → 창 오른쪽 위 LETUS 상자에서 출고처별 <b>[채우기]</b> → 노란 줄(그 출고처에서 못 보내는 곳·사용금지) 확인 → <b>저장</b>. 저장하면 여기 바로 "반영"으로 바뀌어요.<br /><b>엑셀</b>: 파일을 받아 추가 창에서 출고처 선택 → <b>업로드</b> → 저장 → 다음 동기화 뒤 <b>자동 연결</b>.
       </div>
       {msg && <div style={{ background: /못|실패/.test(msg) ? C.redBg : C.greenBg, color: /못|실패/.test(msg) ? C.red : C.green, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
         <DateRange from={from} to={to} onApply={(f, t) => { setFrom(f); setTo(t); }} />
         <select value={stF} onChange={(e) => setStF(e.target.value)} style={inp}>
-          <option value="open">처리 필요 (미반영·엑셀생성)</option><option value="미반영">미반영</option><option value="엑셀생성">엑셀생성</option><option value="반영">반영</option><option value="제외">제외</option><option value="all">전체</option>
+          <option value="open">처리 필요 (미반영·EDI 대기)</option><option value="미반영">미반영</option><option value="엑셀생성">EDI 대기</option><option value="반영">반영</option><option value="제외">제외</option><option value="all">전체</option>
         </select>
         <select value={wpF} onChange={(e) => setWpF(e.target.value)} style={{ ...inp, maxWidth: 260 }} title="EDI 추가 창에서 고르는 출고처 작업장">
           <option value="">전체 출고처</option>
@@ -2514,7 +2527,7 @@ function EdiExport({ ships = [] }) {
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <Metric label="미반영" value={cnt("미반영")} unit="건" tone={cnt("미반영") ? "warn" : "success"} />
-        <Metric label="엑셀생성(EDI 저장 대기)" value={cnt("엑셀생성")} unit="건" tone="info" />
+        <Metric label="EDI 대기(보냄·엑셀, 저장 전)" value={cnt("엑셀생성")} unit="건" tone="info" />
         <Metric label="반영" value={cnt("반영")} unit="건" tone="success" />
         <Metric label="연결 오류(확인 필요)" value={bad} unit="건" tone={bad ? "warn" : "plain"} />
       </div>
@@ -2524,7 +2537,8 @@ function EdiExport({ ships = [] }) {
           <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
               <div style={{ fontSize: 14, fontWeight: 600 }}>업로드 엑셀 ({groups.length}개 파일 · {ready.length}건)</div>
-              {groups.length > 1 && <button disabled={busy} onClick={downloadAll} style={btnTealSm}>전체 받기</button>}
+              {groups.length > 0 && <button disabled={busy} onClick={() => sendQueue(groups)} style={btnTealSm}>EDI 자동입력 보내기 ({ready.length}건)</button>}
+              {groups.length > 1 && <button disabled={busy} onClick={downloadAll} style={btnGhost}>엑셀 전체 받기</button>}
               {matchable.length > 0 && <button disabled={busy} onClick={linkAll} style={{ ...btnTealSm, background: C.green }}>EDI 이동과 자동 연결 ({matchable.length}건)</button>}
             </div>
             {!groups.length ? <div style={{ fontSize: 13, color: C.sub }}>엑셀로 만들 미반영 건이 없어요.</div> : (
@@ -2535,7 +2549,7 @@ function EdiExport({ ships = [] }) {
                     <Td>{idx.accName(g.acc.code)} <span style={{ color: C.hint, fontSize: 11 }}>{g.acc.code}</span></Td>
                     <Td b>{g.fromWp.name} <span style={{ color: C.hint, fontSize: 11, fontWeight: 400 }}>작업장 {g.fromLocal}</span></Td>
                     <Td r>{g.rows.length}</Td><Td r>{g.rows.reduce((a, r) => a + r.s.qty, 0).toLocaleString()}</Td>
-                    <Td r><button disabled={busy} onClick={() => download(g)} style={btnTealSm}>엑셀 받기</button></Td>
+                    <Td r><div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}><button disabled={busy} onClick={() => sendQueue([g])} style={btnTealSm}>자동입력 보내기</button><button disabled={busy} onClick={() => download(g)} style={btnGhost}>엑셀</button></div></Td>
                   </tr>
                 ))}</tbody>
               </table>
