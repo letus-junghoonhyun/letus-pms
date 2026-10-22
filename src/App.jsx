@@ -746,7 +746,7 @@ function Shell({ session, initialConfirm }) {
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps, ajReqs, confirmAjSupply }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
-            {nav === "재고" && caps.inventory && <Inventory {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
+            {nav === "재고" && caps.inventory && <InventoryScreen {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, ships, caps, centers: centerList }} />}
             {nav === "EDI" && caps.inventory && <EdiStock {...{ caps, ships, ajReqs, palletTypes, centers: centerList }} />}
             {nav === "단가" && caps.users && <PalletPricing caps={caps} />}
@@ -2345,33 +2345,197 @@ const ediClean = (n) => String(n || "").replace(/^\((폐쇄|차단_폐쇄)\)|^\[
 const localD = (iso) => { const d = new Date(iso); const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
 const EDI_LABEL = { 엑셀생성: "EDI 대기" };
 const EDI_ST = { 미반영: [C.amber, C.amberBg], 엑셀생성: [C.blue, C.blueBg], 반영: [C.green, C.greenBg], 제외: [C.sub, "#f1f2f4"] };
-function EdiExport({ ships = [] }) {
-  const [from, setFrom] = useState(localD(new Date(Date.now() - 6 * 86400000).toISOString()));
-  const [to, setTo] = useState(localD(new Date().toISOString()));
-  const [stF, setStF] = useState("open");
-  const [wpF, setWpF] = useState(""); // 출고처(EDI 추가 창에서 고르는 작업장)별로 보기
+// EDI 작업장 기준 정보(작업장·계정별 번호·계정·입고처 목록)를 읽어 PMS 센터·거래처와 짝지을 색인을 만든다 (EDI 반영·재고현황 공용)
+function useEdiIndex() {
   const [ref, setRef] = useState(null);
-  const [moves, setMoves] = useState([]);
-  const [over, setOver] = useState({}); // 화면에서 바꾼 상태 (새로고침 전까지)
-  const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
-
+  const [err, setErr] = useState("");
   useEffect(() => {
     let alive = true;
     (async () => {
       const page = async (q) => { const all = []; for (let p = 0; p < 20; p++) { const { data, error } = await q().range(p * 1000, p * 1000 + 999); if (error) throw error; all.push(...(data || [])); if (!data || data.length < 1000) break; } return all; };
       try {
         const [wps, maps, accs, dests] = await Promise.all([
-          page(() => supabase.from("aj_workplace").select("no,name,pms_center,partner_code,closed").order("no")),
+          page(() => supabase.from("aj_workplace").select("no,name,kind,pms_center,partner_code,closed").order("no")),
           page(() => supabase.from("aj_workplace_map").select("account,local_no,wp_no").order("account").order("local_no")),
           supabase.from("aj_account").select("code,name,label,items").then((r) => { if (r.error) throw r.error; return r.data || []; }),
           page(() => supabase.from("aj_dest").select("account,demd_code,demd_numb,post_name,usag_flag,blok_list,self_code").order("account").order("demd_code").order("demd_numb")),
         ]);
         if (alive) setRef({ wps, maps, accs, dests });
-      } catch (e) { if (alive) setMsg("기준 정보를 불러오지 못했어요. letus_edi8.sql 실행 여부를 확인해주세요. (" + (e.message || e) + ")"); }
+      } catch (e) { if (alive) setErr("기준 정보를 불러오지 못했어요. letus_edi8.sql 실행 여부를 확인해주세요. (" + (e.message || e) + ")"); }
     })();
     return () => { alive = false; };
   }, []);
+  const idx = useMemo(() => {
+    if (!ref) return null;
+    const wpByCenter = {}, wpByPartner = {};
+    ref.wps.forEach((w) => { if (w.partner_code) wpByPartner[w.partner_code] = w; });
+    ref.wps.forEach((w) => { const k = w.pms_center || ediClean(w.name); const cur = wpByCenter[k]; if (!cur || (!cur.pms_center && (w.pms_center || (cur.closed && !w.closed)))) wpByCenter[k] = w; });
+    const local = {}; ref.maps.forEach((m) => { if (m.local_no) local[m.account + "|" + m.wp_no] = m.local_no; });
+    const dest = {}, destByName = {};
+    ref.dests.forEach((d) => { dest[d.account + "|" + d.demd_code + "|" + d.demd_numb] = d; const k = d.account + "|" + ediClean(d.post_name); (destByName[k] = destByName[k] || []).push(d); });
+    const accOf = (item) => ref.accs.filter((a) => (a.items || []).includes(item)).sort((a, b) => /전용/.test(a.label || a.name || "") - /전용/.test(b.label || b.name || ""))[0];
+    return { wps: ref.wps, wpByCenter, wpByPartner, local, dest, destByName, accOf, accName: (c) => { const a = ref.accs.find((x) => x.code === c); return (a && (a.label || a.name)) || c; } };
+  }, [ref]);
+
+  return { idx, err };
+}
+// PMS 전표 1건의 EDI 출고처·입고처 작업장 (반납은 거래처 → 센터)
+function ediRoute(idx, s) {
+  const centerWp = idx.wpByCenter[s.center];
+  const partnerWp = s.to_partner ? idx.wpByPartner[s.to_partner] : null;
+  const toCenterWp = s.to_center ? idx.wpByCenter[s.to_center] : null;
+  if (s.direction === "반납") return { fromWp: partnerWp, toWp: centerWp, fromLabel: s.to_partner_name, toLabel: s.center };
+  if (s.direction === "이동") return { fromWp: centerWp, toWp: toCenterWp, fromLabel: s.center, toLabel: s.to_center || s.to_partner_name };
+  return { fromWp: centerWp, toWp: partnerWp, fromLabel: s.center, toLabel: s.to_partner_name };
+}
+// 재고 현황(EDI 기준): 작업장 × 제품 현재고 = EDI 최신 기준일 재고 + PMS에 등록됐지만 EDI에 아직 안 들어간 건(예정 ±)
+const ITEM_ORDER = ["14C", "18F", "11A", "15A", "23E", "12A"];
+function EdiInventory({ ships = [] }) {
+  const { idx, err } = useEdiIndex();
+  const [stock, setStock] = useState(null); // { dates: {account: date}, rows: [{account, workplace_no, item, this_stoc}] }
+  const [msg, setMsg] = useState("");
+  const [q, setQ] = useState("");
+  const [kind, setKind] = useState("");
+  const [only, setOnly] = useState("held"); // held=보유 있는 곳 / neg=마이너스 / all
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const { data: accs, error: e0 } = await supabase.from("aj_account").select("code");
+        if (e0) throw e0;
+        const dates = {}, rows = [];
+        for (const a of accs || []) {
+          const { data: d } = await supabase.from("aj_stock_daily").select("stoc_date").eq("account", a.code).eq("workplace_no", 0).order("stoc_date", { ascending: false }).limit(1);
+          if (!d || !d.length) continue;
+          dates[a.code] = d[0].stoc_date;
+          for (let p = 0; p < 20; p++) {
+            const { data, error } = await supabase.from("aj_stock_daily").select("account,workplace_no,item,this_stoc")
+              .eq("account", a.code).eq("stoc_date", d[0].stoc_date).neq("item", "-").order("workplace_no").order("item").range(p * 1000, p * 1000 + 999);
+            if (error) throw error;
+            rows.push(...(data || []));
+            if (!data || data.length < 1000) break;
+          }
+        }
+        if (alive) setStock({ dates, rows });
+      } catch (e) { if (alive) setMsg("EDI 재고를 불러오지 못했어요. (" + (e.message || e) + ")"); }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const data = useMemo(() => {
+    if (!idx || !stock) return null;
+    const wpByNo = {}; idx.wps.forEach((w) => { wpByNo[w.no] = w; });
+    const items = ITEM_ORDER.filter((it) => stock.rows.some((r) => r.item === it));
+    stock.rows.forEach((r) => { if (!items.includes(r.item)) items.push(r.item); });
+    const total = {}; // EDI 전체 합계(0번)
+    const m = {}; // wp no → { wp, edi: {item}, pend: {item} }
+    const at = (no) => (m[no] = m[no] || { wp: wpByNo[no] || { no, name: "작업장 " + no, kind: "업체" }, edi: {}, pend: {} });
+    stock.rows.forEach((r) => {
+      if (r.workplace_no === 0) { total[r.item] = (total[r.item] || 0) + r.this_stoc; return; }
+      const x = at(r.workplace_no); x.edi[r.item] = (x.edi[r.item] || 0) + r.this_stoc;
+    });
+    // PMS 미반영(EDI에 아직 없는) 건: 출고처 −, 입고처 +
+    let pendN = 0; const unmapped = [];
+    ships.filter((s) => !s.canceled && s.edi_status !== "반영" && s.edi_status !== "제외").forEach((s) => {
+      const { fromWp, toWp, fromLabel, toLabel } = ediRoute(idx, s);
+      if (!fromWp || !toWp) { unmapped.push(s.slip_no + " " + (fromLabel || "—") + "→" + (toLabel || "—")); return; }
+      pendN++;
+      const it = s.pallet_code; if (!items.includes(it)) items.push(it);
+      const f = at(fromWp.no), t = at(toWp.no);
+      f.pend[it] = (f.pend[it] || 0) - s.qty; t.pend[it] = (t.pend[it] || 0) + s.qty;
+    });
+    const list = Object.values(m).map((x) => {
+      const now = {}; let tot = 0, neg = false, any = false;
+      items.forEach((it) => { const v = (x.edi[it] || 0) + (x.pend[it] || 0); now[it] = v; tot += v; if (v < 0) neg = true; if (v || x.edi[it] || x.pend[it]) any = true; });
+      return { ...x, now, tot, neg, any };
+    });
+    const byKind = (k, it) => list.filter((x) => (x.wp.kind || "업체") === k).reduce((a, x) => a + (x.edi[it] || 0), 0);
+    return { items, total, list, byKind, pendN, unmapped };
+  }, [idx, stock, ships]);
+
+  const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
+  const err2 = err || msg;
+  if (err2) return (<><Head title="재고 현황" sub="EDI 기준" /><div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13 }}>{err2}</div></>);
+  if (!data) return (<><Head title="재고 현황" sub="EDI 기준" /><Splash text="불러오는 중…" /></>);
+
+  const { items, total, list, byKind, pendN, unmapped } = data;
+  const view = list.filter((x) => (!kind || (x.wp.kind || "업체") === kind) && (!q || (x.wp.name + " " + x.wp.no).includes(q)) && (only === "all" ? true : only === "neg" ? x.neg : x.any))
+    .sort((a, b) => b.tot - a.tot || a.wp.name.localeCompare(b.wp.name));
+  const dateTxt = [...new Set(Object.values(stock.dates))].sort().map((d) => d.slice(5)).join(", ");
+  const negCnt = list.filter((x) => x.neg).length;
+
+  return (
+    <>
+      <Head title="재고 현황" sub={`EDI 기준 (기준일 ${dateTxt}) + PMS 미반영 ${pendN}건을 예정으로 더한 값`} />
+      <div style={{ overflowX: "auto", marginBottom: 16 }}>
+        <table style={tbl}>
+          <thead><tr><Th>제품</Th><Th r>EDI 전체</Th><Th r>센터</Th><Th r>시공팀</Th><Th r>업체</Th><Th r>PMS 예정(순)</Th></tr></thead>
+          <tbody>{items.map((it) => {
+            const pend = list.reduce((a, x) => a + (x.pend[it] || 0), 0);
+            return (
+              <tr key={it} style={{ borderTop: `1px solid ${C.border}` }}>
+                <Td b>{it}</Td><Td r b>{(total[it] || 0).toLocaleString()}</Td>
+                <Td r>{byKind("센터", it).toLocaleString()}</Td><Td r>{byKind("시공팀", it).toLocaleString()}</Td><Td r>{byKind("업체", it).toLocaleString()}</Td>
+                <Td r c={pend ? C.blue : C.hint}>{pend ? (pend > 0 ? "+" : "") + pend.toLocaleString() : "—"}</Td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </div>
+      {unmapped.length > 0 && <div style={{ background: C.amberBg, color: C.amber, padding: "8px 12px", borderRadius: 8, fontSize: 12.5, marginBottom: 12 }}>EDI 작업장과 연결 안 된 PMS 건 {unmapped.length}건은 예정에서 빠졌어요: {unmapped.slice(0, 5).join(" · ")}{unmapped.length > 5 ? " …" : ""}</div>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장 검색 (이름·번호)" style={{ ...inp, width: 200 }} />
+        <select value={kind} onChange={(e) => setKind(e.target.value)} style={inp}><option value="">전체 구분</option><option>센터</option><option>시공팀</option><option>업체</option></select>
+        <select value={only} onChange={(e) => setOnly(e.target.value)} style={inp}><option value="held">재고·예정 있는 곳</option><option value="neg">마이너스만 ({negCnt})</option><option value="all">전체 작업장</option></select>
+        <span style={{ fontSize: 12, color: C.hint }}>{view.length.toLocaleString()}곳 · 파란 숫자 = PMS 미반영(예정)</span>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={tbl}>
+          <thead><tr><Th>작업장</Th><Th>구분</Th>{items.map((it) => <Th key={it} r>{it}</Th>)}<Th r>합계</Th></tr></thead>
+          <tbody>{view.slice(0, 400).map((x) => (
+            <tr key={x.wp.no} style={{ borderTop: `1px solid ${C.border}` }}>
+              <Td b>{x.wp.name} <span style={{ color: C.hint, fontSize: 11, fontWeight: 400 }}>{x.wp.no}</span></Td>
+              <Td><TypeBadge t={x.wp.kind || "업체"} /></Td>
+              {items.map((it) => {
+                const v = x.now[it], p = x.pend[it] || 0;
+                return <Td key={it} r c={v < 0 ? C.red : v ? C.text : C.hint}>{v ? v.toLocaleString() : "—"}{p ? <div style={{ fontSize: 11, color: C.blue }}>{p > 0 ? "+" : ""}{p}</div> : null}</Td>;
+              })}
+              <Td r b c={x.tot < 0 ? C.red : C.text}>{x.tot.toLocaleString()}</Td>
+            </tr>
+          ))}</tbody>
+        </table>
+        {view.length > 400 && <div style={{ fontSize: 12, color: C.hint, padding: 10 }}>상위 400곳만 표시 — 검색으로 좁혀 보세요.</div>}
+      </div>
+      <Note>EDI 재고는 매일 동기화된 전일 기준이에요. 그 뒤 PMS에 등록했지만 EDI에 아직 반영(저장)되지 않은 건만 예정(파란 숫자)으로 더해요. 반영되면 EDI 숫자로 넘어가요.</Note>
+    </>
+  );
+}
+function InventoryScreen(props) {
+  const [mode, setMode] = useState("edi");
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {[["edi", "EDI 기준 (실재고)"], ["book", "PMS 장부 (참고)"]].map(([k, l]) => (
+          <button key={k} onClick={() => setMode(k)} style={{ ...btnGhost, padding: "7px 16px", background: mode === k ? C.teal : "transparent", color: mode === k ? "#04342C" : C.text, fontWeight: mode === k ? 600 : 400 }}>{l}</button>
+        ))}
+      </div>
+      {mode === "edi" ? <EdiInventory ships={props.ships} /> : <Inventory {...props} />}
+    </>
+  );
+}
+
+function EdiExport({ ships = [] }) {
+  const [from, setFrom] = useState(localD(new Date(Date.now() - 6 * 86400000).toISOString()));
+  const [to, setTo] = useState(localD(new Date().toISOString()));
+  const [stF, setStF] = useState("open");
+  const [wpF, setWpF] = useState(""); // 출고처(EDI 추가 창에서 고르는 작업장)별로 보기
+  const { idx, err: refErr } = useEdiIndex();
+  const [moves, setMoves] = useState([]);
+  const [over, setOver] = useState({}); // 화면에서 바꾼 상태 (새로고침 전까지)
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -2388,19 +2552,6 @@ function EdiExport({ ships = [] }) {
     return () => { alive = false; };
   }, [from, to]);
 
-  // 기준 정보 색인
-  const idx = useMemo(() => {
-    if (!ref) return null;
-    const wpByCenter = {}, wpByPartner = {};
-    ref.wps.forEach((w) => { if (w.partner_code) wpByPartner[w.partner_code] = w; });
-    ref.wps.forEach((w) => { const k = w.pms_center || ediClean(w.name); const cur = wpByCenter[k]; if (!cur || (!cur.pms_center && (w.pms_center || (cur.closed && !w.closed)))) wpByCenter[k] = w; });
-    const local = {}; ref.maps.forEach((m) => { if (m.local_no) local[m.account + "|" + m.wp_no] = m.local_no; });
-    const dest = {}, destByName = {};
-    ref.dests.forEach((d) => { dest[d.account + "|" + d.demd_code + "|" + d.demd_numb] = d; const k = d.account + "|" + ediClean(d.post_name); (destByName[k] = destByName[k] || []).push(d); });
-    const accOf = (item) => ref.accs.filter((a) => (a.items || []).includes(item)).sort((a, b) => /전용/.test(a.label || a.name || "") - /전용/.test(b.label || b.name || ""))[0];
-    return { wpByCenter, wpByPartner, local, dest, destByName, accOf, accName: (c) => { const a = ref.accs.find((x) => x.code === c); return (a && (a.label || a.name)) || c; } };
-  }, [ref]);
-
   const rows = useMemo(() => {
     if (!idx) return [];
     const out = ships.filter((s) => !s.canceled && s.depart_at && localD(s.depart_at) >= from && localD(s.depart_at) <= to).map((s) => {
@@ -2408,13 +2559,7 @@ function EdiExport({ ships = [] }) {
       const status = (o.status !== undefined ? o.status : s.edi_status) || "미반영";
       const moveCode = o.move_code !== undefined ? o.move_code : s.edi_move_code;
       const date = localD(s.depart_at);
-      const centerWp = idx.wpByCenter[s.center];
-      const partnerWp = s.to_partner ? idx.wpByPartner[s.to_partner] : null;
-      const toCenterWp = s.to_center ? idx.wpByCenter[s.to_center] : null;
-      let fromWp, toWp, fromLabel, toLabel;
-      if (s.direction === "반납") { fromWp = partnerWp; toWp = centerWp; fromLabel = s.to_partner_name; toLabel = s.center; }
-      else if (s.direction === "이동") { fromWp = centerWp; toWp = toCenterWp; fromLabel = s.center; toLabel = s.to_center || s.to_partner_name; }
-      else { fromWp = centerWp; toWp = partnerWp; fromLabel = s.center; toLabel = s.to_partner_name; }
+      const { fromWp, toWp, fromLabel, toLabel } = ediRoute(idx, s);
       const acc = idx.accOf(s.pallet_code);
       const issues = [];
       let fromLocal = null, ordeCode = null, ordeNumb = null;
@@ -2514,6 +2659,7 @@ function EdiExport({ ships = [] }) {
       <div style={{ background: C.blueBg, color: C.blue, padding: "10px 14px", borderRadius: 10, fontSize: 12.5, lineHeight: 1.7, marginBottom: 12 }}>
         <b>자동입력(추천)</b>: ① <b>EDI 자동입력 보내기</b> → ② EDI에 그 계정으로 로그인 → 이동조회/관리 → <b>추가</b> → 창 오른쪽 위 LETUS 상자에서 출고처별 <b>[채우기]</b> → 노란 줄(그 출고처에서 못 보내는 곳·사용금지) 확인 → <b>저장</b>. 저장하면 여기 바로 "반영"으로 바뀌어요.<br /><b>엑셀</b>: 파일을 받아 추가 창에서 출고처 선택 → <b>업로드</b> → 저장 → 다음 동기화 뒤 <b>자동 연결</b>.
       </div>
+      {refErr && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{refErr}</div>}
       {msg && <div style={{ background: /못|실패/.test(msg) ? C.redBg : C.greenBg, color: /못|실패/.test(msg) ? C.red : C.green, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
         <DateRange from={from} to={to} onApply={(f, t) => { setFrom(f); setTo(t); }} />
@@ -2532,7 +2678,7 @@ function EdiExport({ ships = [] }) {
         <Metric label="연결 오류(확인 필요)" value={bad} unit="건" tone={bad ? "warn" : "plain"} />
       </div>
 
-      {!idx ? (msg ? null : <Splash text="불러오는 중…" />) : (
+      {!idx ? (refErr ? null : <Splash text="불러오는 중…" />) : (
         <>
           <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
