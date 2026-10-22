@@ -113,9 +113,9 @@ const toOf = (s) => isMove(s) ? (s.to_center || "—") : isReturn(s) ? (s.center
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
 const NAV_BY_ROLE = {
-  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "정산", "마스터", "단가", "사용자", "설정"],
-  운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "정산", "마스터", "설정"],
-  정산담당: ["현황", "재고", "EDI", "정산", "마스터", "설정"],
+  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "마스터", "단가", "사용자", "설정"],
+  운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "마스터", "설정"],
+  정산담당: ["현황", "재고", "EDI", "마스터", "설정"],
   협력업체: ["현황", "반납", "확인", "설정"],
   AJ: ["AJ", "설정"],   // AJ네트웍스 직원: 요청 처리 + 내 설정
 };
@@ -655,7 +655,7 @@ function Shell({ session, initialConfirm }) {
     { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
     { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
-    { key: "정산", label: "정산" }, { key: "마스터", label: "거래처" }, { key: "단가", label: "파렛트·단가" },
+    { key: "마스터", label: "거래처" }, { key: "단가", label: "파렛트·단가" },
     { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
   const allowed = NAV_BY_ROLE[role] || ["현황"];
@@ -750,7 +750,6 @@ function Shell({ session, initialConfirm }) {
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, ships, caps, centers: centerList }} />}
             {nav === "EDI" && caps.inventory && <EdiStock {...{ caps, ships, ajReqs, palletTypes, centers: centerList }} />}
             {nav === "단가" && caps.users && <PalletPricing caps={caps} />}
-            {nav === "정산" && <Billing {...{ ships, prices, caps }} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner, centers, addCenter, toggleCenter }} />}
             {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId: session.user.id }} />}
             {nav === "설정" && <Settings session={session} role={role} partners={partnersFull} />}
@@ -2009,7 +2008,7 @@ function EdiBilling({ caps = {} }) {
 
   return (
     <>
-      <Head title="월 마감·정산서" sub={`정산 기간 ${per.from} ~ ${per.to} (${per.days}일) · 일별 보유합계 ÷ ${per.days}일(올림) × 단가`} action={
+      <Head title="임대료 정산 (우리 → 브랜드 청구)" sub={`정산 기간 ${per.from} ~ ${per.to} (${per.days}일) · 일별 보유합계 ÷ ${per.days}일(올림) × 단가`} action={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={exportXlsx} disabled={!shown.length} style={{ ...btnGhost, padding: "8px 14px", opacity: shown.length ? 1 : 0.5 }}>⬇ 정산서 엑셀</button>
           {caps.billing && !closed && <button onClick={doClose} disabled={busy || !complete || !calc.length} title={complete ? "" : "재고 데이터가 마감일까지 들어와야 해요"} style={{ ...btnGreen, opacity: busy || !complete || !calc.length ? 0.5 : 1 }}>마감 확정</button>}
@@ -2184,16 +2183,144 @@ function EdiRecon({ caps = {}, ships = [], ajReqs = [], centers = [], palletType
   );
 }
 
+// ─── 임차료 정산(AJ가 우리에게 청구) — 관리자 전용: 명세서 vs EDI 구내용 추정, 임대료와 비교 ───────────
+function EdiCost({ caps = {} }) {
+  const nowMonth = billingMonthOf(new Date());
+  const [month, setMonth] = useState(nowMonth);
+  const [inv, setInv] = useState([]);
+  const [lines, setLines] = useState([]);
+  const [rates, setRates] = useState({});
+  const [stock, setStock] = useState([]);
+  const [calc, setCalc] = useState([]);
+  const [busy, setBusy] = useState(true);
+  const [msg, setMsg] = useState("");
+  const per = useMemo(() => periodOf(month), [month]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setBusy(true); setMsg("");
+      const [iv, r, st, c] = await Promise.all([
+        supabase.from("aj_invoice").select("*").eq("month", month).order("account"),
+        supabase.from("aj_cost_rate").select("*"),
+        supabase.from("aj_stock_daily").select("account,item,stoc_date,this_stoc").eq("workplace_no", 0).neq("item", "-").gte("stoc_date", per.from).lte("stoc_date", per.to).limit(5000),
+        supabase.rpc("aj_billing_calc", { p_from: per.from, p_to: per.to, p_neg: "zero", p_basis: "this", p_default_unit: AJ_UNIT_DEFAULT }),
+      ]);
+      if (!alive) return;
+      const er = iv.error || r.error || st.error || c.error;
+      if (er) { setMsg("불러오지 못했어요: " + er.message); setBusy(false); return; }
+      const ids = (iv.data || []).map((x) => x.id);
+      const ln = ids.length ? await supabase.from("aj_invoice_line").select("*").in("invoice_id", ids).order("id") : { data: [] };
+      if (!alive) return;
+      setInv(iv.data || []); setLines(ln.data || []); setRates(Object.fromEntries((r.data || []).map((x) => [x.code, x])));
+      setStock(st.data || []); setCalc(c.data || []); setBusy(false);
+    })();
+    return () => { alive = false; };
+  }, [month, per.from, per.to]);
+
+  // 규격 묶음: 명세서는 14C·18F를 한 줄(14C+18F)로 청구한다
+  const groupOf = (item) => (item === "14C" || item === "18F" ? "14C+18F" : item);
+  const days = new Set(stock.map((s) => s.stoc_date)).size;
+  const scale = days ? per.days / days : 0; // 진행 중이면 월환산
+  const ediBy = {};
+  stock.forEach((s) => {
+    const g = groupOf(s.item), rt = Number((rates[s.item] || {}).daily_rate) || 0;
+    ediBy[g] = ediBy[g] || { jangil: 0, amount: 0 };
+    ediBy[g].jangil += s.this_stoc; ediBy[g].amount += s.this_stoc * rt;
+  });
+  const invBy = {};
+  lines.filter((l) => l.kind === "구내용").forEach((l) => {
+    const g = l.item.split("+").sort().join("+") === "14C+18F" ? "14C+18F" : l.item;
+    invBy[g] = invBy[g] || { jangil: 0, amount: 0 };
+    invBy[g].jangil += Number(l.qty); invBy[g].amount += Number(l.amount);
+  });
+  const groups = [...new Set([...Object.keys(ediBy), ...Object.keys(invBy)])].filter((g) => (ediBy[g] && ediBy[g].jangil) || invBy[g]).sort();
+
+  const invSupply = inv.reduce((a, x) => a + Number(x.supply || 0), 0);
+  const ediGu = Object.values(ediBy).reduce((a, x) => a + x.amount, 0) * scale;
+  const cost = inv.length ? invSupply : ediGu; // 명세서가 있으면 명세서, 없으면 EDI 구내용 추정(월환산)
+  const isBill = (k) => k === "시공팀" || k === "업체";
+  const rent = calc.filter((c) => isBill(c.kind)).reduce((a, c) => a + c.avg_qty * c.unit, 0);
+  const centerCost = calc.filter((c) => c.kind === "센터").reduce((a, c) => a + c.avg_qty * (Number((rates[c.item] || {}).daily_rate) || 0) * per.days, 0);
+  const pct = (a, b) => (b ? ((a - b) / b) * 100 : null);
+  const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
+
+  if (!caps.users) return <div style={{ color: C.sub, fontSize: 13 }}>임차료 정산은 관리자만 볼 수 있어요.</div>;
+  return (
+    <>
+      <Head title="임차료 정산 (AJ → 우리)" sub={`정산월 ${month} · 사용기간 ${per.from} ~ ${per.to} (${per.days}일) · AJ 명세서와 EDI 데이터 대조, 임대료와 비교`} />
+      {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, color: C.sub }}>정산월</span>
+        <select value={month} onChange={(e) => setMonth(e.target.value)} style={inp}>{ediRecentMonths(nowMonth).map((m) => <option key={m} value={m}>{m}</option>)}</select>
+        <span style={{ fontSize: 12, color: C.hint }}>EDI 수집 {days}/{per.days}일{days && days < per.days ? " · 진행 중이라 월환산" : ""}</span>
+      </div>
+      {busy ? <Splash text="불러오는 중…" /> : (
+        <>
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <Metric label={inv.length ? "임차료 (명세서 공급가)" : "임차료 (EDI 구내용 추정)"} value={won(Math.round(cost))} tone="plain" />
+            <Metric label="임대료 (청구 대상 시공팀·업체)" value={won(Math.round(rent))} tone="info" />
+            <Metric label="임대료 − 임차료" value={won(Math.round(rent - cost))} tone={rent - cost < 0 ? "danger" : "success"} />
+            <Metric label="센터 보유분 구내용 (추정)" value={won(Math.round(centerCost))} tone="warn" />
+          </div>
+          <div style={{ fontSize: 12, color: C.sub, lineHeight: 1.7, marginBottom: 12 }}>
+            임대료는 "임대료 정산" 탭과 같은 규칙(일별 보유합 ÷ 일수 올림 × 규격별 단가, 마이너스 0 처리)으로 계산해요. 센터 보유분은 청구되지 않지만 AJ 구내용은 나가는 물량이에요.
+            {!inv.length && " 이 달은 아직 AJ 명세서가 없어서 임차료를 EDI 구내용(운송비·수송용 제외)으로 추정했어요."}
+          </div>
+
+          <div style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 8px" }}>구내용 대조 (명세서 vs EDI 전체합계 장·일)</div>
+          <div style={{ overflowX: "auto", marginBottom: 18 }}>
+            <table style={tbl}>
+              <thead><tr><Th>규격</Th><Th r>명세서 장·일</Th><Th r>EDI 장·일</Th><Th r>차이</Th><Th r>명세서 구내용</Th><Th r>EDI 추정{days && days < per.days ? "(월환산)" : ""}</Th></tr></thead>
+              <tbody>
+                {groups.map((g) => {
+                  const a = invBy[g], e = ediBy[g] || { jangil: 0, amount: 0 }, d = a ? pct(e.jangil, a.jangil) : null;
+                  return (
+                    <tr key={g} style={{ borderTop: `1px solid ${C.border}` }}>
+                      <Td b>{g}</Td><Td r>{a ? a.jangil.toLocaleString() : "—"}</Td><Td r>{e.jangil.toLocaleString()}</Td>
+                      <Td r>{d === null ? "—" : <span style={{ color: Math.abs(d) < 2 ? C.green : C.red, fontWeight: 600 }}>{d.toFixed(1)}%</span>}</Td>
+                      <Td r>{a ? a.amount.toLocaleString() : "—"}</Td><Td r>{Math.round(e.amount * scale).toLocaleString()}</Td>
+                    </tr>
+                  );
+                })}
+                {!groups.length && <tr><td colSpan={6} style={{ padding: 14, fontSize: 13, color: C.sub }}>이 달의 데이터가 없어요.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          {days && days < per.days && inv.length ? <div style={{ fontSize: 12, color: C.red, margin: "-10px 0 16px" }}>EDI 수집 기간({days}일)이 명세서 기간({per.days}일)보다 짧아 장·일 차이는 참고만 하세요.</div> : null}
+
+          <div style={{ fontSize: 14, fontWeight: 600, margin: "4px 0 8px" }}>AJ 명세서 {inv.length ? `(${inv.length}건)` : ""}</div>
+          {!inv.length && <div style={{ fontSize: 13, color: C.sub, marginBottom: 12 }}>등록된 명세서가 없어요. 명세서는 "파렛트·단가 → AJ 임차료 명세서"에 쌓여요.</div>}
+          {inv.map((iv) => (
+            <div key={iv.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 6, fontSize: 13 }}>
+                <b>{iv.account}{iv.note ? ` · ${iv.note}` : ""}</b>
+                <span>공급가 {won(iv.supply)} + 부가세 {won(iv.vat)} = <b>{won(iv.total)}</b></span>
+              </div>
+              <table style={tbl}>
+                <thead><tr><Th>제품</Th><Th>구분</Th><Th r>수량</Th><Th r>단가</Th><Th r>금액</Th></tr></thead>
+                <tbody>{lines.filter((l) => l.invoice_id === iv.id).map((l) => (
+                  <tr key={l.id} style={{ borderTop: `1px solid ${C.border}` }}><Td>{l.item}</Td><Td>{l.kind}</Td><Td r>{Number(l.qty).toLocaleString()}</Td><Td r>{l.unit_price == null ? "" : Number(l.unit_price).toLocaleString()}</Td><Td r b>{Number(l.amount).toLocaleString()}</Td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
 function EdiStock({ caps = {}, ships = [], ajReqs = [], centers = [], palletTypes = [] }) {
   const [view, setView] = useState("stock");
   return (
     <>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-        {[["stock", "재고·정산"], ["bill", "월 마감·정산서"], ["move", "이동 현황 (어디서 → 어디로)"], ["recon", "대사·이상 징후"]].map(([k, l]) => (
+        {[["stock", "재고 흐름"], ["bill", "임대료 정산(청구)"], ...(caps.users ? [["cost", "임차료 정산(AJ)"]] : []), ["move", "이동 현황 (어디서 → 어디로)"], ["recon", "대사·이상 징후"]].map(([k, l]) => (
           <button key={k} onClick={() => setView(k)} style={{ ...btnGhost, padding: "7px 16px", background: view === k ? C.teal : "transparent", color: view === k ? "#04342C" : C.text, fontWeight: view === k ? 600 : 400 }}>{l}</button>
         ))}
       </div>
-      {view === "stock" ? <EdiStockView caps={caps} /> : view === "bill" ? <EdiBilling caps={caps} /> : view === "move" ? <EdiMoves /> : <EdiRecon {...{ caps, ships, ajReqs, centers, palletTypes }} />}
+      {view === "stock" ? <EdiStockView caps={caps} /> : view === "bill" ? <EdiBilling caps={caps} /> : view === "cost" ? <EdiCost caps={caps} /> : view === "move" ? <EdiMoves /> : <EdiRecon {...{ caps, ships, ajReqs, centers, palletTypes }} />}
     </>
   );
 }
