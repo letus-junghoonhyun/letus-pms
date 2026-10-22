@@ -826,9 +826,7 @@ function Dashboard({ ships, ajReqs = [], flash, setStatus, setNav, caps = {}, pa
       </div>
       {/* 날짜 조회 */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
-        <span style={{ color: C.hint }}>~</span>
-        <input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+        <DateRange from={from} to={to} onApply={(f, t) => { setFrom(f); setTo(t); }} />
         <button onClick={() => quick(7)} style={btnGhost}>최근7일</button>
         <button onClick={() => quick(30)} style={btnGhost}>최근30일</button>
         {(from || to) && <button onClick={() => { setFrom(""); setTo(""); }} style={{ ...btnGhost, color: C.sub }}>전체</button>}
@@ -1862,6 +1860,22 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
 // 정산: 전월 26일 ~ 당월 25일 · 월 사용장수 = 일별 보유수량 합 ÷ 일수(올림) × 단가
 const AJ_UNIT_DEFAULT = 2400;
 const isoD = (d) => d.toISOString().slice(0, 10);
+// 기간 선택 + [조회]: 날짜를 바꾸는 동안은 다시 불러오지 않고 [조회]를 눌러야 반영. 시작이 끝보다 늦어지면 끝(또는 시작)이 따라온다
+function DateRange({ from, to, onApply, children }) {
+  const [f, setF] = useState(from); const [t, setT] = useState(to);
+  useEffect(() => { setF(from); setT(to); }, [from, to]);
+  const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
+  const dirty = f !== from || t !== to;
+  return (
+    <>
+      <input type="date" value={f} onChange={(e) => { const v = e.target.value; setF(v); if (v && t && v > t) setT(v); }} style={inp} />
+      <span style={{ color: C.hint }}>~</span>
+      <input type="date" value={t} onChange={(e) => { const v = e.target.value; setT(v); if (v && f && v < f) setF(v); }} onKeyDown={(e) => { if (e.key === "Enter") onApply(f, t); }} style={inp} />
+      <button onClick={() => onApply(f, t)} style={{ ...btnTealSm, background: dirty ? C.teal : C.tealDk }}>조회</button>
+      {children}
+    </>
+  );
+}
 const periodOf = (ym) => {
   const [y, m] = ym.split("-").map(Number);
   const s = new Date(Date.UTC(y, m - 2, 26)), e = new Date(Date.UTC(y, m - 1, 25));
@@ -2334,6 +2348,7 @@ function EdiExport({ ships = [] }) {
   const [from, setFrom] = useState(localD(new Date(Date.now() - 6 * 86400000).toISOString()));
   const [to, setTo] = useState(localD(new Date().toISOString()));
   const [stF, setStF] = useState("open");
+  const [wpF, setWpF] = useState(""); // 출고처(EDI 추가 창에서 고르는 작업장)별로 보기
   const [ref, setRef] = useState(null);
   const [moves, setMoves] = useState([]);
   const [over, setOver] = useState({}); // 화면에서 바꾼 상태 (새로고침 전까지)
@@ -2438,16 +2453,23 @@ function EdiExport({ ships = [] }) {
     return out;
   }, [ships, idx, from, to, over, moves]);
 
-  const view = rows.filter((r) => stF === "all" || (stF === "open" ? r.status === "미반영" || r.status === "엑셀생성" : r.status === stF));
-  const ready = rows.filter((r) => r.status === "미반영" && !r.issues.length && !r.match);
+  const fromKey = (r) => (r.fromWp ? String(r.fromWp.no) : "?" + (r.fromLabel || ""));
+  const fromOpts = useMemo(() => {
+    const m = {};
+    rows.forEach((r) => { const k = fromKey(r); m[k] = m[k] || { k, name: r.fromWp ? r.fromWp.name : (r.fromLabel || "—") + " (EDI 미연결)", open: 0, all: 0 }; m[k].all++; if (r.status === "미반영" || r.status === "엑셀생성") m[k].open++; });
+    return Object.values(m).sort((a, b) => b.open - a.open || a.name.localeCompare(b.name));
+  }, [rows]);
+  const inWp = (r) => !wpF || fromKey(r) === wpF;
+  const view = rows.filter((r) => inWp(r) && (stF === "all" || (stF === "open" ? r.status === "미반영" || r.status === "엑셀생성" : r.status === stF)));
+  const ready = rows.filter((r) => inWp(r) && r.status === "미반영" && !r.issues.length && !r.match);
   const groups = useMemo(() => {
     const m = {};
     ready.forEach((r) => { const k = r.acc.code + "|" + r.fromLocal; (m[k] = m[k] || { acc: r.acc, fromWp: r.fromWp, fromLocal: r.fromLocal, rows: [] }).rows.push(r); });
     return Object.values(m).sort((a, b) => a.acc.code.localeCompare(b.acc.code) || a.fromWp.name.localeCompare(b.fromWp.name));
   }, [ready]);
-  const cnt = (st) => rows.filter((r) => r.status === st).length;
-  const bad = rows.filter((r) => r.status === "미반영" && r.issues.length).length;
-  const matchable = rows.filter((r) => r.match && (r.status === "미반영" || r.status === "엑셀생성"));
+  const cnt = (st) => rows.filter((r) => inWp(r) && r.status === st).length;
+  const bad = rows.filter((r) => inWp(r) && r.status === "미반영" && r.issues.length).length;
+  const matchable = rows.filter((r) => inWp(r) && r.match && (r.status === "미반영" || r.status === "엑셀생성"));
 
   const mark = async (list, status, moveCode = null) => {
     const { error } = await supabase.rpc("edi_mark", { p_ids: list.map((r) => String(r.s.id)), p_status: status, p_move_code: moveCode });
@@ -2481,11 +2503,13 @@ function EdiExport({ ships = [] }) {
       </div>
       {msg && <div style={{ background: /못|실패/.test(msg) ? C.redBg : C.greenBg, color: /못|실패/.test(msg) ? C.red : C.green, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={inp} />
-        <span style={{ color: C.sub }}>~</span>
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={inp} />
+        <DateRange from={from} to={to} onApply={(f, t) => { setFrom(f); setTo(t); }} />
         <select value={stF} onChange={(e) => setStF(e.target.value)} style={inp}>
           <option value="open">처리 필요 (미반영·엑셀생성)</option><option value="미반영">미반영</option><option value="엑셀생성">엑셀생성</option><option value="반영">반영</option><option value="제외">제외</option><option value="all">전체</option>
+        </select>
+        <select value={wpF} onChange={(e) => setWpF(e.target.value)} style={{ ...inp, maxWidth: 260 }} title="EDI 추가 창에서 고르는 출고처 작업장">
+          <option value="">전체 출고처</option>
+          {fromOpts.map((o) => <option key={o.k} value={o.k}>{o.name} · 처리필요 {o.open}/{o.all}</option>)}
         </select>
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
@@ -2604,9 +2628,7 @@ function EdiMoves() {
       <Head title="이동 현황" sub="AJ EDI 건별 이동 · 출발지 → 도착지, 수량, 입고확인 상태" />
       {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={inp} />
-        <span style={{ color: C.sub }}>~</span>
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={inp} />
+        <DateRange from={from} to={to} onApply={(f, t) => { setFrom(f); setTo(t); }} />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="출발지·도착지 검색" style={{ ...inp, width: 170 }} />
         <select value={item} onChange={(e) => setItem(e.target.value)} style={inp}><option value="">전체 제품</option>{items.map((i) => <option key={i} value={i}>{i}</option>)}</select>
         <select value={iner} onChange={(e) => setIner(e.target.value)} style={inp}><option value="">내부·외부 전체</option><option value="내부">내부(센터·사업장 간)</option><option value="외부">외부(수요처 간)</option></select>
