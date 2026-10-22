@@ -21,7 +21,9 @@ const daysSince = (d) => Math.max(0, Math.round((Date.now() - new Date(d)) / 864
 const isReturn = (s) => s.direction === "반납";
 // 미회수: 우리가 거래처로 보낸(정방향) 것 중 아직 안 돌아온 것만. 반납은 제외.
 const isUnrecovered = (s) => !isReturn(s) && s.direction !== "이동" && (s.status === "출고완료" || s.status === "입고확인") && daysSince(s.depart_at) >= 7;
-const DirBadge = ({ s }) => isMove(s)
+const DirBadge = ({ s }) => s.direction === "업체간"
+  ? <span style={{ fontSize: 10, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10 }}>작업장 간</span>
+  : isMove(s)
   ? <span style={{ fontSize: 10, color: "#5b3aa6", background: "#efe8ff", padding: "1px 6px", borderRadius: 10 }}>센터이동</span>
   : isReturn(s)
     ? <span style={{ fontSize: 10, color: "#854F0B", background: "#FAEEDA", padding: "1px 6px", borderRadius: 10 }}>반납</span>
@@ -487,6 +489,39 @@ function Shell({ session, initialConfirm }) {
   const recoverToAj = (partner, pallet, qty) =>
     createAjRequest({ type: "회수", lines: [{ pallet, qty }], partner, note: "회수관리:AJ회수" });
 
+  // 작업장 간 자유 이동: EDI 작업장 아무 곳 → 아무 곳. 센터·거래처로 연결된 곳이면 기존 방향(출고/반납/이동)으로 저장해 기존 화면과 맞춘다
+  const registerFree = async (fromWp, toWp, lines, departDate, note, photos = [], vehicleNo = null, outSign = null) => {
+    const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
+    if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
+    if (!fromWp || !toWp) { alert("출발지와 도착지를 고르세요."); return; }
+    if (fromWp.no === toWp.no) { alert("출발지와 도착지가 같아요."); return; }
+    const centerOf = (w) => w.pms_center || (centerList.includes(ediClean(w.name)) ? ediClean(w.name) : null);
+    const partnerOf = (w) => (w.partner_code ? partnersFull.find((p) => p.code === w.partner_code) : null);
+    const fc = centerOf(fromWp), tc = centerOf(toWp), fp = partnerOf(fromWp), tp = partnerOf(toWp);
+    let base;
+    if (fc && tc) base = { direction: "이동", center: fc, to_center: tc, to_partner: null, to_partner_name: tc };
+    else if (fc && tp) base = { direction: "출고", center: fc, to_partner: tp.code, to_partner_name: tp.name };
+    else if (fp && tc) base = { direction: "반납", center: tc, to_partner: fp.code, to_partner_name: fp.name };
+    else base = { direction: "업체간", center: fc || null, to_partner: tp ? tp.code : null, to_partner_name: ediClean(toWp.name) };
+    try {
+      const batchId = uid();
+      const nowD = new Date();
+      let depart_at = nowD.toISOString();
+      if (departDate) { const [y, m, d] = departDate.split("-").map(Number); const dt = new Date(nowD); dt.setFullYear(y, m - 1, d); depart_at = dt.toISOString(); }
+      const rows = [];
+      for (const l of valid) {
+        const { data: slip, error: e1 } = await supabase.rpc("next_slip_no");
+        if (e1) throw e1;
+        rows.push({ id: uid(), slip_no: slip, ...base, from_wp: fromWp.no, to_wp: toWp.no, from_name: ediClean(fromWp.name), pallet_code: l.pallet, qty: l.qty, status: "출고완료", depart_at, batch_id: batchId, out_photos: photos.length ? photos : null, vehicle_no: vehicleNo || null, note: note || null, operator_name: me.name || (session.user.email || "").split("@")[0] || null, operator_phone: me.phone || null, out_sign_url: outSign || null, created_by: session.user.id });
+      }
+      const { error: e2 } = await supabase.from("shipment").insert(rows);
+      if (e2) throw new Error(e2.message + (/from_wp|to_wp|from_name/.test(e2.message) ? " (letus_edi10.sql 실행 필요)" : ""));
+      await supabase.from("movement").insert(rows.map((r) => ({ id: uid(), shipment_id: r.id, type: r.direction, direction: r.direction, source: "앱", pallet_code: r.pallet_code, qty: r.qty, to_partner: r.to_partner, to_partner_name: r.to_partner_name, created_by: session.user.id })));
+      setFlash({ slip: rows[0].slip_no + (rows.length > 1 ? " 외 " + (rows.length - 1) + "건" : ""), batchId }); loadAll();
+      return rows;
+    } catch (e) { alert("등록 실패: " + (e.message || e)); }
+  };
+
   // 센터 간 재고 이동 (출발센터 − / 도착센터 +)
   const transferCenters = async (fromC, toC, lines, photos = [], vehicleNo = null, note = null, outSign = null) => {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
@@ -742,7 +777,7 @@ function Shell({ session, initialConfirm }) {
         ) : (
           <>
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply, resolveDiscrepancy }} />}
-            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} setNav={setNav} />}
+            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} onFree={registerFree} setNav={setNav} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps, ajReqs, confirmAjSupply }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
@@ -1321,7 +1356,7 @@ function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
   );
 }
 
-function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CENTERS, myCenters = CENTERS, onRegister, onTransfer, setNav }) {
+function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CENTERS, myCenters = CENTERS, onRegister, onTransfer, onFree, setNav }) {
   const today = new Date().toISOString().slice(0, 10);
   const [dir, setDir] = useState("출고");
   const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
@@ -1331,20 +1366,37 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const [photos, setPhotos] = useState([]); const [vehicleNo, setVehicleNo] = useState(""); const [slipRows, setSlipRows] = useState(null); const [outSign, setOutSign] = useState(null);
   const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
   const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
-  const isRet = dir === "반납"; const isMv = dir === "이동";
+  const isRet = dir === "반납"; const isMv = dir === "이동"; const isFree = dir === "자유";
+  const { idx: ediIdx } = useEdiIndex();
+  const wpList = useMemo(() => (ediIdx ? ediIdx.wps.filter((w) => w.no > 0 && !w.closed) : []), [ediIdx]);
+  const [fromNo, setFromNo] = useState(null); const [toNo, setToNo] = useState(null);
+  const fromWp = wpList.find((w) => w.no === fromNo) || null, toWp = wpList.find((w) => w.no === toNo) || null;
+  const [fromStock, setFromStock] = useState(null); // 출발지 EDI 재고(참고)
+  useEffect(() => {
+    if (!fromNo) { setFromStock(null); return; }
+    let alive = true;
+    supabase.from("aj_stock_daily").select("account,item,this_stoc,stoc_date").eq("workplace_no", fromNo).neq("item", "-").order("stoc_date", { ascending: false }).limit(60).then(({ data }) => {
+      if (!alive) return;
+      const last = {}; const out = {};
+      (data || []).forEach((r) => { last[r.account] = last[r.account] || r.stoc_date; if (r.stoc_date === last[r.account]) out[r.item] = (out[r.item] || 0) + r.this_stoc; });
+      setFromStock({ items: out, date: Object.values(last).sort().pop() });
+    });
+    return () => { alive = false; };
+  }, [fromNo]);
   const total = qtysTotal(qtys);
   const reset = () => { setQtys({}); setNote(""); setDate(today); setPhotos([]); setVehicleNo(""); setOutSign(null); };
   // 출고/이동은 출발 센터 재고 한도 내. 반납(거래처→센터)은 한도 없음.
   const stockOf = (code) => centerStock(ships, ajReqs, center, code);
   useEffect(() => { setQtys({}); }, [center, dir]);
-  const themeColor = isRet ? C.amber : isMv ? "#5b3aa6" : C.teal;
-  const themeBg = isRet ? C.amberBg : isMv ? "#efe8ff" : C.tealBg;
-  const canSubmit = total > 0 && !busy && (isMv ? center !== toCenter : !!sel);
+  const themeColor = isRet ? C.amber : isMv ? "#5b3aa6" : isFree ? C.blue : C.teal;
+  const themeBg = isRet ? C.amberBg : isMv ? "#efe8ff" : isFree ? C.blueBg : C.tealBg;
+  const canSubmit = total > 0 && !busy && (isFree ? !!fromWp && !!toWp && fromNo !== toNo : isMv ? center !== toCenter : !!sel);
   const submit = async () => {
     if (!photos.length) { alert("현장 사진을 촬영/첨부한 후 등록해주세요."); return; }
     if (!outSign) { alert("서명을 완료한 후 등록해주세요. (사인 후 손을 떼면 자동 저장돼요)"); return; }
     setBusy(true);
-    const rows = isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note, outSign)
+    const rows = isFree ? await onFree(fromWp, toWp, qtysToLines(qtys), date, note, photos, vehicleNo, outSign)
+      : isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note, outSign)
       : await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo, outSign);
     setBusy(false); reset();
     if (rows && rows.length) setSlipRows(rows); // 등록 직후 전표 바로 출력
@@ -1356,12 +1408,22 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
       <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>방향</div>
         <div style={{ display: "flex", gap: 6, marginBottom: 18, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
-          {[["출고", "출고"], ["반납", "반납"], ["이동", "센터이동"]].map(([v, label]) => (
-            <button key={v} onClick={() => setDir(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: dir === v ? (v === "반납" ? C.amber : v === "이동" ? "#5b3aa6" : C.teal) : "transparent", color: dir === v ? "#fff" : C.sub }}>{label}</button>
+          {[["출고", "출고"], ["반납", "반납"], ["이동", "센터이동"], ["자유", "작업장 간"]].map(([v, label]) => (
+            <button key={v} onClick={() => setDir(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: dir === v ? (v === "반납" ? C.amber : v === "이동" ? "#5b3aa6" : v === "자유" ? C.blue : C.teal) : "transparent", color: dir === v ? "#fff" : C.sub }}>{label}</button>
           ))}
         </div>
 
-        {isMv ? (
+        {isFree ? (
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출발지 <span style={{ color: C.hint, fontSize: 11 }}>· EDI 작업장 검색 (센터·시공팀·업체 모두)</span></div>
+            <WorkplacePicker wps={wpList} value={fromNo} onChange={setFromNo} width="100%" placeholder={ediIdx ? "보내는 곳 (이름·번호)" : "작업장 목록 불러오는 중…"} />
+            {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>EDI 재고({(fromStock.date || "").slice(5)}): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
+            <div style={{ textAlign: "center", color: C.hint, margin: "6px 0" }}>↓</div>
+            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>도착지</div>
+            <WorkplacePicker wps={wpList} value={toNo} onChange={setToNo} width="100%" filter={(w) => w.no !== fromNo} placeholder="받는 곳 (이름·번호)" />
+            {fromWp && toWp && <div style={{ fontSize: 11.5, color: C.blue, marginTop: 6 }}>{ediClean(fromWp.name)} → {ediClean(toWp.name)} · EDI 반영 탭에서 출고처 "{ediClean(fromWp.name)}"로 자동입력돼요</div>}
+          </div>
+        ) : isMv ? (
           <div style={{ display: "flex", gap: 10, marginBottom: 18, alignItems: "flex-end" }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출발 센터</div>
@@ -1405,14 +1467,14 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
           </>
         )}
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : "센터 재고 한도 내"}</span></div>
-        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={themeColor} bg={themeBg} maxOf={isRet ? undefined : stockOf} maxLabel="재고" />
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : isFree ? "EDI 재고 참고" : "센터 재고 한도 내"}</span></div>
+        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={themeColor} bg={themeBg} maxOf={isRet || isFree ? undefined : stockOf} maxLabel="재고" />
         {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
 
         {!isMv && (
           <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
             <div style={{ flex: 1, minWidth: 140 }}>
-              <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납일자" : "출고일자"}</div>
+              <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납일자" : isFree ? "이동일자" : "출고일자"}</div>
               <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
             </div>
           </div>
@@ -1424,12 +1486,12 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
         <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
-        <div style={{ marginBottom: 18 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label={isMv ? "센터이동 현장 사진" : isRet ? "반납 현장 사진" : "출고 현장 사진"} color={themeColor} /></div>
+        <div style={{ marginBottom: 18 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label={isMv || isFree ? "이동 현장 사진" : isRet ? "반납 현장 사진" : "출고 현장 사진"} color={themeColor} /></div>
 
         <div style={{ marginBottom: 18 }}><SignaturePad onSave={setOutSign} label={isMv ? "출고 담당 서명" : isRet ? "반납자 서명" : "출고자 서명"} color={themeColor} /></div>
 
-        <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : themeColor, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : isRet ? "반납 등록" : isMv ? "센터 이동" : "출고 등록"}</button>
-        <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : isMv ? "센터 간 재고를 옮겨요 (출발 −, 도착 +)" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
+        <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : themeColor, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : isRet ? "반납 등록" : isMv ? "센터 이동" : isFree ? "작업장 간 이동 등록" : "출고 등록"}</button>
+        <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : isFree ? "아무 작업장 → 아무 작업장. 센터·거래처로 연결된 곳이면 출고/반납/센터이동으로 자동 분류돼요" : isMv ? "센터 간 재고를 옮겨요 (출발 −, 도착 +)" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
       </div>
       {slipRows && <SlipPrint rows={slipRows} palletTypes={palletTypes} onClose={() => { setSlipRows(null); setNav && setNav("현황"); }} />}
     </>
@@ -2374,13 +2436,15 @@ function useEdiIndex() {
     const dest = {}, destByName = {};
     ref.dests.forEach((d) => { dest[d.account + "|" + d.demd_code + "|" + d.demd_numb] = d; const k = d.account + "|" + ediClean(d.post_name); (destByName[k] = destByName[k] || []).push(d); });
     const accOf = (item) => ref.accs.filter((a) => (a.items || []).includes(item)).sort((a, b) => /전용/.test(a.label || a.name || "") - /전용/.test(b.label || b.name || ""))[0];
-    return { wps: ref.wps, wpByCenter, wpByPartner, local, dest, destByName, accOf, accName: (c) => { const a = ref.accs.find((x) => x.code === c); return (a && (a.label || a.name)) || c; } };
+    const wpByNo = {}; ref.wps.forEach((w) => { wpByNo[w.no] = w; });
+    return { wps: ref.wps, wpByNo, wpByCenter, wpByPartner, local, dest, destByName, accOf, accName: (c) => { const a = ref.accs.find((x) => x.code === c); return (a && (a.label || a.name)) || c; } };
   }, [ref]);
 
   return { idx, err };
 }
 // PMS 전표 1건의 EDI 출고처·입고처 작업장 (반납은 거래처 → 센터)
 function ediRoute(idx, s) {
+  if (s.from_wp && s.to_wp) { const f = idx.wpByNo[s.from_wp], t = idx.wpByNo[s.to_wp]; return { fromWp: f, toWp: t, fromLabel: s.from_name || (f && f.name), toLabel: s.to_partner_name || (t && t.name) }; }
   const centerWp = idx.wpByCenter[s.center];
   const partnerWp = s.to_partner ? idx.wpByPartner[s.to_partner] : null;
   const toCenterWp = s.to_center ? idx.wpByCenter[s.to_center] : null;
