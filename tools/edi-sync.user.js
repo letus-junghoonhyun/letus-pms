@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.5
+// @version      3.6
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -325,16 +325,41 @@
     panel.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:10px 12px;border-radius:10px;width:300px;max-height:70vh;overflow:auto;box-shadow:0 4px 14px rgba(0,0,0,.3)";
     document.body.appendChild(panel);
     const bySlip = {}; const reported = new Set();
+    let lastCount = 0;
+    const collapsed = () => GM_getValue("fillCollapsed") === "1";
+    const head = (title) => {
+      const h = document.createElement("div");
+      h.style.cssText = "display:flex;align-items:center;gap:6px";
+      h.innerHTML = "<b style='flex:1'>" + title + "</b>";
+      const t = document.createElement("button");
+      t.textContent = "접기"; t.title = "상자 접기";
+      t.style.cssText = "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:1px 8px;cursor:pointer";
+      t.onclick = () => { GM_setValue("fillCollapsed", "1"); applyCollapse(); };
+      h.appendChild(t); return h;
+    };
+    const pill = document.createElement("div");
+    pill.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:5px 12px;border-radius:14px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.3);display:none";
+    pill.title = "펼치기"; pill.onclick = () => { GM_setValue("fillCollapsed", "0"); applyCollapse(); };
+    document.body.appendChild(pill);
+    const applyCollapse = () => {
+      const c = collapsed();
+      panel.style.display = c ? "none" : "block";
+      pill.style.display = c ? "block" : "none";
+      pill.textContent = "LETUS ▾ " + (lastCount ? "대기 " + lastCount + "건" : "자동입력");
+      pill.style.background = lastCount ? "#1D9E75" : "#0f1424";
+    };
     const render = async () => {
       panel.innerHTML = "<b>LETUS PMS · EDI 자동입력</b><div style='opacity:.7'>불러오는 중…</div>";
       let rows;
       try { rows = (await call("queue_list", {})).rows || []; } catch (e) { panel.innerHTML = "<b>LETUS PMS</b><div>대기열을 못 읽었어요: " + e.message + "</div>"; return; }
       rows.forEach((r) => { bySlip[r.note] = r; });
+      lastCount = rows.length; applyCollapse();
       const g = {};
       rows.forEach((r) => { (g[r.from_local] = g[r.from_local] || { local: r.from_local, name: r.from_name, rows: [] }).rows.push(r); });
       const list = Object.values(g);
-      panel.innerHTML = "<b>LETUS PMS · EDI 자동입력</b> <span style='opacity:.7'>(" + ACCOUNT + ")</span>" +
-        (list.length ? "<div style='opacity:.75;margin:4px 0 6px'>출고처를 골라 [채우기] → 노란 줄 확인 → EDI [저장]. 저장하면 PMS에 바로 반영돼요.</div>" : "<div style='opacity:.75;margin-top:4px'>PMS에서 보낸 대기 건이 없어요. (PMS › EDI 반영 › EDI 자동입력 보내기)</div>");
+      panel.innerHTML = "";
+      panel.appendChild(head("LETUS PMS · EDI 자동입력 <span style='opacity:.7;font-weight:400'>(" + ACCOUNT + ")</span>"));
+      panel.insertAdjacentHTML("beforeend", list.length ? "<div style='opacity:.75;margin:4px 0 6px'>출고처를 골라 [채우기] → 노란 줄 확인 → EDI [저장]. 저장하면 PMS에 바로 반영돼요.</div>" : "<div style='opacity:.75;margin-top:4px'>PMS에서 보낸 대기 건이 없어요. (PMS › EDI 반영 › EDI 자동입력 보내기)</div>");
       list.forEach((x) => {
         const d = document.createElement("div");
         d.style.cssText = "display:flex;align-items:center;gap:6px;padding:5px 0;border-top:1px solid rgba(255,255,255,.12)";
@@ -342,7 +367,7 @@
         d.innerHTML = "<div style='flex:1'>" + x.local + ". " + (x.name || "") + "<div style='opacity:.65'>" + x.rows.length + "건 · " + qty + "장</div></div>";
         const b = document.createElement("button");
         b.textContent = "채우기"; b.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:4px 10px;cursor:pointer";
-        b.onclick = () => fill(x).catch((e) => alert("채우기 실패: " + e.message));
+        b.onclick = () => { fill(x).then(() => { GM_setValue("fillCollapsed", "1"); applyCollapse(); }).catch((e) => alert("채우기 실패: " + e.message)); };
         d.appendChild(b); panel.appendChild(d);
       });
       const rb = document.createElement("button");
