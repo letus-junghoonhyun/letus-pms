@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.6
+// @version      3.7
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -242,8 +242,9 @@
       let from = last_date ? addDays(parse(last_date), -(REFRESH_DAYS - 1)) : parse(START_DATE);
       if (from < parse(START_DATE)) from = parse(START_DATE);
       let guard = 0;
-      while (from <= yesterday && guard++ < 60) {
-        const to = new Date(Math.min(addDays(from, MOVE_CHUNK_DAYS - 1), yesterday));
+      const todayD = parse(fmt(new Date())); // 이동은 오늘 것까지 받는다(PMS 재고현황이 당일 EDI 입력도 반영). 재고는 어제까지
+      while (from <= todayD && guard++ < 60) {
+        const to = new Date(Math.min(addDays(from, MOVE_CHUNK_DAYS - 1), todayD));
         say(`이동 내역 ${fmt(from)}~${fmt(to)} 조회 중…`, true);
         const rows = await pullMoves(demd, inst, fmt(from), fmt(to));
         rows.forEach((r) => { movedNames.add(r.from_name); movedNames.add(r.to_name); });
@@ -310,7 +311,7 @@
     const mvTxt = (mvErr ? ` · 이동내역 실패: ${mvErr}` : ` · 이동 ${mv}건`) + dsTxt;
     say(st.abort ? `중단됨 · ${label()} — ${st.lastErr || mvErr} (다시 접속하면 이어서 받아요)`
       : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}${mvTxt}`
-      : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행${mvTxt} (어제까지)`, st.abort || st.failed || !!mvErr);
+      : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행(어제까지)${mvTxt}(오늘까지)`, st.abort || st.failed || !!mvErr);
   }
 
   // ── EDI 이동등록(추가) 창: PMS 대기열을 출고처별로 표에 채운다. 저장은 사람이 누른다 ──

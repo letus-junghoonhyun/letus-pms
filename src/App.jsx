@@ -395,10 +395,6 @@ function Shell({ session, initialConfirm }) {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     // 정방향 출고는 센터 재고 한도 초과 불가
-    if (direction === "출고") {
-      const over = valid.find((l) => l.qty > centerStock(ships, ajReqs, center, l.pallet));
-      if (over) { alert(`${center} 재고 부족: ${over.pallet} 재고 ${centerStock(ships, ajReqs, center, over.pallet)}장, 요청 ${over.qty}장`); return; }
-    }
     try {
       const batchId = uid();
       // 선택한 날짜 + 실제 처리 시각(시:분:초)을 반영
@@ -527,8 +523,6 @@ function Shell({ session, initialConfirm }) {
     const valid = (lines || []).filter((l) => l.pallet && l.qty > 0);
     if (!valid.length) { alert("수량을 1개 이상 입력하세요."); return; }
     if (fromC === toC) { alert("출발 센터와 도착 센터가 같아요."); return; }
-    const over = valid.find((l) => l.qty > centerStock(ships, ajReqs, fromC, l.pallet));
-    if (over) { alert(`${fromC} 재고 부족: ${over.pallet} 재고 ${centerStock(ships, ajReqs, fromC, over.pallet)}장, 요청 ${over.qty}장`); return; }
     try {
       const batchId = uid();
       const nowISO = new Date().toISOString();
@@ -1175,7 +1169,7 @@ function EditShipmentModal({ s, palletTypes, onClose, onSave, onCancel }) {
 }
 
 // 여러 파렛트 유형 + 수량을 한 번에 입력 (혼합). maxOf 주면 그 한도까지만(보유수량 제한).
-function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf, maxLabel = "보유" }) {
+function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf, maxLabel = "보유", hintOf, hintLabel = "EDI" }) {
   const set = (code, v) => setQtys((q) => ({ ...q, [code]: v }));
   return (
     <div style={{ display: "grid", gap: 8, marginBottom: 18 }}>
@@ -1188,6 +1182,7 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
             <div style={{ width: 104, flexShrink: 0 }}>
               <span style={{ fontSize: 14, fontWeight: 600 }}>{p.code}</span>
               {maxOf && <span style={{ fontSize: 11, color: max <= 0 ? C.red : C.hint }}> · {maxLabel} {max}</span>}
+              {hintOf && hintOf(p.code) !== null && <span style={{ fontSize: 11, color: v > hintOf(p.code) ? C.red : C.hint }}> · {hintLabel} {hintOf(p.code).toLocaleString()}</span>}
             </div>
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", border: `1px solid ${v > 0 ? color : C.border}`, borderRadius: 8, padding: "4px 12px", background: v > 0 ? bg : "#fff" }}>
               <button disabled={disabled} onClick={() => set(p.code, Math.max(0, v - 1))} style={{ background: "none", border: "none", fontSize: 20, color: C.sub, cursor: "pointer" }}>−</button>
@@ -1371,22 +1366,12 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const wpList = useMemo(() => (ediIdx ? ediIdx.wps.filter((w) => w.no > 0 && !w.closed) : []), [ediIdx]);
   const [fromNo, setFromNo] = useState(null); const [toNo, setToNo] = useState(null);
   const fromWp = wpList.find((w) => w.no === fromNo) || null, toWp = wpList.find((w) => w.no === toNo) || null;
-  const [fromStock, setFromStock] = useState(null); // 출발지 EDI 재고(참고)
-  useEffect(() => {
-    if (!fromNo) { setFromStock(null); return; }
-    let alive = true;
-    supabase.from("aj_stock_daily").select("account,item,this_stoc,stoc_date").eq("workplace_no", fromNo).neq("item", "-").order("stoc_date", { ascending: false }).limit(60).then(({ data }) => {
-      if (!alive) return;
-      const last = {}; const out = {};
-      (data || []).forEach((r) => { last[r.account] = last[r.account] || r.stoc_date; if (r.stoc_date === last[r.account]) out[r.item] = (out[r.item] || 0) + r.this_stoc; });
-      setFromStock({ items: out, date: Object.values(last).sort().pop() });
-    });
-    return () => { alive = false; };
-  }, [fromNo]);
+  const srcWp = isFree ? fromWp : ediIdx ? ediIdx.wpByCenter[center] : null; // 보내는 작업장 (반납은 거래처라 한도 없음)
+  const fromStock = useWpStock(isRet ? null : srcWp, ships, ediIdx);
+  const hintOf = fromStock ? (code) => fromStock.items[code] || 0 : undefined;
   const total = qtysTotal(qtys);
   const reset = () => { setQtys({}); setNote(""); setDate(today); setPhotos([]); setVehicleNo(""); setOutSign(null); };
   // 출고/이동은 출발 센터 재고 한도 내. 반납(거래처→센터)은 한도 없음.
-  const stockOf = (code) => centerStock(ships, ajReqs, center, code);
   useEffect(() => { setQtys({}); }, [center, dir]);
   const themeColor = isRet ? C.amber : isMv ? "#5b3aa6" : isFree ? C.blue : C.teal;
   const themeBg = isRet ? C.amberBg : isMv ? "#efe8ff" : isFree ? C.blueBg : C.tealBg;
@@ -1394,6 +1379,10 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
   const submit = async () => {
     if (!photos.length) { alert("현장 사진을 촬영/첨부한 후 등록해주세요."); return; }
     if (!outSign) { alert("서명을 완료한 후 등록해주세요. (사인 후 손을 떼면 자동 저장돼요)"); return; }
+    if (hintOf) {
+      const over = qtysToLines(qtys).filter((l) => l.qty > hintOf(l.pallet));
+      if (over.length && !window.confirm("현재고(EDI 기준)보다 많아요:\n" + over.map((l) => `${l.pallet} 요청 ${l.qty}장 / 현재고 ${hintOf(l.pallet)}장`).join("\n") + "\n\n실물이 있으면 그대로 등록할까요?")) return;
+    }
     setBusy(true);
     const rows = isFree ? await onFree(fromWp, toWp, qtysToLines(qtys), date, note, photos, vehicleNo, outSign)
       : isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note, outSign)
@@ -1417,7 +1406,7 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
           <div style={{ marginBottom: 18 }}>
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출발지 <span style={{ color: C.hint, fontSize: 11 }}>· EDI 작업장 검색 (센터·시공팀·업체 모두)</span></div>
             <WorkplacePicker wps={wpList} value={fromNo} onChange={setFromNo} width="100%" placeholder={ediIdx ? "보내는 곳 (이름·번호)" : "작업장 목록 불러오는 중…"} />
-            {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>EDI 재고({(fromStock.date || "").slice(5)}): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
+            {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>현재고(EDI {(fromStock.date || "").slice(5)} 기준 + 당일 이동·PMS 예정): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
             <div style={{ textAlign: "center", color: C.hint, margin: "6px 0" }}>↓</div>
             <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>도착지</div>
             <WorkplacePicker wps={wpList} value={toNo} onChange={setToNo} width="100%" filter={(w) => w.no !== fromNo} placeholder="받는 곳 (이름·번호)" />
@@ -1467,8 +1456,8 @@ function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CE
           </>
         )}
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : isFree ? "EDI 재고 참고" : "센터 재고 한도 내"}</span></div>
-        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={themeColor} bg={themeBg} maxOf={isRet || isFree ? undefined : stockOf} maxLabel="재고" />
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : "현재고(EDI 기준)보다 많으면 빨갛게 표시"}</span></div>
+        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={themeColor} bg={themeBg} hintOf={isRet ? undefined : hintOf} hintLabel="현재고" />
         {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
 
         {!isMv && (
@@ -2452,6 +2441,51 @@ function ediRoute(idx, s) {
   if (s.direction === "이동") return { fromWp: centerWp, toWp: toCenterWp, fromLabel: s.center, toLabel: s.to_center || s.to_partner_name };
   return { fromWp: centerWp, toWp: partnerWp, fromLabel: s.center, toLabel: s.to_partner_name };
 }
+// 작업장 이름 → 표준 작업장 (EDI 이동 내역은 이름으로만 온다)
+const wpByNameOf = (idx) => { const m = {}; idx.wps.forEach((w) => { const k = ediClean(w.name); if (!m[k] || (m[k].closed && !w.closed)) m[k] = w; }); return m; };
+// PMS 미반영 건: EDI 당일 이동 비고에 전표번호가 있으면(이미 EDI에 들어감) 빼고 계산
+const pendingShips = (ships, todayMoves) => {
+  const inEdi = new Set(); (todayMoves || []).forEach((m) => { const t = /PMS\s+(\S+)/.exec(m.note || ""); if (t) inEdi.add(t[1]); });
+  return ships.filter((s) => !s.canceled && s.edi_status !== "반영" && s.edi_status !== "제외" && !inEdi.has(String(s.slip_no)));
+};
+// EDI 최신 기준일보다 뒤의 EDI 이동(동기화 때 오늘 것까지 받음)
+async function loadMovesAfter(dates) {
+  const out = [];
+  for (const [acc, d] of Object.entries(dates)) {
+    const { data } = await supabase.from("aj_move").select("account,move_date,item,from_name,to_name,qty,note").eq("account", acc).gt("move_date", d).limit(5000);
+    out.push(...(data || []));
+  }
+  return out;
+}
+function useWpStock(wp, ships, idx) {
+  const [st, setSt] = useState(null);
+  const no = wp ? wp.no : null;
+  useEffect(() => {
+    if (!no || !idx) { setSt(null); return; }
+    let alive = true;
+    (async () => {
+      const { data } = await supabase.from("aj_stock_daily").select("account,item,this_stoc,stoc_date").eq("workplace_no", no).neq("item", "-").order("stoc_date", { ascending: false }).limit(60);
+      const last = {}, items = {};
+      (data || []).forEach((r) => { last[r.account] = last[r.account] || r.stoc_date; if (r.stoc_date === last[r.account]) items[r.item] = (items[r.item] || 0) + r.this_stoc; });
+      const moves = await loadMovesAfter(last);
+      const name = ediClean(wp.name);
+      moves.forEach((m) => { if (ediClean(m.from_name) === name) items[m.item] = (items[m.item] || 0) - m.qty; if (ediClean(m.to_name) === name) items[m.item] = (items[m.item] || 0) + m.qty; });
+      if (alive) setSt({ base: items, moves, date: Object.values(last).sort().pop() });
+    })();
+    return () => { alive = false; };
+  }, [no, idx]);
+  return useMemo(() => {
+    if (!st) return null;
+    const items = { ...st.base };
+    pendingShips(ships, st.moves).forEach((s) => {
+      const { fromWp, toWp } = ediRoute(idx, s);
+      if (fromWp && fromWp.no === no) items[s.pallet_code] = (items[s.pallet_code] || 0) - s.qty;
+      if (toWp && toWp.no === no) items[s.pallet_code] = (items[s.pallet_code] || 0) + s.qty;
+    });
+    return { items, date: st.date };
+  }, [st, ships, idx, no]);
+}
+
 // 재고 현황(EDI 기준): 작업장 × 제품 현재고 = EDI 최신 기준일 재고 + PMS에 등록됐지만 EDI에 아직 안 들어간 건(예정 ±)
 const ITEM_ORDER = ["14C", "18F", "11A", "15A", "23E", "12A"];
 function EdiInventory({ ships = [] }) {
@@ -2481,7 +2515,8 @@ function EdiInventory({ ships = [] }) {
             if (!data || data.length < 1000) break;
           }
         }
-        if (alive) setStock({ dates, rows });
+        const today = await loadMovesAfter(dates);
+        if (alive) setStock({ dates, rows, today });
       } catch (e) { if (alive) setMsg("EDI 재고를 불러오지 못했어요. (" + (e.message || e) + ")"); }
     })();
     return () => { alive = false; };
@@ -2499,9 +2534,18 @@ function EdiInventory({ ships = [] }) {
       if (r.workplace_no === 0) { total[r.item] = (total[r.item] || 0) + r.this_stoc; return; }
       const x = at(r.workplace_no); x.edi[r.item] = (x.edi[r.item] || 0) + r.this_stoc;
     });
+    // EDI 기준일 이후(오늘) EDI에 들어간 이동: 출발 −, 도착 + (EDI 숫자에 합침)
+    const byName = wpByNameOf(idx); let todayN = 0;
+    (stock.today || []).forEach((mv) => {
+      const f = byName[ediClean(mv.from_name)], t = byName[ediClean(mv.to_name)];
+      if (!items.includes(mv.item)) items.push(mv.item);
+      if (f) { const x = at(f.no); x.edi[mv.item] = (x.edi[mv.item] || 0) - mv.qty; }
+      if (t) { const x = at(t.no); x.edi[mv.item] = (x.edi[mv.item] || 0) + mv.qty; }
+      todayN++;
+    });
     // PMS 미반영(EDI에 아직 없는) 건: 출고처 −, 입고처 +
     let pendN = 0; const unmapped = [];
-    ships.filter((s) => !s.canceled && s.edi_status !== "반영" && s.edi_status !== "제외").forEach((s) => {
+    pendingShips(ships, stock.today).forEach((s) => {
       const { fromWp, toWp, fromLabel, toLabel } = ediRoute(idx, s);
       if (!fromWp || !toWp) { unmapped.push(s.slip_no + " " + (fromLabel || "—") + "→" + (toLabel || "—")); return; }
       pendN++;
@@ -2515,7 +2559,7 @@ function EdiInventory({ ships = [] }) {
       return { ...x, now, tot, neg, any };
     });
     const byKind = (k, it) => list.filter((x) => (x.wp.kind || "업체") === k).reduce((a, x) => a + (x.edi[it] || 0), 0);
-    return { items, total, list, byKind, pendN, unmapped };
+    return { items, total, list, byKind, pendN, unmapped, todayN };
   }, [idx, stock, ships]);
 
   const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
@@ -2523,7 +2567,7 @@ function EdiInventory({ ships = [] }) {
   if (err2) return (<><Head title="재고 현황" sub="EDI 기준" /><div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13 }}>{err2}</div></>);
   if (!data) return (<><Head title="재고 현황" sub="EDI 기준" /><Splash text="불러오는 중…" /></>);
 
-  const { items, total, list, byKind, pendN, unmapped } = data;
+  const { items, total, list, byKind, pendN, unmapped, todayN } = data;
   const view = list.filter((x) => (!kind || (x.wp.kind || "업체") === kind) && (!q || (x.wp.name + " " + x.wp.no).includes(q)) && (only === "all" ? true : only === "neg" ? x.neg : x.any))
     .sort((a, b) => b.tot - a.tot || a.wp.name.localeCompare(b.wp.name));
   const dateTxt = [...new Set(Object.values(stock.dates))].sort().map((d) => d.slice(5)).join(", ");
@@ -2531,7 +2575,7 @@ function EdiInventory({ ships = [] }) {
 
   return (
     <>
-      <Head title="재고 현황" sub={`EDI 기준 (기준일 ${dateTxt}) + PMS 미반영 ${pendN}건을 예정으로 더한 값`} />
+      <Head title="재고 현황" sub={`EDI 기준일 ${dateTxt} 재고 + 그 뒤 EDI 이동 ${todayN}건 + PMS 미반영 ${pendN}건(예정)`} />
       <div style={{ overflowX: "auto", marginBottom: 16 }}>
         <table style={tbl}>
           <thead><tr><Th>제품</Th><Th r>EDI 전체</Th><Th r>센터</Th><Th r>시공팀</Th><Th r>업체</Th><Th r>PMS 예정(순)</Th></tr></thead>
@@ -2571,23 +2615,11 @@ function EdiInventory({ ships = [] }) {
         </table>
         {view.length > 400 && <div style={{ fontSize: 12, color: C.hint, padding: 10 }}>상위 400곳만 표시 — 검색으로 좁혀 보세요.</div>}
       </div>
-      <Note>EDI 재고는 매일 동기화된 전일 기준이에요. 그 뒤 PMS에 등록했지만 EDI에 아직 반영(저장)되지 않은 건만 예정(파란 숫자)으로 더해요. 반영되면 EDI 숫자로 넘어가요.</Note>
+      <Note>EDI 재고(전일 마감)에 동기화 때 받은 오늘 EDI 이동을 더한 값이 검은 숫자예요(EDI에 직접 입력한 건 포함, 마지막 동기화 시점까지). PMS에 등록했지만 EDI에 아직 저장되지 않은 건은 예정(파란 숫자)으로 더해요. "EDI 전체"는 전일 마감 합계예요.</Note>
     </>
   );
 }
-function InventoryScreen(props) {
-  const [mode, setMode] = useState("edi");
-  return (
-    <>
-      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-        {[["edi", "EDI 기준 (실재고)"], ["book", "PMS 장부 (참고)"]].map(([k, l]) => (
-          <button key={k} onClick={() => setMode(k)} style={{ ...btnGhost, padding: "7px 16px", background: mode === k ? C.teal : "transparent", color: mode === k ? "#04342C" : C.text, fontWeight: mode === k ? 600 : 400 }}>{l}</button>
-        ))}
-      </div>
-      {mode === "edi" ? <EdiInventory ships={props.ships} /> : <Inventory {...props} />}
-    </>
-  );
-}
+function InventoryScreen(props) { return <EdiInventory ships={props.ships} />; }
 
 function EdiExport({ ships = [] }) {
   const [from, setFrom] = useState(localD(new Date(Date.now() - 6 * 86400000).toISOString()));
