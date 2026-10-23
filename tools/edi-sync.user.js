@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.8
+// @version      3.9
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -315,6 +315,17 @@
       : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행(어제까지)${mvTxt}(오늘까지)`, st.abort || st.failed || !!mvErr);
   }
 
+  // 상자 오류 표시: 접기·다시 시도 버튼을 항상 둔다
+  function errBox(panel, title, msg, onCollapse, onRetry) {
+    panel.innerHTML = "";
+    const h = document.createElement("div"); h.style.cssText = "display:flex;align-items:center;gap:6px";
+    h.innerHTML = "<b style='flex:1'>" + title + "</b>";
+    const mk = (t, fn) => { const b = document.createElement("button"); b.textContent = t; b.style.cssText = "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:1px 8px;cursor:pointer"; b.onclick = fn; return b; };
+    h.appendChild(mk("다시", onRetry)); h.appendChild(mk("접기", onCollapse));
+    panel.appendChild(h);
+    const d = document.createElement("div"); d.style.cssText = "opacity:.8;margin-top:4px"; d.textContent = msg; panel.appendChild(d);
+  }
+
   // ── EDI 이동등록(추가) 창: PMS 대기열을 출고처별로 표에 채운다. 저장은 사람이 누른다 ──
   async function runFill() {
     const W = unsafeWindow;
@@ -353,7 +364,7 @@
     const render = async () => {
       panel.innerHTML = "<b>LETUS PMS · EDI 자동입력</b><div style='opacity:.7'>불러오는 중…</div>";
       let rows;
-      try { rows = (await call("queue_list", {})).rows || []; } catch (e) { panel.innerHTML = "<b>LETUS PMS</b><div>대기열을 못 읽었어요: " + e.message + "</div>"; return; }
+      try { rows = (await call("queue_list", {})).rows || []; } catch (e) { lastCount = 0; errBox(panel, "LETUS PMS · EDI 자동입력", "대기열을 못 읽었어요: " + e.message, () => { GM_setValue("fillCollapsed", "1"); applyCollapse(); }, render); applyCollapse(); return; }
       rows.forEach((r) => { bySlip[r.note] = r; });
       lastCount = rows.length; applyCollapse();
       const g = {};
@@ -462,7 +473,7 @@
     const render = async () => {
       panel.innerHTML = "<b>LETUS PMS · 납품요청</b><div style='opacity:.7'>불러오는 중…</div>";
       let rows;
-      try { rows = (await call("req_list", {})).rows || []; } catch (e) { panel.innerHTML = "<b>LETUS PMS</b><div>요청 목록을 못 읽었어요: " + e.message + "</div>"; return; }
+      try { rows = (await call("req_list", {})).rows || []; } catch (e) { lastCount = 0; errBox(panel, "LETUS PMS · 납품요청", "요청 목록을 못 읽었어요: " + e.message, () => { GM_setValue("signCollapsed", "1"); applyCollapse(); }, render); applyCollapse(); return; }
       const g = {};
       rows.forEach((r) => { (g[r.edi_group] = g[r.edi_group] || { group: r.edi_group, local: r.edi_local, center: r.center, head: r, rows: [] }).rows.push(r); });
       const list = Object.values(g);
