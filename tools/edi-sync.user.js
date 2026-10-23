@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.13
+// @version      3.14
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -499,6 +499,25 @@
       if (d.getDay() === 0) d.setDate(d.getDate() + 1);
       return fmt(d);
     };
+    // EDI 서버의 희망일 규칙(마감시간·휴일)을 그대로 확인 — [등록] 때 EDI가 하는 검사와 같다
+    const serverOk = (wd) => {
+      try {
+        const today = fmt(new Date()); if (wd <= today) return false;
+        const r = W.ajaxExecuteComm("get", "EdiOthrSignList", "wantDate", "wantDate=" + wd + "&demdAttr=" + W.getDemdAttr(W.sDemcType, true));
+        if (!r) return true;
+        const same = r.instWorkDate === r.wantWorkDate, now = new Date();
+        if (String(r.wantHolyFlag) === "1") return false;
+        if (String(r.wantHolyFlag2) === "1" && String(r.instHolyFlag) === "1" && same) return false;
+        if (now.getHours() >= Number(r.wantWorkTime || 16)) {
+          const gap = Math.round((new Date(wd + "T12:00:00") - new Date(today + "T12:00:00")) / 86400000);
+          if (gap === 1) return false;
+          if (now.getDay() === 6 && same) return false;
+          if (String(r.wantHolyFlag2) === "1" && same) return false;
+        }
+        return true;
+      } catch (e) { return wd >= earliestWant(); }
+    };
+    const nextOk = (from) => { const d = new Date((from || fmt(new Date())) + "T12:00:00"); for (let i = 0; i < 14; i++) { const v = fmt(d); if (serverOk(v)) return v; d.setDate(d.getDate() + 1); } return earliestWant(); };
 
     // 작업장마다 납품기준수량(최소 / 11톤)을 읽어 PMS에 보낸다 (계정마다 하루 1번). 화면 표는 건드리지 않는다
     const syncMins = async () => {
@@ -560,8 +579,8 @@
         const d = document.createElement("div");
         d.style.cssText = "display:flex;align-items:center;gap:6px;padding:5px 0;border-top:1px solid rgba(255,255,255,.12)";
         const r = x.head;
-        const late = r.want_date && r.want_date < earliestWant();
-        d.innerHTML = "<div style='flex:1'>" + x.local + ". " + (x.center || "") + "<div style='opacity:.65'>" + x.rows.map((y) => y.pallet_code + " " + y.qty).join(" · ") + " · 희망 " + String(r.want_date || "").slice(5) + (r.want_time ? " " + r.want_time : "") + "</div>" + (late ? "<div style='color:#ffb4a8'>⚠ 마감(16시) 지남 — 희망일 " + earliestWant().slice(5) + " 이후로 바꿔야 등록돼요</div>" : "") + "</div>";
+        const late = r.want_date && !serverOk(r.want_date);
+        d.innerHTML = "<div style='flex:1'>" + x.local + ". " + (x.center || "") + "<div style='opacity:.65'>" + x.rows.map((y) => y.pallet_code + " " + y.qty).join(" · ") + " · 희망 " + String(r.want_date || "").slice(5) + (r.want_time ? " " + r.want_time : "") + "</div>" + (late ? "<div style='color:#ffb4a8'>⚠ 이 희망일은 EDI에서 막혀요(마감 16시·휴일) — " + nextOk(r.want_date).slice(5) + "로 바꿔야 등록돼요</div>" : "") + "</div>";
         const b = document.createElement("button");
         b.textContent = "채우기"; b.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:4px 10px;cursor:pointer";
         b.onclick = () => { fill(x).then(() => { GM_setValue("signCollapsed", "1"); applyCollapse(); }).catch((e) => alert("채우기 실패: " + e.message)); };
@@ -590,9 +609,10 @@
         if (hit < 0) { miss.push(y.pallet_code); continue; }
         S2.SetCellValue(hit, "CALL_VOLM", y.qty);
       }
-      let wd = r.want_date || earliestWant();
-      if (wd < earliestWant()) {
-        if (!confirm("희망일 " + wd.slice(5) + "은(는) 마감(16시)이 지나 EDI에서 막혀요.\n" + earliestWant().slice(5) + "로 바꿔서 채울까요? (취소하면 그대로 채워요)")) { /* 그대로 */ } else wd = earliestWant();
+      let wd = r.want_date || nextOk();
+      if (!serverOk(wd)) {
+        const nx = nextOk(wd);
+        if (confirm("희망일 " + wd.slice(5) + "은(는) EDI에서 막혀요(마감 16시·휴일).\n" + nx.slice(5) + "로 바꿔서 채울까요? (취소하면 그대로 채워요)")) wd = nx;
       }
       $("#WANT_DATE").val(wd);
       $("#WANT_TIME").val(TIME[r.want_time] || "");
