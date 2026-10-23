@@ -206,6 +206,17 @@ Deno.serve(async (req) => {
       if (error) return json({ error: error.message }, 500);
       return json({ ok: true, saved: (data || []).length });
     }
+    // 10) 납품기준수량(최소/11톤): 작업장·제품별
+    if (body.action === "mins_upsert") {
+      const now = new Date().toISOString();
+      const rows = (body.rows || []).filter((r) => r && Number.isInteger(r.local_no) && r.item).map((r) => ({
+        account, local_no: r.local_no, item: r.item, min1: Number.isFinite(r.min1) ? r.min1 : null, min2: Number.isFinite(r.min2) ? r.min2 : null, updated_at: now,
+      }));
+      if (!rows.length) return json({ error: "기준수량이 비어 있어요" }, 400);
+      const { error } = await db.from("aj_item_min").upsert(rows, { onConflict: "account,local_no,item" });
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true, upserted: rows.length });
+    }
     return json({ error: "unknown action" }, 400);
   } catch (e) {
     return json({ error: String(e) }, 500);

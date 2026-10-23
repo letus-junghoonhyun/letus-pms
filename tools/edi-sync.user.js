@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.10
+// @version      3.11
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -492,6 +492,33 @@
     pill.onclick = () => { GM_setValue("signCollapsed", "0"); applyCollapse(); };
     const TIME = { 오전: "10", 오후: "14" };
 
+    // 작업장마다 납품기준수량(최소 / 11톤)을 읽어 PMS에 보낸다 (계정마다 하루 1번). 화면 표는 건드리지 않는다
+    const syncMins = async () => {
+      const key = "mins_" + ACCOUNT;
+      if (GM_getValue(key) === fmt(new Date())) return;
+      const S2 = W.mySheet2;
+      const saveName = W.getSaveName ? W.getSaveName(S2) : "sSeq|sStatus|sDelete|ITEM_CODE|CALL_VOLM|REMV_VOLM|MIN1_VOLM|MIN2_VOLM";
+      const cols = saveName.split("|");
+      const codes = S2.GetComboInfo(0, "ITEM_CODE", "Code").split("|"), texts = S2.GetComboInfo(0, "ITEM_CODE", "Text").split("|");
+      const nameOf = (c) => { const i = codes.indexOf(c); return i >= 0 ? texts[i] : c; };
+      const locals = [...document.getElementById("demdNumb").options].map((o) => o.value).filter((v) => /^\d+$/.test(v) && !/폐쇄/.test(document.querySelector('#demdNumb option[value="' + v + '"]').text));
+      const out = [];
+      for (const ln of locals) {
+        const body = "S_SAVENAME=" + encodeURIComponent(saveName) + "&demdCode=" + encodeURIComponent(ACCOUNT) + "&demdNumb=" + ln;
+        const text = await (await fetch("/edi/othr/OTHR_SIGN_ITEM_search.do", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, body, credentials: "same-origin" })).text();
+        const at = text.indexOf("<?xml"); if (at < 0) continue;
+        const xml = new DOMParser().parseFromString(text.slice(at), "text/xml");
+        xml.querySelectorAll("TR").forEach((tr) => {
+          const o = {}; tr.querySelectorAll("TD").forEach((td, i) => { o[cols[i]] = td.textContent; });
+          if (!o.ITEM_CODE) return;
+          const m1 = parseInt(o.MIN1_VOLM, 10), m2 = parseInt(o.MIN2_VOLM, 10);
+          out.push({ local_no: parseInt(ln, 10), item: nameOf(o.ITEM_CODE), min1: Number.isFinite(m1) ? m1 : null, min2: Number.isFinite(m2) ? m2 : null });
+        });
+        await wait(200);
+      }
+      if (out.length) { await call("mins_upsert", { rows: out }); GM_setValue(key, fmt(new Date())); }
+    };
+
     // EDI 등록 응답을 가로채서 PMS에 알린다 (화면의 원래 동작은 그대로)
     const orig = W.ajaxExecute;
     W.ajaxExecute = function (url) {
@@ -563,6 +590,8 @@
       if (r.cars_oper === "03") alert("내방은 EDI에서 '내방지점'을 직접 골라 주세요.");
     };
     render();
+    // 제품 콤보가 준비되면 기준수량 수집 (실패해도 화면 동작에는 영향 없음)
+    if (await until(() => W.mySheet2.GetComboInfo(0, "ITEM_CODE", "Code"), 20000)) syncMins().catch(() => {});
   }
 
   // Tampermonkey 메뉴: 1시간 제한을 무시하고 지금 다시 동기화

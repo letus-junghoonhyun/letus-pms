@@ -1177,7 +1177,7 @@ function EditShipmentModal({ s, palletTypes, onClose, onSave, onCancel }) {
 }
 
 // 여러 파렛트 유형 + 수량을 한 번에 입력 (혼합). maxOf 주면 그 한도까지만(보유수량 제한).
-function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf, maxLabel = "보유", hintOf, hintLabel = "EDI", imgOf }) {
+function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.tealBg, maxOf, maxLabel = "보유", hintOf, hintLabel = "EDI", imgOf, presetsOf }) {
   const [big, setBig] = useState(null);
   const set = (code, v) => setQtys((q) => ({ ...q, [code]: v }));
   return (
@@ -1200,6 +1200,9 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
               <input type="number" value={v} disabled={disabled} onChange={(e) => { let n = Math.max(0, parseInt(e.target.value) || 0); if (max !== Infinity) n = Math.min(n, max); set(p.code, n); }} style={{ width: 56, textAlign: "center", fontSize: 16, fontWeight: 600, border: "none", outline: "none", background: "transparent" }} />
               <button disabled={disabled || v >= max} onClick={() => set(p.code, Math.min(max, v + 1))} style={{ background: "none", border: "none", fontSize: 20, color, cursor: disabled || v >= max ? "default" : "pointer" }}>+</button>
             </div>
+            {presetsOf && presetsOf(p.code).length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 3, flexShrink: 0 }}>
+              {presetsOf(p.code).map((b) => <button key={b.label} onClick={() => set(p.code, b.qty)} title="EDI 납품기준수량" style={{ fontSize: 11, padding: "2px 7px", borderRadius: 6, border: `1px solid ${v === b.qty ? color : C.border}`, background: v === b.qty ? bg : "#fff", color: C.text, cursor: "pointer", whiteSpace: "nowrap" }}>{b.label}</button>)}
+            </div>}
           </div>
         );
       })}
@@ -1840,6 +1843,8 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
   const [note, setNote] = useState(""); const [busy, setBusy] = useState(false);
   const { idx: ediIdx } = useEdiIndex();
   const pinfo = usePalletInfo();
+  const [mins, setMins] = useState({}); // account|local|item → { min1, min2 }  (EDI 납품기준수량)
+  useEffect(() => { supabase.from("aj_item_min").select("account,local_no,item,min1,min2").limit(5000).then(({ data }) => { const o = {}; (data || []).forEach((r) => { o[r.account + "|" + r.local_no + "|" + r.item] = r; }); setMins(o); }); }, []);
   const wpList = useMemo(() => (ediIdx ? ediIdx.wps.filter((w) => w.no > 0 && !w.closed).sort((a, b) => (a.kind === "센터" ? 0 : 1) - (b.kind === "센터" ? 0 : 1) || a.no - b.no) : []), [ediIdx]);
   const [wpNo, setWpNo] = useState(null);
   const wp = wpList.find((w) => w.no === wpNo) || null;
@@ -1881,7 +1886,13 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
           <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isSupply ? "공급 받는 작업장" : "회수 보내는 작업장"} <span style={{ color: C.hint, fontSize: 11 }}>· EDI 작업장 전체 검색</span></div>
           <div style={{ marginBottom: 16 }}><WorkplacePicker wps={wpList} value={wpNo} onChange={setWpNo} width="100%" placeholder={ediIdx ? "센터·작업장 (이름·번호)" : "작업장 목록 불러오는 중…"} /></div>
           <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· 사진을 누르면 크게 보여요</span></div>
-          <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isSupply ? C.teal : C.amber} bg={isSupply ? C.tealBg : C.amberBg} imgOf={(c) => pinfo[c] || null} />
+          <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isSupply ? C.teal : C.amber} bg={isSupply ? C.tealBg : C.amberBg} imgOf={(c) => pinfo[c] || null} presetsOf={(c) => {
+            if (!isSupply) return [];
+            const e = ediLine(c); const m = e && e.edi_account ? mins[e.edi_account + "|" + e.edi_local + "|" + c] : null;
+            if (!m) return [];
+            return [m.min1 ? { label: "최소 " + m.min1, qty: m.min1 } : null, m.min2 ? { label: "11톤 " + m.min2, qty: m.min2 } : null].filter(Boolean);
+          }} />
+          {isSupply && wp && Object.keys(mins).length === 0 && <div style={{ fontSize: 11, color: C.hint, marginTop: -10, marginBottom: 12 }}>EDI 납품요청 화면을 한 번 열면 최소·11톤 기준수량 버튼이 생겨요.</div>}
           {isSupply && <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14, background: "#fafbfc" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, marginBottom: toEdi ? 10 : 0 }}><input type="checkbox" checked={toEdi} onChange={(e) => setToEdi(e.target.checked)} /> EDI 납품요청으로 보내기</label>
             {toEdi && <>
