@@ -1216,6 +1216,14 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
     </div>
   );
 }
+// EDI 납품요청 마감: 16시 이후엔 다음날 요청 불가, 토요일 16시 이후엔 월요일도 불가, 일요일은 희망일로 안 잡음 (공휴일은 EDI가 확인)
+const EDI_CUTOFF_HOUR = 16;
+const ediEarliestWant = (now = new Date()) => {
+  const d = new Date(now); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() + 1);
+  if (now.getHours() >= EDI_CUTOFF_HOUR) { d.setDate(d.getDate() + 1); if (now.getDay() === 6) d.setDate(d.getDate() + 1); }
+  if (d.getDay() === 0) d.setDate(d.getDate() + 1);
+  return localD(d.toISOString());
+};
 // EDI 납품기준수량 기본값 (최소 / 11톤). EDI 납품요청 화면에서 작업장별로 읽은 값이 있으면 그걸 우선
 const ITEM_MIN_DEFAULT = { "18F": { min1: 96, min2: 160 }, "14C": { min1: null, min2: 200 }, "11A": { min1: 192, min2: 256 }, "15A": { min1: 130, min2: 200 }, "23E": { min1: 50, min2: 90 } };
 // 파렛트·단가(aj_pallet)의 이미지·이름 (유형 헷갈림 방지)
@@ -1851,7 +1859,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
   const [wpNo, setWpNo] = useState(null);
   const wp = wpList.find((w) => w.no === wpNo) || null;
   const center = wp ? (wp.pms_center || ediClean(wp.name)) : null;
-  const tomorrow = localD(new Date(Date.now() + 86400000).toISOString());
+  const tomorrow = ediEarliestWant(); // 지금 요청 가능한 가장 빠른 희망일
   const [want, setWant] = useState({ date: tomorrow, time: "", oper: "01", tons: "05", ctype: "00", phone: "" });
   const [toEdi, setToEdi] = useState(true);
   const setW = (k, v) => setWant((o) => ({ ...o, [k]: v }));
@@ -1867,7 +1875,9 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
     setBusy(true);
     if (!wp) { setBusy(false); alert("작업장을 고르세요."); return; }
     const useEdi = isSupply && toEdi;
-    if (useEdi && want.date <= localD(new Date().toISOString())) { setBusy(false); alert("EDI 납품요청은 희망일이 내일 이후여야 해요."); return; }
+    const earliest = ediEarliestWant();
+    if (useEdi && want.date < earliest) { setBusy(false); alert(`지금은 ${earliest.slice(5)}부터 요청할 수 있어요. (EDI 마감: ${EDI_CUTOFF_HOUR}시 이후엔 다음날 납품 요청 불가)`); setW("date", earliest); return; }
+    if (useEdi && new Date(want.date + "T12:00:00").getDay() === 0 && !window.confirm("희망일이 일요일이에요. EDI에서 막힐 수 있어요. 그래도 접수할까요?")) { setBusy(false); return; }
     const lines = qtysToLines(qtys).map((l) => { const e = useEdi ? ediLine(l.pallet) : null; return e && e.edi_account ? { ...l, edi_account: e.edi_account, edi_local: e.edi_local } : l; });
     const ok = await createAjRequest({ type, lines, center, note, edi: isSupply ? { wp_no: wp.no, want_date: want.date, want_time: want.time, cars_oper: want.oper, cars_tons: want.oper === "03" ? null : want.tons, cars_type: want.ctype, phone: want.phone } : null });
     setBusy(false); if (ok) { setQtys({}); setNote(""); }
@@ -1906,7 +1916,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
                 <label style={{ fontSize: 12, color: C.sub }}>현장 연락처<input value={want.phone} onChange={(e) => setW("phone", e.target.value)} placeholder="010-…" style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 8px", border: `1px solid ${C.border}`, borderRadius: 7, marginTop: 3 }} /></label>
               </div>
               {wp && qtysToLines(qtys).map((l) => { const e = ediLine(l.pallet); return <div key={l.pallet} style={{ fontSize: 11.5, color: e && e.edi_account ? C.sub : C.red }}>{l.pallet}: {e && e.edi_account ? e.accName + " 계정 · 작업장 " + e.edi_local : (e ? e.miss : "") + " → EDI로 안 보내져요"}</div>; })}
-              <div style={{ fontSize: 11, color: C.hint, marginTop: 6, lineHeight: 1.5 }}>접수하면 EDI 납품요청/조회 화면 오른쪽 위 LETUS 상자에 떠요 → [채우기] → [등록]. 마감시간 이후 익일 요청·휴일은 EDI가 막아요.</div>
+              <div style={{ fontSize: 11, color: C.hint, marginTop: 6, lineHeight: 1.5 }}>접수하면 EDI 납품요청/조회 화면 오른쪽 위 LETUS 상자에 떠요 → [채우기] → [등록]. EDI 마감: <b>{EDI_CUTOFF_HOUR}시 전에 EDI [등록]</b>까지 해야 다음날 납품돼요. 지금 가능한 가장 빠른 희망일 {tomorrow.slice(5)}. 공휴일은 EDI가 확인해요.</div>
             </>}
           </div>}
           {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 12, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}

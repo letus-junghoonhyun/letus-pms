@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.11
+// @version      3.12
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -491,6 +491,13 @@
     };
     pill.onclick = () => { GM_setValue("signCollapsed", "0"); applyCollapse(); };
     const TIME = { 오전: "10", 오후: "14" };
+    // EDI 마감(16시): 지금 [등록]할 때 가능한 가장 빠른 희망일 (PMS와 같은 규칙)
+    const earliestWant = () => {
+      const now = new Date(), d = new Date(now); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() + 1);
+      if (now.getHours() >= 16) { d.setDate(d.getDate() + 1); if (now.getDay() === 6) d.setDate(d.getDate() + 1); }
+      if (d.getDay() === 0) d.setDate(d.getDate() + 1);
+      return fmt(d);
+    };
 
     // 작업장마다 납품기준수량(최소 / 11톤)을 읽어 PMS에 보낸다 (계정마다 하루 1번). 화면 표는 건드리지 않는다
     const syncMins = async () => {
@@ -552,7 +559,8 @@
         const d = document.createElement("div");
         d.style.cssText = "display:flex;align-items:center;gap:6px;padding:5px 0;border-top:1px solid rgba(255,255,255,.12)";
         const r = x.head;
-        d.innerHTML = "<div style='flex:1'>" + x.local + ". " + (x.center || "") + "<div style='opacity:.65'>" + x.rows.map((y) => y.pallet_code + " " + y.qty).join(" · ") + " · 희망 " + String(r.want_date || "").slice(5) + (r.want_time ? " " + r.want_time : "") + "</div></div>";
+        const late = r.want_date && r.want_date < earliestWant();
+        d.innerHTML = "<div style='flex:1'>" + x.local + ". " + (x.center || "") + "<div style='opacity:.65'>" + x.rows.map((y) => y.pallet_code + " " + y.qty).join(" · ") + " · 희망 " + String(r.want_date || "").slice(5) + (r.want_time ? " " + r.want_time : "") + "</div>" + (late ? "<div style='color:#ffb4a8'>⚠ 마감(16시) 지남 — 희망일 " + earliestWant().slice(5) + " 이후로 바꿔야 등록돼요</div>" : "") + "</div>";
         const b = document.createElement("button");
         b.textContent = "채우기"; b.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:4px 10px;cursor:pointer";
         b.onclick = () => { fill(x).then(() => { GM_setValue("signCollapsed", "1"); applyCollapse(); }).catch((e) => alert("채우기 실패: " + e.message)); };
@@ -577,7 +585,11 @@
         if (hit < 0) { miss.push(y.pallet_code); continue; }
         S2.SetCellValue(hit, "CALL_VOLM", y.qty);
       }
-      if (r.want_date) $("#WANT_DATE").val(r.want_date);
+      let wd = r.want_date || earliestWant();
+      if (wd < earliestWant()) {
+        if (!confirm("희망일 " + wd.slice(5) + "은(는) 마감(16시)이 지나 EDI에서 막혀요.\n" + earliestWant().slice(5) + "로 바꿔서 채울까요? (취소하면 그대로 채워요)")) { /* 그대로 */ } else wd = earliestWant();
+      }
+      $("#WANT_DATE").val(wd);
       $("#WANT_TIME").val(TIME[r.want_time] || "");
       if (r.cars_oper === "03") $("#carsOper2").prop("checked", true).trigger("click"); else $("#carsOper1").prop("checked", true).trigger("click");
       $("#carsTons").val(r.cars_tons || "");
