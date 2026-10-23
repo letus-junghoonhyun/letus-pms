@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.12
+// @version      3.13
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
 // @match        http://edi.ajuprs.com/main_frame.do
 // @match        http://edi.ajuprs.com/edi/ware/WARE_MOVE_DETL.do*
 // @match        http://edi.ajuprs.com/edi/othr/OTHR_SIGN_LIST.do*
+// @match        http://edi.ajuprs.com/edi/ware/WARE_MOVE_LIST.do*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -564,7 +565,11 @@
         const b = document.createElement("button");
         b.textContent = "채우기"; b.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:4px 10px;cursor:pointer";
         b.onclick = () => { fill(x).then(() => { GM_setValue("signCollapsed", "1"); applyCollapse(); }).catch((e) => alert("채우기 실패: " + e.message)); };
-        d.appendChild(b); panel.appendChild(d);
+        const sk = document.createElement("button");
+        sk.textContent = "빼기"; sk.title = "EDI로 안 보낼 요청 (테스트·취소된 건)";
+        sk.style.cssText = "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:3px 8px;cursor:pointer";
+        sk.onclick = async () => { if (!confirm("이 요청을 EDI 납품요청 목록에서 뺄까요? (PMS 요청은 그대로 남아요)")) return; try { await call("req_skip", { group: x.group }); render(); } catch (e) { alert("빼기 실패: " + e.message); } };
+        d.appendChild(b); d.appendChild(sk); panel.appendChild(d);
       });
       const rb = document.createElement("button");
       rb.textContent = "새로고침"; rb.style.cssText = "margin-top:6px;background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:3px 10px;cursor:pointer";
@@ -606,9 +611,65 @@
     if (await until(() => W.mySheet2.GetComboInfo(0, "ITEM_CODE", "Code"), 20000)) syncMins().catch(() => {});
   }
 
+  // ── EDI 이동조회/관리: 관리자가 승인한 수정요청을 찾아 보여준다. 수정·저장은 사람이 한다 ──
+  async function runFix() {
+    const W = unsafeWindow;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (fn, ms = 15000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { try { if (fn()) return true; } catch (e) {} await wait(300); } return false; };
+    if (!(await until(() => W.mySheet1 && W.$ && W.$("#demdCode").val()))) return;
+    if (!GM_getValue("fnUrl") || !GM_getValue("anon") || !GM_getValue("token")) return;
+    ACCOUNT = W.$("#demdCode").val(); TAG = "이동 수정";
+    const $ = W.$;
+    let rows;
+    try { rows = (await call("fix_list", {})).rows || []; } catch (e) { return; }
+    if (!rows.length) return; // 고칠 건이 없으면 상자를 띄우지 않는다
+    const panel = document.createElement("div");
+    panel.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:10px 12px;border-radius:10px;width:320px;max-height:70vh;overflow:auto;box-shadow:0 4px 14px rgba(0,0,0,.3)";
+    const pill = document.createElement("div");
+    pill.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;color:#fff;background:#A32D2D;font:12px/1.5 sans-serif;padding:5px 12px;border-radius:14px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.3);display:none";
+    document.body.appendChild(panel); document.body.appendChild(pill);
+    const collapsed = () => GM_getValue("fixCollapsed") === "1";
+    const applyCollapse = () => { const c = collapsed(); panel.style.display = c ? "none" : "block"; pill.style.display = c ? "block" : "none"; pill.textContent = "LETUS ▾ 수정 " + rows.length + "건"; };
+    pill.onclick = () => { GM_setValue("fixCollapsed", "0"); applyCollapse(); };
+    draggable([panel, pill], "posFixList");
+    const diffTxt = (f) => {
+      const b = {}, a = {}; (f.before_lines || []).forEach((l) => { b[l.item] = l.qty; }); (f.after_lines || []).forEach((l) => { a[l.item] = l.qty; });
+      return [...new Set([...Object.keys(b), ...Object.keys(a)])].map((it) => !(it in b) ? it + " +" + a[it] + " (새 이동, 자동입력 대기열)" : !(it in a) || a[it] === 0 ? it + " " + b[it] + " → 0" : b[it] !== a[it] ? it + " " + b[it] + " → " + a[it] : null).filter(Boolean).join("<br>");
+    };
+    const find = async (f) => {
+      const d = String(f.move_date || "");
+      if ($("#begnDate").length) { $("#begnDate").val(d); $("#enddDate").val(d); }
+      W.doAction("search");
+      await until(() => W.mySheet1.RowCount() > 0, 10000); await wait(300);
+      const S = W.mySheet1; let hit = -1;
+      for (let i = S.GetDataFirstRow(); i <= S.LastRow(); i++) if (S.GetCellValue(i, "MOVE_CODE") === f.move_code) { S.SetRowBackColor(i, "#FFF2A8"); if (hit < 0) hit = i; }
+      if (hit < 0) { alert("이동코드 " + f.move_code + "를 " + d + " 조회 결과에서 못 찾았어요. 조회 조건(출고처·이동구분)을 확인해 주세요."); return; }
+      S.SelectCell(hit, "MOVE_VOLM");
+      alert("노란 줄이 고칠 이동이에요.\n\n" + diffTxt(f).replace(/<br>/g, "\n") + "\n\n수량을 고치고 [수정]으로 저장한 뒤, 상자에서 [반영 완료]를 눌러 주세요.");
+    };
+    panel.innerHTML = "";
+    const h = document.createElement("div"); h.style.cssText = "display:flex;align-items:center;gap:6px";
+    h.innerHTML = "<b style='flex:1'>LETUS PMS · 승인된 이동 수정 <span style='opacity:.7;font-weight:400'>(" + ACCOUNT + ")</span></b>";
+    const t = document.createElement("button"); t.textContent = "접기"; t.style.cssText = "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:1px 8px;cursor:pointer";
+    t.onclick = () => { GM_setValue("fixCollapsed", "1"); applyCollapse(); }; h.appendChild(t); panel.appendChild(h);
+    rows.forEach((f) => {
+      const d = document.createElement("div");
+      d.style.cssText = "padding:6px 0;border-top:1px solid rgba(255,255,255,.12)";
+      d.innerHTML = "<div>" + String(f.move_date || "").slice(5) + " · " + (f.from_name || "") + " → " + (f.to_name || "") + " <span style='opacity:.6'>" + f.move_code + "</span></div><div style='color:#ffd27a'>" + diffTxt(f) + "</div>" + (f.reason ? "<div style='opacity:.65'>사유: " + f.reason + "</div>" : "");
+      const row = document.createElement("div"); row.style.cssText = "display:flex;gap:6px;margin-top:4px";
+      const b1 = document.createElement("button"); b1.textContent = "찾기"; b1.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:3px 10px;cursor:pointer";
+      b1.onclick = () => find(f).catch((e) => alert("찾기 실패: " + e.message));
+      const b2 = document.createElement("button"); b2.textContent = "반영 완료"; b2.style.cssText = "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:3px 8px;cursor:pointer";
+      b2.onclick = async () => { if (!confirm("EDI에서 수정을 저장했나요? PMS에 '반영'으로 표시해요.")) return; try { await call("fix_done", { id: f.id }); d.remove(); rows = rows.filter((x) => x.id !== f.id); applyCollapse(); say("수정 반영 완료로 표시했어요"); } catch (e) { alert(e.message); } };
+      row.appendChild(b1); row.appendChild(b2); d.appendChild(row); panel.appendChild(d);
+    });
+    applyCollapse();
+  }
+
   // Tampermonkey 메뉴: 1시간 제한을 무시하고 지금 다시 동기화
   GM_registerMenuCommand("LETUS PMS · 지금 다시 동기화", () => { GM_setValue("lastRunMap", "{}"); location.reload(); });
 
+  if (/WARE_MOVE_LIST.do/.test(location.pathname)) { runFix().catch((e) => say("수정 목록 실패: " + e.message)); return; }
   if (/OTHR_SIGN_LIST.do/.test(location.pathname)) { runSign().catch((e) => say("납품요청 실패: " + e.message)); return; }
   if (/WARE_MOVE_DETL.do/.test(location.pathname)) { runFill().catch((e) => say("자동입력 실패: " + e.message)); return; }
   run().catch((e) => say("동기화 실패: " + e.message));

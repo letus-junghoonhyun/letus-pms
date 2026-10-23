@@ -194,7 +194,7 @@ Deno.serve(async (req) => {
     // 8) AJ 공급요청 → EDI 납품요청 대기열 (납품요청/조회 화면 스크립트가 읽는다)
     if (body.action === "req_list") {
       const { data, error } = await db.from("aj_request").select("id,pallet_code,qty,center,wp_no,want_date,want_time,cars_oper,cars_tons,cars_type,phone,note,edi_group,edi_local,requested_at")
-        .eq("edi_account", account).eq("edi_status", "대기").order("requested_at").limit(500);
+        .eq("edi_account", account).eq("edi_status", "대기").eq("status", "요청").order("requested_at").limit(500); // PMS에서 이미 처리·완료한 요청은 안 보여준다
       if (error) return json({ error: error.message }, 500);
       return json({ rows: data || [] });
     }
@@ -216,6 +216,26 @@ Deno.serve(async (req) => {
       const { error } = await db.from("aj_item_min").upsert(rows, { onConflict: "account,local_no,item" });
       if (error) return json({ error: error.message }, 500);
       return json({ ok: true, upserted: rows.length });
+    }
+    // 9-1) 납품요청 상자에서 [빼기]: EDI로 안 보낼 묶음
+    if (body.action === "req_skip") {
+      if (!body.group) return json({ error: "group 없음" }, 400);
+      const { error } = await db.from("aj_request").update({ edi_status: "취소" }).eq("edi_account", account).eq("edi_group", body.group).eq("edi_status", "대기");
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true });
+    }
+    // 11) 승인된 이동 수정요청 (이동조회/관리 화면 상자에서 찾아 고칠 건)
+    if (body.action === "fix_list") {
+      const { data, error } = await db.from("edi_fix").select("id,move_code,move_date,from_name,to_name,before_lines,after_lines,reason,decide_note")
+        .eq("account", account).eq("status", "승인").order("move_date").limit(200);
+      if (error) return json({ error: error.message }, 500);
+      return json({ rows: data || [] });
+    }
+    if (body.action === "fix_done") {
+      if (!body.id) return json({ error: "id 없음" }, 400);
+      const { error } = await db.from("edi_fix").update({ status: "반영", applied_at: new Date().toISOString() }).eq("id", body.id).eq("account", account).eq("status", "승인");
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true });
     }
     return json({ error: "unknown action" }, 400);
   } catch (e) {
