@@ -1216,6 +1216,8 @@ function PalletQtyEditor({ palletTypes, qtys, setQtys, color = C.teal, bg = C.te
     </div>
   );
 }
+// EDI 납품기준수량 기본값 (최소 / 11톤). EDI 납품요청 화면에서 작업장별로 읽은 값이 있으면 그걸 우선
+const ITEM_MIN_DEFAULT = { "18F": { min1: 96, min2: 160 }, "14C": { min1: null, min2: 200 }, "11A": { min1: 192, min2: 256 }, "15A": { min1: 130, min2: 200 }, "23E": { min1: 50, min2: 90 } };
 // 파렛트·단가(aj_pallet)의 이미지·이름 (유형 헷갈림 방지)
 function usePalletInfo() {
   const [m, setM] = useState({});
@@ -1888,12 +1890,11 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
           <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· 사진을 누르면 크게 보여요</span></div>
           <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={isSupply ? C.teal : C.amber} bg={isSupply ? C.tealBg : C.amberBg} imgOf={(c) => pinfo[c] || null} presetsOf={(c) => {
             if (!isSupply) return [];
-            const e = ediLine(c); const m = e && e.edi_account ? mins[e.edi_account + "|" + e.edi_local + "|" + c] : null;
+            const e = ediLine(c); const m = (e && e.edi_account && mins[e.edi_account + "|" + e.edi_local + "|" + c]) || ITEM_MIN_DEFAULT[c];
             if (!m) return [];
             return [m.min1 ? { label: "최소 " + m.min1, qty: m.min1 } : null, m.min2 ? { label: "11톤 " + m.min2, qty: m.min2 } : null].filter(Boolean);
           }} />
-          {isSupply && wp && Object.keys(mins).length === 0 && <div style={{ fontSize: 11, color: C.hint, marginTop: -10, marginBottom: 12 }}>EDI 납품요청 화면을 한 번 열면 최소·11톤 기준수량 버튼이 생겨요.</div>}
-          {isSupply && <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14, background: "#fafbfc" }}>
+                    {isSupply && <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 14, background: "#fafbfc" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, marginBottom: toEdi ? 10 : 0 }}><input type="checkbox" checked={toEdi} onChange={(e) => setToEdi(e.target.checked)} /> EDI 납품요청으로 보내기</label>
             {toEdi && <>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
