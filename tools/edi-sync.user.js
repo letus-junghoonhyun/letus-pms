@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.9
+// @version      3.10
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -315,6 +315,38 @@
       : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행(어제까지)${mvTxt}(오늘까지)`, st.abort || st.failed || !!mvErr);
   }
 
+  // 상자·알약을 꾹 눌러 끌어서 옮기기. 위치는 화면마다 기억, 펼친 상자와 접힌 알약이 같은 자리에 뜬다
+  function draggable(els, key) {
+    const place = (x, y) => {
+      x = Math.max(0, Math.min(x, window.innerWidth - 60)); y = Math.max(0, Math.min(y, window.innerHeight - 30));
+      els.forEach((el) => { el.style.left = x + "px"; el.style.top = y + "px"; el.style.right = "auto"; });
+    };
+    try { const pos = JSON.parse(GM_getValue(key) || "null"); if (pos) place(pos.x, pos.y); } catch (e) {}
+    els.forEach((el) => {
+      let st = null, moved = false;
+      el.addEventListener("mousedown", (e) => {
+        if (e.button !== 0 || /BUTTON|INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+        const r = el.getBoundingClientRect();
+        st = { dx: e.clientX - r.left, dy: e.clientY - r.top, x0: e.clientX, y0: e.clientY }; moved = false;
+        const mv = (ev) => {
+          if (!st) return;
+          if (!moved && Math.abs(ev.clientX - st.x0) + Math.abs(ev.clientY - st.y0) < 5) return;
+          moved = true; el.style.cursor = "grabbing"; ev.preventDefault();
+          place(ev.clientX - st.dx, ev.clientY - st.dy);
+        };
+        const up = () => {
+          document.removeEventListener("mousemove", mv); document.removeEventListener("mouseup", up);
+          el.style.cursor = "";
+          if (moved) { const r2 = el.getBoundingClientRect(); GM_setValue(key, JSON.stringify({ x: Math.round(r2.left), y: Math.round(r2.top) })); }
+          st = null;
+        };
+        document.addEventListener("mousemove", mv); document.addEventListener("mouseup", up);
+      });
+      // 끌어서 옮긴 직후의 클릭(알약 펼치기)은 무시
+      el.addEventListener("click", (e) => { if (moved) { e.stopImmediatePropagation(); e.preventDefault(); moved = false; } }, true);
+    });
+  }
+
   // 상자 오류 표시: 접기·다시 시도 버튼을 항상 둔다
   function errBox(panel, title, msg, onCollapse, onRetry) {
     panel.innerHTML = "";
@@ -352,8 +384,9 @@
     };
     const pill = document.createElement("div");
     pill.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:5px 12px;border-radius:14px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.3);display:none";
-    pill.title = "펼치기"; pill.onclick = () => { GM_setValue("fillCollapsed", "0"); applyCollapse(); };
+    pill.title = "펼치기 · 꾹 눌러 끌면 옮겨져요"; pill.onclick = () => { GM_setValue("fillCollapsed", "0"); applyCollapse(); };
     document.body.appendChild(pill);
+    draggable([panel, pill], "posFill");
     const applyCollapse = () => {
       const c = collapsed();
       panel.style.display = c ? "none" : "block";
@@ -446,6 +479,8 @@
     const pill = document.createElement("div");
     pill.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;color:#fff;font:12px/1.5 sans-serif;padding:5px 12px;border-radius:14px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.3);display:none";
     document.body.appendChild(panel); document.body.appendChild(pill);
+    pill.title = "펼치기 · 꾹 눌러 끌면 옮겨져요";
+    draggable([panel, pill], "posSign");
     let lastCount = 0, current = null;
     const collapsed = () => GM_getValue("signCollapsed") === "1";
     const applyCollapse = () => {
