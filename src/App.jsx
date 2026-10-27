@@ -1438,7 +1438,6 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
   }, [ediIdx]); // eslint-disable-line
   const [recent, setRecent] = useState(readRecent);
   const recentRoutes = recent.map(([f, t]) => ({ f: wpList.find((w) => w.no === f), t: wpList.find((w) => w.no === t) })).filter((r) => r.f && r.t);
-  const swap = () => { setFromNo(toNo); setToNo(fromNo); };
   const fromStock = useWpStock(fromWp, ships, ediIdx);
   const hintOf = fromStock ? (code) => fromStock.items[code] || 0 : undefined;
   const total = qtysTotal(qtys);
@@ -1473,9 +1472,7 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
         <div style={lbl}>출고처 <span style={{ color: C.hint, fontSize: 11 }}>· 보내는 곳 (센터·시공팀·업체 검색)</span></div>
         <WorkplacePicker wps={wpList} value={fromNo} onChange={setFromNo} width="100%" placeholder={ediIdx ? "보내는 곳 (이름·번호)" : "작업장 목록 불러오는 중…"} />
         {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>현재고(EDI {(fromStock.date || "").slice(5)} 기준 + 당일 이동·PMS 예정): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
-        <div style={{ display: "flex", justifyContent: "center", margin: "8px 0" }}>
-          <button onClick={swap} disabled={!fromNo && !toNo} title="출고처와 입고처 바꾸기 (반납 등록할 때)" style={{ ...btnGhost, padding: "3px 12px", fontSize: 13 }}>↓ ⇅ 바꾸기</button>
-        </div>
+        <div style={{ textAlign: "center", color: C.hint, margin: "6px 0" }}>↓</div>
         <div style={lbl}>입고처 <span style={{ color: C.hint, fontSize: 11 }}>· 받는 곳</span></div>
         <WorkplacePicker wps={wpList} value={toNo} onChange={setToNo} width="100%" filter={(w) => w.no !== fromNo} placeholder="받는 곳 (이름·번호)" />
         {kindLabel && <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
