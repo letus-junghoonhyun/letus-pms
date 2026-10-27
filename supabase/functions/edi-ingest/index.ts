@@ -278,6 +278,22 @@ Deno.serve(async (req) => {
       await db.from("aj_move").update({ conf: "승인" }).eq("account", account).in("move_code", codes.slice(0, 1000));
       return json({ ok: true, done: n });
     }
+    // 15) 납품요청 목록 (EDI 납품요청/조회 — EDI에서 직접 넣은 요청 포함)
+    if (body.action === "calls_upsert") {
+      const now = new Date().toISOString();
+      const rows = (body.rows || []).filter((r) => r && r.call_code && r.item).map((r) => ({
+        account, call_code: r.call_code, item: r.item, local_no: Number.isInteger(r.local_no) ? r.local_no : null, post_name: r.post_name || null,
+        want_date: r.want_date || null, want_time: r.want_time || null, cntr_type: r.cntr_type || null, cars_oper: r.cars_oper || null,
+        call_volm: Number.isFinite(r.call_volm) ? r.call_volm : null, inst_date: r.inst_date || null, inst_empn: r.inst_empn || null, chrg_name: r.chrg_name || null, synced_at: now,
+      }));
+      for (let i = 0; i < rows.length; i += 500) {
+        const { error } = await db.from("aj_call").upsert(rows.slice(i, i + 500), { onConflict: "account,call_code,item" });
+        if (error) return json({ error: error.message }, 500);
+      }
+      // 이번 조회 기간 안에서 EDI에서 사라진(삭제된) 요청은 정리
+      if (body.from) await db.from("aj_call").delete().eq("account", account).gte("inst_date", body.from).lt("synced_at", now);
+      return json({ ok: true, upserted: rows.length });
+    }
     return json({ error: "unknown action" }, 400);
   } catch (e) {
     return json({ error: String(e) }, 500);

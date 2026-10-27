@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.15
+// @version      3.16
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -261,6 +261,30 @@
     // ── 1-0) 자동확인: 이동일 다음날까지 받는 쪽이 안 누른 건 ──
     if (!st.abort) { try { await call("receipt_auto", {}); } catch (e) { /* 다음 동기화 때 다시 */ } }
 
+    // ── 1-0-1) 납품요청 목록 (최근 31일 등록분) ──
+    let callTxt = "";
+    if (!st.abort) {
+      try {
+        const ITEM = { B0114002: "14C", B0118001: "18F", B0112001: "12A", B0115001: "15A", B0157009: "23E", B0111001: "11A", B0111002: "11B", B0111005: "11C", B0111006: "11D", B0111007: "11G", B0111008: "11S", B0111009: "11W", B0111010: "11J", B0111011: "11N" };
+        const CNTR = { "00": "보류", "01": "등록", "02": "접수", "03": "처리중", "04": "처리중", "05": "완료" };
+        const CC = "sSeq|DEMD_CODE|DEMD_NUMB|DEMD_NAME|POST_NAME|CHRG_NAME|CHRG_TELN|CHRG_HPNO|CHRG_ADDR|POST_CODE|CALL_CODE|WANT_DATE|WANT_TIME|CNTR_TYPE|CARS_OPER|ITEM_CODE|MIN1_VOLM|MIN2_VOLM|CALL_VOLM|DETL_CENT|DETL_CENT_NAME|INST_DATE|INST_EMPN|TAKE_DESC|INST_DESC|INST_DESC_VIEW".split("|");
+        const cf = fmt(addDays(new Date(), -30)), ct = fmt(new Date());
+        const body = "S_SAVENAME=" + CC.join("|") + "&topDemdNumb=&dateType=INST_DATE&begnDate=" + cf + "&enddDate=" + ct + "&demdCode=" + encodeURIComponent(demd.code);
+        const text = await (await fetch("/prs/menuCommon/comm/listXml/EdiOthrSignList-othrSignList.do", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, body, credentials: "same-origin" })).text();
+        if (text.indexOf("<?xml") >= 0) {
+          const xml = new DOMParser().parseFromString(text.slice(text.indexOf("<?xml")), "text/xml");
+          const rows = [];
+          xml.querySelectorAll("TR").forEach((tr) => {
+            const o = {}; tr.querySelectorAll("TD").forEach((td, i) => { o[CC[i]] = td.textContent; });
+            if (!o.CALL_CODE) return;
+            rows.push({ call_code: o.CALL_CODE, item: ITEM[o.ITEM_CODE] || o.ITEM_CODE, local_no: num(o.DEMD_NUMB) || null, post_name: o.POST_NAME, want_date: o.WANT_DATE || null, want_time: o.WANT_TIME, cntr_type: CNTR[o.CNTR_TYPE] || o.CNTR_TYPE, cars_oper: o.CARS_OPER === "03" ? "내방" : o.CARS_OPER === "01" ? "AJ배차" : o.CARS_OPER, call_volm: num(o.CALL_VOLM), inst_date: o.INST_DATE, inst_empn: o.INST_EMPN, chrg_name: o.CHRG_NAME });
+          });
+          await assertAccount(); await call("calls_upsert", { rows, from: cf });
+          callTxt = " · 납품요청 " + rows.length + "줄";
+        }
+      } catch (e) { callTxt = " · 납품요청 목록 실패: " + e.message; }
+    }
+
     // ── 1-1) 입고처 목록 (하루 한 번) ──
     let dsTxt = "";
     const dkey = "dests_" + ACCOUNT;
@@ -313,7 +337,7 @@
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
     setLast(ACCOUNT, st.failed || mvErr ? 0 : Date.now()); // 실패가 있으면 다음 접속 때 바로 이어서 재시도
-    const mvTxt = (mvErr ? ` · 이동내역 실패: ${mvErr}` : ` · 이동 ${mv}건`) + dsTxt;
+    const mvTxt = (mvErr ? ` · 이동내역 실패: ${mvErr}` : ` · 이동 ${mv}건`) + dsTxt + callTxt;
     say(st.abort ? `중단됨 · ${label()} — ${st.lastErr || mvErr} (다시 접속하면 이어서 받아요)`
       : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}${mvTxt}`
       : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행(어제까지)${mvTxt}(오늘까지)`, st.abort || st.failed || !!mvErr);
@@ -696,7 +720,7 @@
       if (!conf.length) return;
       confBox.style.cssText = "padding:8px 0 2px;border-top:1px solid rgba(255,255,255,.25);margin-top:4px";
       const dates = conf.map((c) => c.move_date).sort();
-      confBox.innerHTML = "<b>입고확인 대기 " + conf.length + "건</b> <span style='opacity:.65'>(" + String(dates[0]).slice(5) + " ~ " + String(dates[dates.length - 1]).slice(5) + ")</span><div style='opacity:.7'>받는 쪽이 PMS에서 맞게 받음·자동확인한 건이에요. [채우기] → 표에서 선택된 줄 확인 → EDI [입고확인]</div>";
+      confBox.innerHTML = "<b>입고확인 대기 " + conf.length + "건</b> <span style='opacity:.65'>(" + String(dates[0]).slice(5) + " ~ " + String(dates[dates.length - 1]).slice(5) + ")</span><div style='opacity:.7'>받는 쪽이 PMS에서 [정상]을 누른 건이에요. [채우기] → 표에서 선택된 줄 확인 → EDI [입고확인]</div>";
       const b = document.createElement("button"); b.textContent = "채우기 (오래된 7일)"; b.style.cssText = "margin-top:5px;background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:3px 10px;cursor:pointer";
       b.onclick = () => fillConf(dates[0]).catch((e) => alert("채우기 실패: " + e.message));
       confBox.appendChild(b);

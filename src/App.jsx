@@ -115,10 +115,10 @@ const toOf = (s) => isMove(s) ? (s.to_center || "—") : isReturn(s) ? (s.center
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
 const NAV_BY_ROLE = {
-  관리자: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "마스터", "단가", "사용자", "설정"],
-  운송팀: ["현황", "출고", "확인", "회수", "재고", "AJ", "EDI", "마스터", "설정"],
-  정산담당: ["현황", "재고", "EDI", "마스터", "설정"],
-  협력업체: ["현황", "반납", "확인", "설정"],
+  관리자: ["오늘", "출고", "확인", "재고", "AJ", "EDI", "현황", "마스터", "단가", "사용자", "설정"],
+  운송팀: ["오늘", "출고", "확인", "재고", "AJ", "EDI", "현황", "마스터", "설정"],
+  정산담당: ["오늘", "재고", "EDI", "현황", "마스터", "설정"],
+  협력업체: ["확인", "출고", "설정"],   // 시공팀: 우리 현장으로 온 것 확인, 우리 현장에서 보내는 것 등록
   AJ: ["AJ", "설정"],   // AJ네트웍스 직원: 요청 처리 + 내 설정
 };
 // 역할별 능력치 (화면 가리기 + 버튼 잠금에 사용 / DB는 RLS가 별도로 막음)
@@ -265,7 +265,7 @@ const Splash = ({ text }) => (
 );
 
 function Shell({ session, initialConfirm }) {
-  const [nav, setNav] = useState("현황");
+  const [nav, setNav] = useState("오늘");
   const [focusBatch, setFocusBatch] = useState(initialConfirm || null);
   const [scanOpen, setScanOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -315,7 +315,7 @@ function Shell({ session, initialConfirm }) {
         supabase.from("partner_pallet").select("*"),
         supabase.from("shipment").select("*").order("depart_at", { ascending: false }),
         supabase.from("user_roles").select("role").eq("user_id", session.user.id).maybeSingle(),
-        supabase.from("profiles").select("active, center_codes, name, phone").eq("id", session.user.id).maybeSingle(),
+        supabase.from("profiles").select("active, center_codes, name, phone, partner_code").eq("id", session.user.id).maybeSingle(),
         supabase.from("aj_request").select("*").order("requested_at", { ascending: false }),
         supabase.from("app_center").select("name, active").eq("active", true).order("name"),
       ]);
@@ -702,7 +702,8 @@ function Shell({ session, initialConfirm }) {
   };
 
   const ALL_ITEMS = [
-    { key: "현황", label: "수불 현황" }, { key: "출고", label: "출고 등록" },
+    { key: "오늘", label: "오늘 할 일" },
+    { key: "현황", label: "PMS 전표 내역" }, { key: "출고", label: "출고 등록" },
     { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
     { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
@@ -792,8 +793,9 @@ function Shell({ session, initialConfirm }) {
           <ReceiptScreen {...{ ships, palletTypes, caps }} focusBatch={focusBatch} onCloseFocus={() => { setFocusBatch(null); window.history.replaceState({}, "", window.location.pathname); }} />
         ) : (
           <>
+            {nav === "오늘" && <TodayBoard {...{ ships, caps, setNav }} />}
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply, resolveDiscrepancy }} />}
-            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} centers={centerList} myCenters={myCenters} onFree={registerFree} setNav={setNav} />}
+            {nav === "출고" && (caps.outbound || role === "협력업체") && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} centers={centerList} myCenters={myCenters} onFree={registerFree} setNav={setNav} sitePartner={role === "협력업체" ? me.partner_code || "__none__" : null} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <ReceiptScreen {...{ ships, palletTypes, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
@@ -1406,7 +1408,7 @@ function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
 const RECENT_KEY = "pms_recent_routes";
 const readRecent = () => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"); } catch (e) { return []; } };
 const saveRecent = (fromNo, toNo) => { try { const list = [[fromNo, toNo], ...readRecent().filter(([f, t]) => !(f === fromNo && t === toNo))].slice(0, 6); localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch (e) { /* 브라우저 저장소를 못 쓰면 최근 경로만 빠진다 */ } };
-function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCenters = CENTERS, onFree, setNav }) {
+function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCenters = CENTERS, onFree, setNav, sitePartner = null }) {
   const today = new Date().toISOString().slice(0, 10);
   const [qtys, setQtys] = useState({});
   const [busy, setBusy] = useState(false);
@@ -1429,11 +1431,16 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
     return { text: "작업장 간 이동", color: C.blue, bg: C.blueBg };
   }, [fromWp, toWp]); // eslint-disable-line
   // 센터가 정해진 작업자는 출고처나 입고처 중 하나가 내 센터여야 한다
-  const restricted = myCenters.length < centers.length;
-  const mineOk = !restricted || !fromWp || !toWp || myCenters.includes(centerOf(fromWp)) || myCenters.includes(centerOf(toWp));
-  // 처음엔 내 센터를 출고처로
+  const restricted = !sitePartner && myCenters.length < centers.length;
+  // 시공팀 계정은 자기 현장이 출고처인 건만 (현장 작업장 = 거래처로 연결된 EDI 작업장)
+  const siteWps = sitePartner ? wpList.filter((w) => w.partner_code === sitePartner) : null;
+  const mineOk = sitePartner ? !fromWp || siteWps.some((w) => w.no === fromWp.no)
+    : !restricted || !fromWp || !toWp || myCenters.includes(centerOf(fromWp)) || myCenters.includes(centerOf(toWp));
+  // 처음엔 내 센터(시공팀은 내 현장)를 출고처로
   useEffect(() => {
-    if (fromNo || !ediIdx || !myCenters.length || myCenters.length === centers.length) return;
+    if (fromNo || !ediIdx) return;
+    if (sitePartner) { const w = wpList.find((x) => x.partner_code === sitePartner); if (w) setFromNo(w.no); return; }
+    if (!myCenters.length || myCenters.length === centers.length) return;
     const w = ediIdx.wpByCenter[myCenters[0]]; if (w) setFromNo(w.no);
   }, [ediIdx]); // eslint-disable-line
   const [recent, setRecent] = useState(readRecent);
@@ -1470,7 +1477,7 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
         </div>}
 
         <div style={lbl}>출고처 <span style={{ color: C.hint, fontSize: 11 }}>· 보내는 곳 (센터·시공팀·업체 검색)</span></div>
-        <WorkplacePicker wps={wpList} value={fromNo} onChange={setFromNo} width="100%" placeholder={ediIdx ? "보내는 곳 (이름·번호)" : "작업장 목록 불러오는 중…"} />
+        <WorkplacePicker wps={siteWps || wpList} value={fromNo} onChange={setFromNo} width="100%" placeholder={ediIdx ? "보내는 곳 (이름·번호)" : "작업장 목록 불러오는 중…"} />
         {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>현재고(EDI {(fromStock.date || "").slice(5)} 기준 + 당일 이동·PMS 예정): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
         <div style={{ textAlign: "center", color: C.hint, margin: "6px 0" }}>↓</div>
         <div style={lbl}>입고처 <span style={{ color: C.hint, fontSize: 11 }}>· 받는 곳</span></div>
@@ -1479,7 +1486,7 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
           <span style={{ fontSize: 11.5, color: kindLabel.color, background: kindLabel.bg, padding: "2px 9px", borderRadius: 10 }}>{kindLabel.text}</span>
           <span style={{ fontSize: 11.5, color: C.hint }}>EDI 반영 탭에서 출고처 "{ediClean(fromWp.name)}"로 자동입력돼요</span>
         </div>}
-        {!mineOk && <div style={{ fontSize: 12, color: C.red, marginTop: 6 }}>출고처나 입고처 중 하나는 내 센터({myCenters.join(", ")})여야 해요.</div>}
+        {!mineOk && <div style={{ fontSize: 12, color: C.red, marginTop: 6 }}>{sitePartner ? "출고처는 우리 현장이어야 해요." : `출고처나 입고처 중 하나는 내 센터(${myCenters.join(", ")})여야 해요.`}</div>}
         <div style={{ height: 18 }} />
 
         <div style={lbl}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· 출고처 현재고보다 많으면 빨갛게 표시</span></div>
@@ -1502,6 +1509,136 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
         <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>등록 즉시 전표 발행 · EDI 반영 탭에서 자동입력</p>
       </div>
       {slipRows && <SlipPrint rows={slipRows} palletTypes={palletTypes} onClose={() => { setSlipRows(null); setNav && setNav("현황"); }} />}
+    </>
+  );
+}
+
+// AJ 공급 현황: EDI 납품요청(직접 넣은 것 포함) ↔ 렌탈입고 누적. 같은 작업장·제품은 먼저 요청한 것부터 입고를 채운다
+function useAjSupply(days = 45) {
+  const { idx } = useEdiIndex();
+  const [calls, setCalls] = useState(null); const [moves, setMoves] = useState([]); const [err, setErr] = useState("");
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const since = localD(new Date(Date.now() - days * 86400000).toISOString());
+      const c = await supabase.from("aj_call").select("*").gte("inst_date", since).order("inst_date").limit(3000);
+      const m = await supabase.from("aj_move").select("account,move_date,item,to_name,qty").eq("move_type", "렌탈입고").gte("move_date", since).limit(5000);
+      if (!alive) return;
+      if (c.error) { setErr("납품요청 목록을 못 불러왔어요. letus_edi16.sql 실행과 스크립트 v3.16 동기화가 필요해요. (" + c.error.message + ")"); setCalls([]); return; }
+      setCalls(c.data || []); setMoves(m.data || []);
+    })();
+    return () => { alive = false; };
+  }, [days]);
+  const rows = useMemo(() => {
+    if (!calls || !idx) return null;
+    const wpOf = (acc, local) => { const e = Object.entries(idx.local).find(([k, v]) => v === local && k.startsWith(acc + "|")); return e ? idx.wpByNo[Number(e[0].split("|")[1])] : null; };
+    const out = calls.map((c) => ({ ...c, wp: wpOf(c.account, c.local_no), got: 0 }));
+    // 작업장·제품별로 입고를 요청 순서대로 나눠 담기
+    const key = (name, item) => ediClean(name) + "|" + item;
+    const pool = {}; moves.forEach((m) => { const k = key(m.to_name, m.item); (pool[k] = pool[k] || []).push({ ...m }); });
+    Object.values(pool).forEach((l) => l.sort((a, b) => (a.move_date < b.move_date ? -1 : 1)));
+    out.forEach((c) => {
+      const k = key(c.wp ? c.wp.name : c.post_name, c.item); const l = pool[k] || []; const start = String(c.inst_date || "").slice(0, 10);
+      let need = c.call_volm || 0;
+      for (const m of l) { if (need <= 0) break; if (m.move_date < start || m.qty <= 0) continue; const take = Math.min(need, m.qty); m.qty -= take; need -= take; c.got += take; c.last = m.move_date; }
+    });
+    const today = localD(new Date().toISOString());
+    return out.map((c) => ({ ...c, left: Math.max(0, (c.call_volm || 0) - c.got), late: c.want_date && c.want_date < today && c.got < (c.call_volm || 0) && c.cntr_type !== "보류" })).sort((a, b) => (b.inst_date || "").localeCompare(a.inst_date || ""));
+  }, [calls, moves, idx]);
+  return { rows, err };
+}
+function AjSupplyStatus() {
+  const { rows, err } = useAjSupply(45);
+  const [f, setF] = useState("open"); const [q, setQ] = useState("");
+  const view = (rows || []).filter((r) => (f === "all" || (f === "open" ? r.left > 0 && r.cntr_type !== "보류" : f === "late" ? r.late : f === "hold" ? r.cntr_type === "보류" : r.left === 0)) && (!q || (r.post_name + " " + r.call_code + " " + r.item).includes(q)));
+  const n = (fn) => (rows || []).filter(fn).length;
+  const ST = { 완료: C.green, 처리중: C.blue, 접수: C.blue, 등록: C.sub, 보류: C.red };
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>AJ 공급 현황</h3>
+        <span style={{ fontSize: 12, color: C.hint }}>EDI 납품요청(최근 45일, EDI 직접 요청 포함) ↔ 렌탈입고. 같은 곳·제품은 먼저 요청한 것부터 채워요</span>
+      </div>
+      {err && <div style={{ background: C.redBg, color: C.red, padding: 10, borderRadius: 8, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
+        {[["open", `남은 것 ${n((r) => r.left > 0 && r.cntr_type !== "보류")}`], ["late", `희망일 지남 ${n((r) => r.late)}`], ["hold", `보류 ${n((r) => r.cntr_type === "보류")}`], ["done", `다 들어옴 ${n((r) => r.left === 0)}`], ["all", "전체"]].map(([k, l]) => (
+          <button key={k} onClick={() => setF(k)} style={{ fontSize: 12, padding: "4px 11px", borderRadius: 20, border: `1px solid ${f === k ? C.teal : C.border}`, background: f === k ? C.tealBg : "#fff", color: f === k ? C.tealDk : C.sub, cursor: "pointer" }}>{l}</button>
+        ))}
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·요청코드" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140 }} />
+      </div>
+      {!rows ? <Splash text="불러오는 중…" /> : !view.length ? <div style={{ fontSize: 13, color: C.sub, padding: 10 }}>해당하는 요청이 없어요.</div> : (
+        <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 720 }}>
+          <thead><tr><Th>요청일</Th><Th>작업장</Th><Th>제품</Th><Th r>요청</Th><Th r>입고</Th><Th r>남음</Th><Th>희망일</Th><Th>EDI 상태</Th><Th>요청코드</Th></tr></thead>
+          <tbody>{view.slice(0, 300).map((r) => (
+            <tr key={r.account + r.call_code + r.item} style={{ borderTop: `1px solid ${C.border}`, background: r.late ? C.redBg : "transparent" }}>
+              <Td>{String(r.inst_date || "").slice(5, 10)}</Td><Td>{r.post_name}</Td><Td b>{r.item}</Td>
+              <Td r>{(r.call_volm || 0).toLocaleString()}</Td><Td r c={r.got ? C.green : C.hint}>{r.got.toLocaleString()}{r.last ? <div style={{ fontSize: 10.5, color: C.hint }}>{r.last.slice(5)}</div> : null}</Td>
+              <Td r b c={r.left ? C.amber : C.green}>{r.left ? r.left.toLocaleString() : "✓"}</Td>
+              <Td><span style={{ color: r.late ? C.red : C.text }}>{String(r.want_date || "").slice(5)} {r.want_time && r.want_time !== "-" ? r.want_time : ""}</span></Td>
+              <Td><span style={{ color: ST[r.cntr_type] || C.sub, fontSize: 12 }}>{r.cntr_type}</span> <span style={{ color: C.hint, fontSize: 11 }}>{r.cars_oper}</span></Td>
+              <Td><span style={{ fontSize: 11.5, color: C.hint }}>{r.call_code}{r.inst_empn ? " · " + r.inst_empn : ""}</span></Td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+    </div>
+  );
+}
+
+// 오늘 할 일: 내부 담당자 첫 화면. 지금 처리해야 할 것만 모아 보여주고 누르면 그 화면으로
+function TodayBoard({ ships = [], caps = {}, setNav }) {
+  const [d, setD] = useState(null);
+  const { rows: supply } = useAjSupply(30);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const since = localD(new Date(Date.now() - 30 * 86400000).toISOString());
+      const [rc, fx, rej, accs, logs] = await Promise.all([
+        supabase.rpc("receipt_incoming", { p_days: 3 }).range(0, 4999),
+        supabase.from("edi_fix").select("id,status", { count: "exact", head: false }).in("status", ["요청", "승인"]).limit(500),
+        supabase.from("aj_move").select("account,move_code,move_date,item,from_name,to_name,qty,note").eq("conf", "승인거부").gte("move_date", since).order("move_date", { ascending: false }).limit(50),
+        supabase.from("aj_account").select("code,label,name,last_seen"),
+        supabase.from("aj_sync_log").select("account,created_at,status").order("created_at", { ascending: false }).limit(60),
+      ]);
+      if (!alive) return;
+      const inc = (rc.data || []).filter((r) => !r.r_status);
+      const lastSync = {}; (logs.data || []).forEach((l) => { if (!lastSync[l.account]) lastSync[l.account] = l.created_at; });
+      setD({ inc, fixReq: (fx.data || []).filter((r) => r.status === "요청").length, fixOk: (fx.data || []).filter((r) => r.status === "승인").length, rej: rej.data || [], accs: accs.data || [], lastSync });
+    })();
+    return () => { alive = false; };
+  }, []);
+  const notInEdi = ships.filter((s) => !s.canceled && !s.edi_status && s.depart_at && localD(s.depart_at) >= localD(new Date(Date.now() - 14 * 86400000).toISOString())).length;
+  const waitEdi = ships.filter((s) => !s.canceled && s.edi_status === "엑셀생성").length;
+  const late = (supply || []).filter((r) => r.late);
+  const now = new Date(); const before16 = now.getHours() < 16;
+  const Card = ({ title, value, unit = "건", tone = "plain", sub, go, children }) => {
+    const m = { danger: [C.redBg, C.red], warn: [C.amberBg, C.amber], info: [C.blueBg, C.blue], success: [C.greenBg, C.green], plain: ["#f4f5f7", C.text] }[tone];
+    return (
+      <div onClick={go} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, cursor: go ? "pointer" : "default", display: "grid", gap: 6, minWidth: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}><span style={{ fontSize: 13, color: C.sub }}>{title}</span>{go && <span style={{ fontSize: 12, color: C.hint }}>열기 ›</span>}</div>
+        <div><span style={{ fontSize: 26, fontWeight: 700, color: m[1], fontVariantNumeric: "tabular-nums" }}>{value}</span> <span style={{ fontSize: 13, color: C.sub }}>{unit}</span></div>
+        {sub && <div style={{ fontSize: 12, color: C.hint, lineHeight: 1.5 }}>{sub}</div>}
+        {children}
+      </div>
+    );
+  };
+  if (!d) return (<><Head title="오늘 할 일" sub="지금 처리할 것만 모아 봤어요" /><Splash text="불러오는 중…" /></>);
+  const todayInc = d.inc.filter((r) => rcptDeadline(r.move_date).t === "오늘까지").length;
+  return (
+    <>
+      <Head title="오늘 할 일" sub={`${now.getMonth() + 1}월 ${now.getDate()}일 · 지금 처리할 것만 모아 봤어요`} />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12, marginBottom: 16 }}>
+        <Card title="입고 확인 (받을 것)" value={d.inc.length} tone={todayInc ? "warn" : d.inc.length ? "info" : "success"} sub={todayInc ? `오늘까지 확인해야 할 것 ${todayInc}건 · 안 누르면 내일 자동확인` : "최근 3일 기준"} go={() => setNav("확인")} />
+        <Card title="EDI에 안 올린 출고" value={notInEdi} tone={notInEdi ? "warn" : "success"} sub={waitEdi ? `자동입력 보낸 뒤 EDI 저장 대기 ${waitEdi}건` : "EDI 재고·정산 › EDI 반영(업로드)"} go={() => setNav("EDI")} />
+        <Card title="수정요청" value={d.fixReq} tone={d.fixReq ? "warn" : "success"} sub={d.fixOk ? `승인됨 · EDI에서 고칠 것 ${d.fixOk}건` : caps.users ? "관리자 승인 대기" : "관리자가 확인해요"} go={() => setNav("EDI")} />
+        <Card title="EDI 승인거부 (30일)" value={d.rej.length} tone={d.rej.length ? "danger" : "success"} sub={d.rej.length ? "받는 쪽이 거부한 출고 · EDI 상이내역 회신 필요" : "거부된 출고가 없어요"}>
+          {d.rej.slice(0, 3).map((r) => <div key={r.move_code + r.item} style={{ fontSize: 12, color: C.red }}>{r.move_date.slice(5)} {r.from_name} → {r.to_name} {r.item} {r.qty}</div>)}
+        </Card>
+        <Card title="AJ 공급 희망일 지남" value={late.length} tone={late.length ? "danger" : "success"} sub={late.length ? late.slice(0, 2).map((r) => `${r.post_name} ${r.item} ${r.left}장 남음`).join(" · ") : before16 ? "오늘 16시 전에 등록하면 내일 납품 요청 가능" : "16시가 지나서 내일 납품 요청은 마감됐어요"} go={() => setNav("AJ")} />
+        <Card title="EDI 동기화" value={d.accs.filter((a) => d.lastSync[a.code] && Date.now() - new Date(d.lastSync[a.code]).getTime() < 36 * 3600 * 1000).length + " / " + d.accs.length} unit="계정" tone={d.accs.every((a) => d.lastSync[a.code] && Date.now() - new Date(d.lastSync[a.code]).getTime() < 36 * 3600 * 1000) ? "success" : "warn"}
+          sub={d.accs.map((a) => `${a.label || a.name || a.code} ${d.lastSync[a.code] ? fmtDT(d.lastSync[a.code]) : "없음"}`).join(" · ")} />
+      </div>
+      <Note>카드를 누르면 그 화면으로 가요. 동기화는 각 계정으로 EDI에 로그인하면 돌아요(36시간 넘으면 노란색).</Note>
     </>
   );
 }
@@ -1762,6 +1899,15 @@ function ReceiptStats({ onRun }) {
       setRows(Object.values(m).sort((a, b) => (b.direct + b.auto) - (a.direct + a.auto)));
     })();
   }, [tick]);
+  const [toEdi, setToEdi] = useState(null);
+  useEffect(() => { supabase.from("pms_setting").select("value").eq("key", "auto_conf_to_edi").maybeSingle().then(({ data }) => setToEdi(data ? data.value === "Y" : false)); }, []);
+  const flipEdi = async () => {
+    const next = !toEdi;
+    if (!window.confirm(next ? "앞으로 자동확인된 건도 EDI 입고확인 대기로 보낼까요? (EDI에서 [입고확인]하면 되돌릴 수 없어요)" : "자동확인된 건은 PMS에만 표시하고 EDI로는 보내지 않을까요?")) return;
+    const { error } = await supabase.from("pms_setting").upsert({ key: "auto_conf_to_edi", value: next ? "Y" : "N", updated_at: new Date().toISOString() });
+    if (error) { alert(error.message + " (letus_edi16.sql 실행 필요)"); return; }
+    setToEdi(next);
+  };
   const run = async () => { setBusy(true); const { data, error } = await supabase.rpc("receipt_auto"); setBusy(false); if (error) { alert(error.message); return; } alert(`자동확인 ${data}건 처리했어요.`); setTick((t) => t + 1); onRun && onRun(); };
   const tot = (rows || []).reduce((a, r) => ({ direct: a.direct + r.direct, auto: a.auto + r.auto, wait: a.wait + r.wait }), { direct: 0, auto: 0, wait: 0 });
   return (
@@ -1773,6 +1919,10 @@ function ReceiptStats({ onRun }) {
         <Metric label="EDI 입고확인 대기" value={tot.wait.toLocaleString()} unit="건" tone={tot.wait ? "warn" : "success"} />
         <button disabled={busy} onClick={run} style={btnGhost}>자동확인 지금 실행</button>
       </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 8, background: toEdi ? C.amberBg : "#f4f5f7", padding: "8px 12px", borderRadius: 8 }}>
+        <input type="checkbox" checked={!!toEdi} disabled={toEdi === null} onChange={flipEdi} />
+        <span>자동확인된 건도 EDI 입고확인으로 보내기 <span style={{ color: C.hint, fontSize: 12 }}>· 지금은 {toEdi ? "켜짐: 하루 지나면 EDI 확인 대상" : "꺼짐: [정상]을 누른 건만 EDI로, 자동확인은 PMS에만"}</span></span>
+      </label>
       <div style={{ fontSize: 12, color: C.hint, marginBottom: 8 }}>EDI 입고확인 대기는 EDI 이동조회/관리 화면 LETUS 상자에서 [채우기] → [입고확인]으로 처리돼요. 자동확인은 매일 동기화 때도 돌아요.</div>
       {!rows ? <Splash text="불러오는 중…" /> : (
         <div style={{ overflowX: "auto" }}><table style={tbl}>
@@ -2165,6 +2315,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
 
   return (
     <>
+      {canCreate && <AjSupplyStatus />}
       <Head title={canCreate ? "AJ 요청" : "AJ 요청 처리"} sub={canCreate ? "AJ네트웍스에 공급/회수 요청 · 완료 시 재고 반영 (가설정 수동)" : "접수된 요청을 처리(완료)하세요 · AJ네트웍스 직원용"} />
       <div style={{ display: "grid", gridTemplateColumns: canCreate ? "repeat(auto-fit, minmax(300px, 1fr))" : "1fr", gap: 16, alignItems: "start" }}>
         {/* 요청 등록 (내부만) */}
