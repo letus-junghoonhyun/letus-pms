@@ -1528,7 +1528,7 @@ function ReceiptDiffModal({ row, palletTypes = [], onClose, onSave }) {
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 80, padding: 16 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 14, padding: 20, width: "100%", maxWidth: 440, maxHeight: "92vh", overflow: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0, fontSize: 16 }}>다르게 받음</h3><button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, color: C.sub, cursor: "pointer" }}>✕</button></div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0, fontSize: 16 }}>상이 (보낸 것과 다르게 옴)</h3><button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, color: C.sub, cursor: "pointer" }}>✕</button></div>
         <div style={{ fontSize: 12.5, color: C.sub, margin: "4px 0 14px" }}>{row.move_date} · {row.from_name} → {row.to_name} · 보낸 수량 {row.item} {row.qty}장</div>
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>실제로 받은 것 <span style={{ color: C.hint, fontSize: 11 }}>· 다른 제품이 섞여 왔으면 그 제품에도 입력</span></div>
         <PalletQtyEditor palletTypes={codes.map((c) => ({ code: c }))} qtys={lines} setQtys={setLines} color={C.amber} bg={C.amberBg} />
@@ -1539,12 +1539,45 @@ function ReceiptDiffModal({ row, palletTypes = [], onClose, onSave }) {
     </div>
   );
 }
+// 이름 목록에서 고르기: 누르면 전체 목록이 뜨고, 글자를 치면 맞는 곳만 추천. 바깥을 누르거나 Esc면 닫힘
+function NamePicker({ options = [], value, onChange, placeholder = "전체", width = 220, counts }) {
+  const [open, setOpen] = useState(false); const [q, setQ] = useState(""); const [hi, setHi] = useState(0);
+  const list = useMemo(() => { const t = q.trim(); return options.filter((o) => !t || o.includes(t)).slice(0, 100); }, [options, q]);
+  const pick = (v) => { onChange(v); setOpen(false); setQ(""); };
+  return (
+    <div style={{ position: "relative", width }}>
+      <input value={open ? q : value || ""} placeholder={value || placeholder}
+        onFocus={() => { setOpen(true); setQ(""); setHi(0); }} onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onChange={(e) => { setQ(e.target.value); setHi(0); setOpen(true); }}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, list.length - 1)); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)); }
+          else if (e.key === "Enter" && list[hi]) { e.preventDefault(); pick(list[hi]); e.target.blur(); }
+          else if (e.key === "Escape") { setOpen(false); e.target.blur(); }
+        }}
+        style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "7px 28px 7px 10px", border: `1px solid ${value ? C.teal : C.border}`, borderRadius: 8, background: value ? C.tealBg : "#fff" }} />
+      {value && <button onMouseDown={(e) => { e.preventDefault(); pick(""); }} title="전체로" style={{ position: "absolute", right: 6, top: 6, border: "none", background: "none", color: C.sub, cursor: "pointer", fontSize: 13 }}>✕</button>}
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4, maxHeight: 300, overflowY: "auto", background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 6px 18px rgba(0,0,0,.12)", zIndex: 50 }}>
+          <div onMouseDown={(e) => { e.preventDefault(); pick(""); }} style={{ padding: "7px 10px", fontSize: 13, cursor: "pointer", color: C.sub, borderBottom: `1px solid ${C.border}` }}>전체</div>
+          {list.length === 0 && <div style={{ padding: 10, fontSize: 12, color: C.sub }}>맞는 곳이 없어요</div>}
+          {list.map((o, i) => (
+            <div key={o} onMouseDown={(e) => { e.preventDefault(); pick(o); }} onMouseEnter={() => setHi(i)}
+              style={{ padding: "7px 10px", fontSize: 13, cursor: "pointer", background: i === hi ? "#eef6f4" : "transparent", display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span>{o}</span>{counts && counts[o] ? <span style={{ color: C.hint, fontSize: 11 }}>{counts[o]}건</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = null, onCloseFocus }) {
   const today = localD(new Date().toISOString());
   const [from, setFrom] = useState(localD(new Date(Date.now() - 6 * 86400000).toISOString()));
   const [to, setTo] = useState(today);
   const [rows, setRows] = useState(null); const [err, setErr] = useState(""); const [tick, setTick] = useState(0);
-  const [tab, setTab] = useState("todo"); const [q, setQ] = useState(""); const [toF, setToF] = useState(""); const [chip, setChip] = useState("all");
+  const [tab, setTab] = useState("todo"); const [q, setQ] = useState(""); const [toF, setToF] = useState(""); const [fromF, setFromF] = useState(""); const [chip, setChip] = useState("all"); const [more, setMore] = useState({});
   const [sel, setSel] = useState({}); const [diff, setDiff] = useState(null); const [scan, setScan] = useState(false); const [busy, setBusy] = useState(false);
   const [batch, setBatch] = useState(focusBatch);
   const [msg, setMsg] = useState("");
@@ -1555,11 +1588,17 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
   const days = Math.min(90, Math.max(1, Math.round((new Date(today + "T12:00:00") - new Date(from + "T12:00:00")) / 86400000) + 1));
   useEffect(() => {
     let alive = true; setRows(null);
-    supabase.rpc("receipt_incoming", { p_days: days }).then(({ data, error }) => {
-      if (!alive) return;
-      if (error) { setErr("입고 확인 목록을 못 불러왔어요. letus_edi14.sql 실행 여부를 확인해주세요. (" + error.message + ")"); setRows([]); return; }
-      setErr(""); setRows(data || []);
-    });
+    (async () => {
+      const all = [];
+      for (let pg = 0; pg < 30; pg++) {
+        const { data, error } = await supabase.rpc("receipt_incoming", { p_days: days }).range(pg * 1000, pg * 1000 + 999);
+        if (!alive) return;
+        if (error) { setErr("입고 확인 목록을 못 불러왔어요. (" + error.message + ")"); setRows(all); return; }
+        all.push(...(data || []));
+        if (!data || data.length < 1000) break;
+      }
+      if (alive) { setErr(""); setRows(all); }
+    })();
     return () => { alive = false; };
   }, [days, tick]);
   const batchIds = useMemo(() => (batch ? new Set(ships.filter((s) => (s.batch_id || s.id) === batch).map((s) => String(s.id))) : null), [batch, ships]);
@@ -1568,33 +1607,36 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
   const dlOf = (r) => rcptDeadline(r.move_date).t;
   const cnt = { today: todoAll.filter((r) => dlOf(r) === "오늘까지").length, late: todoAll.filter((r) => dlOf(r).startsWith("기한")).length, diff: doneAll.filter((r) => r.r_status === "다름").length };
   const chipOk = (r) => chip === "all" || (chip === "today" ? dlOf(r) === "오늘까지" : chip === "late" ? dlOf(r).startsWith("기한") : chip === "aj" ? r.move_type === "렌탈입고" : chip === "pms" ? r.src === "pms" : chip === "diff" ? r.r_status === "다름" : chip === "auto" ? r.r_status === "자동확인" : true);
-  const list = (tab === "done" ? doneAll : todoAll).filter((r) => chipOk(r) && (!toF || r.to_name === toF) && (!q || (r.from_name + " " + r.to_name + " " + r.item + " " + (r.slip_no || "") + " " + (r.move_code || "") + " " + (r.vehicle_no || "")).includes(q)));
+  const list = (tab === "done" ? doneAll : todoAll).filter((r) => chipOk(r) && (!toF || r.to_name === toF) && (!fromF || r.from_name === fromF) && (!q || (r.item + " " + (r.slip_no || "") + " " + (r.move_code || "") + " " + (r.vehicle_no || "")).includes(q)));
   // 받는 곳별로 묶기 (기한 급한 곳 먼저)
   const groups = useMemo(() => {
     const m = {};
     list.forEach((r) => { (m[r.to_name] = m[r.to_name] || { name: r.to_name, rows: [], qty: 0, late: 0 }).rows.push(r); m[r.to_name].qty += r.qty; if (dlOf(r).startsWith("기한")) m[r.to_name].late++; });
     return Object.values(m).map((g) => ({ ...g, rows: g.rows.sort((a, b) => (a.move_date < b.move_date ? -1 : 1)) })).sort((a, b) => b.late - a.late || b.rows.length - a.rows.length);
   }, [list]); // eslint-disable-line
-  const toNames = [...new Set((rows || []).map((r) => r.to_name))].sort();
+  const nameCounts = (key) => { const m = {}; (tab === "done" ? doneAll : todoAll).forEach((r) => { m[r[key]] = (m[r[key]] || 0) + 1; }); return m; };
+  const toCounts = nameCounts("to_name"), fromCounts = nameCounts("from_name");
+  const toNames = Object.keys(toCounts).sort((a, b) => toCounts[b] - toCounts[a] || a.localeCompare(b));
+  const fromNames = Object.keys(fromCounts).sort((a, b) => fromCounts[b] - fromCounts[a] || a.localeCompare(b));
   const save = async (lst) => {
     setBusy(true);
     const payload = lst.map((r) => ({ src: r.src, account: r.account, move_code: r.move_code, item: r.item, ship_id: r.ship_id, qty: r.qty, move_date: r.move_date, move_type: r.move_type, from_name: r.from_name, to_name: r.to_name, to_wp: r.to_wp, status: r.status || "확인", recv: r.recv || null, photos: r.photos && r.photos.length ? r.photos : null, note: r.note || null }));
     const { data, error } = await supabase.rpc("receipt_confirm", { p_rows: payload });
     setBusy(false);
     if (error) { alert("저장 실패: " + error.message); return false; }
-    setMsg(`${data}건 저장했어요.` + (lst.some((r) => r.status === "다름") ? " 다르게 받은 건은 관리자 확인 후 EDI에 고쳐져요." : "")); setSel({}); setTick((t) => t + 1);
+    setMsg(`${data}건 저장했어요.` + (lst.some((r) => r.status === "다름") ? " 상이 건은 관리자 확인 후 EDI에 고쳐져요." : "")); setSel({}); setTick((t) => t + 1);
     return true;
   };
   const selected = list.filter((r) => sel[rcptKey(r)]);
   const photo = (r) => { const p = Array.isArray(r.out_photos) ? r.out_photos : []; return p[0] || null; };
-  const ST = { 확인: [C.green, C.greenBg, "맞게 받음"], 다름: [C.amber, C.amberBg, "다르게 받음"], 자동확인: [C.sub, "#f1f2f4", "자동확인"], EDI확인: [C.green, C.greenBg, "EDI에서 확인"] };
+  const ST = { 확인: [C.green, C.greenBg, "정상"], 다름: [C.amber, C.amberBg, "상이"], 자동확인: [C.sub, "#f1f2f4", "자동확인"], EDI확인: [C.green, C.greenBg, "EDI에서 확인"] };
   const kindTag = (r) => r.move_type === "렌탈입고" ? ["AJ 공급", C.amber, C.amberBg] : r.src === "pms" ? ["PMS 등록", C.blue, C.blueBg] : ["EDI", C.sub, "#f1f2f4"];
   const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
-  const chips = tab === "todo" ? [["all", `전체 ${todoAll.length}`], ["today", `오늘까지 ${cnt.today}`], ["late", `기한 지남 ${cnt.late}`], ["aj", "AJ 공급"], ["pms", "PMS 등록"]] : [["all", `전체 ${doneAll.length}`], ["diff", `다르게 받음 ${cnt.diff}`], ["auto", "자동확인"], ["aj", "AJ 공급"]];
+  const chips = tab === "todo" ? [["all", `전체 ${todoAll.length}`], ["today", `오늘까지 ${cnt.today}`], ["late", `기한 지남 ${cnt.late}`], ["aj", "AJ 공급"], ["pms", "PMS 등록"]] : [["all", `전체 ${doneAll.length}`], ["diff", `상이 ${cnt.diff}`], ["auto", "자동확인"], ["aj", "AJ 공급"]];
 
   return (
     <>
-      <Head title="입고 확인" sub="들어온 파렛트를 받는 쪽에서 확인해요 · 이동일 다음날까지 안 누르면 자동확인돼요" />
+      <Head title="입고 확인" sub="들어온 파렛트를 받는 쪽에서 확인해요 · [정상] 보낸 대로 받음 · [상이] 수량·제품이 다름 · 다음날까지 안 누르면 자동확인" />
       {err && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{err}</div>}
       {msg && <div style={{ background: C.greenBg, color: C.green, padding: 10, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
       {batch && <div style={{ background: C.blueBg, color: C.blue, padding: 10, borderRadius: 10, fontSize: 13, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>전표 QR로 연 건만 보고 있어요.<button onClick={() => { setBatch(null); onCloseFocus && onCloseFocus(); }} style={btnGhost}>전체 보기</button></div>}
@@ -1603,7 +1645,7 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
         <Metric label="받을 것" value={todoAll.length} unit="건" tone={todoAll.length ? "info" : "success"} />
         <Metric label="오늘까지" value={cnt.today} unit="건" tone={cnt.today ? "warn" : "plain"} />
         <Metric label="기한 지남" value={cnt.late} unit="건" tone={cnt.late ? "danger" : "plain"} />
-        <Metric label="다르게 받음" value={cnt.diff} unit="건" tone={cnt.diff ? "warn" : "plain"} />
+        <Metric label="상이" value={cnt.diff} unit="건" tone={cnt.diff ? "warn" : "plain"} />
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
@@ -1624,10 +1666,10 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <span style={{ fontSize: 12.5, color: C.sub, width: 44 }}>받는 곳</span>
-              <input list="rcpt-to-list" value={toF} onChange={(e) => setToF(e.target.value)} placeholder="받는 곳 검색 (전체)" style={{ ...inp, width: 220 }} />
-              <datalist id="rcpt-to-list">{toNames.map((n) => <option key={n} value={n} />)}</datalist>
-              {toF && <button onClick={() => setToF("")} style={{ ...btnGhost, padding: "5px 9px" }}>✕ 전체</button>}
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="보낸 곳·제품·전표·차량 검색" style={{ ...inp, width: 200 }} />
+              <NamePicker options={toNames} counts={toCounts} value={toF} onChange={setToF} placeholder={`받는 곳 전체 (${toNames.length}곳)`} />
+              <span style={{ fontSize: 12.5, color: C.sub }}>보낸 곳</span>
+              <NamePicker options={fromNames} counts={fromCounts} value={fromF} onChange={setFromF} placeholder={`보낸 곳 전체 (${fromNames.length}곳)`} />
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="제품·전표·차량" style={{ ...inp, width: 130 }} />
             </div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {chips.map(([k, l]) => <button key={k} onClick={() => setChip(k)} style={{ fontSize: 12, padding: "4px 11px", borderRadius: 20, border: `1px solid ${chip === k ? C.teal : C.border}`, background: chip === k ? C.tealBg : "#fff", color: chip === k ? C.tealDk : C.sub, cursor: "pointer" }}>{l}</button>)}
@@ -1637,11 +1679,12 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
           {tab === "todo" && selected.length > 0 && <div style={{ position: "sticky", top: "env(safe-area-inset-top, 0px)", zIndex: 5, background: C.tealBg, border: `1px solid ${C.teal}`, borderRadius: 10, padding: "8px 12px", marginBottom: 10, display: "flex", alignItems: "center", gap: 10 }}>
             <span style={{ fontSize: 13, color: C.tealDk, flex: 1 }}>{selected.length}건 선택 · {selected.reduce((a, r) => a + r.qty, 0).toLocaleString()}장</span>
             <button onClick={() => setSel({})} style={btnGhost}>선택 해제</button>
-            <button disabled={busy} onClick={() => save(selected.map((r) => ({ ...r, status: "확인" })))} style={btnTealSm}>선택 맞게 받음</button>
+            <button disabled={busy} onClick={() => save(selected.map((r) => ({ ...r, status: "확인" })))} style={btnTealSm}>선택 정상 처리</button>
           </div>}
 
           {!rows ? <Splash text="불러오는 중…" /> : !groups.length ? <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 24, fontSize: 13, color: C.sub, textAlign: "center" }}>{tab === "todo" ? "이 기간·조건에 확인할 건이 없어요." : "이 기간·조건에 처리된 건이 없어요."}</div> : (
-            <div style={{ display: "grid", gap: 12 }}>{groups.slice(0, 60).map((g) => {
+            <div style={{ display: "grid", gap: 12 }}>{groups.map((g) => {
+              const shown = more[g.name] ? g.rows : g.rows.slice(0, 15);
               const allSel = tab === "todo" && g.rows.every((r) => sel[rcptKey(r)]);
               return (
                 <div key={g.name} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
@@ -1650,9 +1693,9 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
                     <b style={{ fontSize: 14 }}>{g.name}</b>
                     <span style={{ fontSize: 12, color: C.sub }}>{g.rows.length}건 · {g.qty.toLocaleString()}장</span>
                     {g.late > 0 && tab === "todo" && <span style={{ fontSize: 11, color: C.red, background: C.redBg, padding: "1px 8px", borderRadius: 10 }}>기한 지남 {g.late}</span>}
-                    {tab === "todo" && <button disabled={busy} onClick={() => { if (window.confirm(`${g.name} ${g.rows.length}건을 모두 맞게 받음으로 처리할까요?`)) save(g.rows.map((r) => ({ ...r, status: "확인" }))); }} style={{ ...btnGhost, marginLeft: "auto", padding: "4px 10px", fontSize: 12 }}>이 곳 전부 맞게 받음</button>}
+                    {tab === "todo" && <button disabled={busy} onClick={() => { if (window.confirm(`${g.name} ${g.rows.length}건을 모두 정상으로 처리할까요?`)) save(g.rows.map((r) => ({ ...r, status: "확인" }))); }} style={{ ...btnGhost, marginLeft: "auto", padding: "4px 10px", fontSize: 12 }}>이 곳 전부 정상</button>}
                   </div>
-                  {narrow ? <div>{g.rows.map((r) => {
+                  {narrow ? <div>{shown.map((r) => {
                     const k = rcptKey(r), dl = rcptDeadline(r.move_date), st = ST[r.r_status], kt = kindTag(r);
                     return (
                       <div key={k} style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 12px", borderTop: `1px solid ${C.border}`, background: sel[k] ? C.tealBg : "transparent" }}>
@@ -1667,15 +1710,15 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
                           {tab === "done" && r.r_recv && <div style={{ fontSize: 11.5, color: C.amber }}>실제 {r.r_recv.map((l) => l.item + " " + l.qty).join(", ")}</div>}
                         </div>
                         {tab === "todo" && <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
-                          <button disabled={busy} onClick={() => save([{ ...r, status: "확인" }])} style={{ ...btnTealSm, padding: "6px 10px" }}>맞게 받음</button>
-                          <button disabled={busy} onClick={() => setDiff(r)} style={{ ...btnGhost, padding: "4px 9px", color: C.amber }}>다르게</button>
+                          <button disabled={busy} onClick={() => save([{ ...r, status: "확인" }])} style={{ ...btnTealSm, padding: "6px 10px" }}>정상</button>
+                          <button disabled={busy} onClick={() => setDiff(r)} style={{ ...btnGhost, padding: "4px 9px", color: C.amber }}>상이</button>
                         </div>}
                       </div>
                     );
                   })}</div> : <div style={{ overflowX: "auto" }}>
                     <table style={{ ...tbl, minWidth: 640 }}>
                       <thead><tr>{tab === "todo" && <Th></Th>}<Th>일자</Th><Th>보낸 곳</Th><Th>제품</Th><Th r>수량</Th><Th>구분</Th><Th>전표·차량</Th><Th>{tab === "todo" ? "기한" : "처리"}</Th><Th></Th></tr></thead>
-                      <tbody>{g.rows.map((r) => {
+                      <tbody>{shown.map((r) => {
                         const k = rcptKey(r), dl = rcptDeadline(r.move_date), st = ST[r.r_status], kt = kindTag(r);
                         return (
                           <tr key={k} style={{ borderTop: `1px solid ${C.border}`, background: sel[k] ? C.tealBg : "transparent" }}>
@@ -1688,19 +1731,19 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
                             <Td>{tab === "todo" ? <span style={{ fontSize: 12, color: dl.c, whiteSpace: "nowrap" }}>{dl.t}</span>
                               : st ? <span style={{ fontSize: 11.5 }}><span style={{ color: st[0], background: st[1], padding: "1px 7px", borderRadius: 10 }}>{st[2]}</span><div style={{ color: C.hint, marginTop: 2 }}>{r.r_name || ""} {r.r_at ? fmtDT(r.r_at) : ""}{r.edi_conf === "대기" ? " · EDI 대기" : r.edi_conf === "완료" ? " · EDI 반영" : ""}</div>{r.r_recv && <div style={{ color: C.amber }}>실제 {r.r_recv.map((l) => l.item + " " + l.qty).join(", ")}</div>}</span> : "—"}</Td>
                             <Td r>{tab === "todo" && <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                              <button disabled={busy} onClick={() => save([{ ...r, status: "확인" }])} style={{ ...btnTealSm, padding: "5px 10px" }}>맞게 받음</button>
-                              <button disabled={busy} onClick={() => setDiff(r)} style={{ ...btnGhost, padding: "5px 9px", color: C.amber }}>다름</button>
+                              <button disabled={busy} onClick={() => save([{ ...r, status: "확인" }])} style={{ ...btnTealSm, padding: "5px 10px" }}>정상</button>
+                              <button disabled={busy} onClick={() => setDiff(r)} title="수량·제품이 다르게 왔어요" style={{ ...btnGhost, padding: "5px 9px", color: C.amber }}>상이</button>
                             </div>}</Td>
                           </tr>
                         );
                       })}</tbody>
                     </table>
                   </div>}
+                  {g.rows.length > 15 && <button onClick={() => setMore((o) => ({ ...o, [g.name]: !o[g.name] }))} style={{ width: "100%", border: "none", borderTop: `1px solid ${C.border}`, background: "#fafbfc", padding: 8, fontSize: 12.5, color: C.tealDk, cursor: "pointer" }}>{more[g.name] ? "접기" : `나머지 ${g.rows.length - 15}건 더 보기`}</button>}
                 </div>
               );
             })}</div>
           )}
-          {groups.length > 60 && <div style={{ fontSize: 12, color: C.hint, padding: 10 }}>받는 곳 60곳까지만 보여요. 받는 곳이나 기간으로 좁혀 보세요.</div>}
         </>
       )}
       {diff && <ReceiptDiffModal row={diff} palletTypes={palletTypes} onClose={() => setDiff(null)} onSave={save} />}
@@ -1733,7 +1776,7 @@ function ReceiptStats({ onRun }) {
       <div style={{ fontSize: 12, color: C.hint, marginBottom: 8 }}>EDI 입고확인 대기는 EDI 이동조회/관리 화면 LETUS 상자에서 [채우기] → [입고확인]으로 처리돼요. 자동확인은 매일 동기화 때도 돌아요.</div>
       {!rows ? <Splash text="불러오는 중…" /> : (
         <div style={{ overflowX: "auto" }}><table style={tbl}>
-          <thead><tr><Th>받는 곳</Th><Th r>직접 확인</Th><Th r>다르게 받음</Th><Th r>자동확인</Th><Th r>직접 확인률</Th><Th r>EDI 대기</Th></tr></thead>
+          <thead><tr><Th>받는 곳</Th><Th r>직접 확인</Th><Th r>상이</Th><Th r>자동확인</Th><Th r>직접 확인률</Th><Th r>EDI 대기</Th></tr></thead>
           <tbody>{rows.slice(0, 200).map((r) => <tr key={r.name} style={{ borderTop: `1px solid ${C.border}` }}><Td>{r.name}</Td><Td r>{r.direct}</Td><Td r c={r.diff ? C.amber : C.hint}>{r.diff}</Td><Td r>{r.auto}</Td><Td r b>{Math.round((r.direct / Math.max(1, r.direct + r.auto)) * 100)}%</Td><Td r c={r.wait ? C.amber : C.hint}>{r.wait}</Td></tr>)}</tbody>
         </table></div>
       )}
