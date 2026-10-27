@@ -793,7 +793,7 @@ function Shell({ session, initialConfirm }) {
         ) : (
           <>
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply, resolveDiscrepancy }} />}
-            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} myCenters={myCenters} onRegister={register} onTransfer={transferCenters} onFree={registerFree} setNav={setNav} />}
+            {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} centers={centerList} myCenters={myCenters} onFree={registerFree} setNav={setNav} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <Confirm {...{ ships, setStatus, caps, ajReqs, confirmAjSupply }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
@@ -1402,137 +1402,107 @@ function CameraModal({ onShot, onClose, color = C.teal, count = 0 }) {
   );
 }
 
-function Outbound({ partners, palletTypes, ships = [], ajReqs = [], centers = CENTERS, myCenters = CENTERS, onRegister, onTransfer, onFree, setNav }) {
+// 출고 등록: 출고처 → 입고처 하나로. EDI 이동등록과 같은 구조이고, 방향(출고·반납·센터이동·작업장 간)은 두 곳의 종류로 자동으로 정해진다
+const RECENT_KEY = "pms_recent_routes";
+const readRecent = () => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"); } catch (e) { return []; } };
+const saveRecent = (fromNo, toNo) => { try { const list = [[fromNo, toNo], ...readRecent().filter(([f, t]) => !(f === fromNo && t === toNo))].slice(0, 6); localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch (e) { /* 브라우저 저장소를 못 쓰면 최근 경로만 빠진다 */ } };
+function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCenters = CENTERS, onFree, setNav }) {
   const today = new Date().toISOString().slice(0, 10);
-  const [dir, setDir] = useState("자유");
-  const [q, setQ] = useState(""); const [sel, setSel] = useState(null);
   const [qtys, setQtys] = useState({});
-  const [open, setOpen] = useState(false); const [busy, setBusy] = useState(false);
-  const [date, setDate] = useState(today); const [note, setNote] = useState(""); const [center, setCenter] = useState(myCenters[0] || centers[0]); const [toCenter, setToCenter] = useState(centers.find((c) => c !== (myCenters[0] || centers[0])) || centers[0]);
+  const [busy, setBusy] = useState(false);
+  const [date, setDate] = useState(today); const [note, setNote] = useState("");
   const [photos, setPhotos] = useState([]); const [vehicleNo, setVehicleNo] = useState(""); const [slipRows, setSlipRows] = useState(null); const [outSign, setOutSign] = useState(null);
-  const matches = partners.filter((p) => p.name.includes(q) || (p.type || "").includes(q)).slice(0, 6);
-  const pick = (p) => { setSel(p); setQ(""); setOpen(false); };
-  const isRet = dir === "반납"; const isMv = dir === "이동"; const isFree = dir === "자유";
   const { idx: ediIdx } = useEdiIndex();
   const pinfoOut = usePalletInfo();
   const wpList = useMemo(() => (ediIdx ? ediIdx.wps.filter((w) => w.no > 0 && !w.closed) : []), [ediIdx]);
   const [fromNo, setFromNo] = useState(null); const [toNo, setToNo] = useState(null);
   const fromWp = wpList.find((w) => w.no === fromNo) || null, toWp = wpList.find((w) => w.no === toNo) || null;
-  const srcWp = isFree ? fromWp : ediIdx ? ediIdx.wpByCenter[center] : null; // 보내는 작업장 (반납은 거래처라 한도 없음)
-  const fromStock = useWpStock(isRet ? null : srcWp, ships, ediIdx);
+  // 작업장 종류: PMS 센터 / 거래처 / 그 외 EDI 작업장
+  const centerOf = (w) => (w ? w.pms_center || (centers.includes(ediClean(w.name)) ? ediClean(w.name) : null) : null);
+  const partnerOf = (w) => (w && w.partner_code ? partners.find((p) => p.code === w.partner_code) : null);
+  const kindLabel = useMemo(() => {
+    if (!fromWp || !toWp) return null;
+    const fc = centerOf(fromWp), tc = centerOf(toWp), fp = partnerOf(fromWp), tp = partnerOf(toWp);
+    if (fc && tc) return { text: "센터이동", color: "#5b3aa6", bg: "#efe8ff" };
+    if (fc && tp) return { text: "출고 (센터 → 거래처)", color: C.teal, bg: C.tealBg };
+    if (fp && tc) return { text: "반납 (거래처 → 센터)", color: C.amber, bg: C.amberBg };
+    return { text: "작업장 간 이동", color: C.blue, bg: C.blueBg };
+  }, [fromWp, toWp]); // eslint-disable-line
+  // 센터가 정해진 작업자는 출고처나 입고처 중 하나가 내 센터여야 한다
+  const restricted = myCenters.length < centers.length;
+  const mineOk = !restricted || !fromWp || !toWp || myCenters.includes(centerOf(fromWp)) || myCenters.includes(centerOf(toWp));
+  // 처음엔 내 센터를 출고처로
+  useEffect(() => {
+    if (fromNo || !ediIdx || !myCenters.length || myCenters.length === centers.length) return;
+    const w = ediIdx.wpByCenter[myCenters[0]]; if (w) setFromNo(w.no);
+  }, [ediIdx]); // eslint-disable-line
+  const [recent, setRecent] = useState(readRecent);
+  const recentRoutes = recent.map(([f, t]) => ({ f: wpList.find((w) => w.no === f), t: wpList.find((w) => w.no === t) })).filter((r) => r.f && r.t);
+  const swap = () => { setFromNo(toNo); setToNo(fromNo); };
+  const fromStock = useWpStock(fromWp, ships, ediIdx);
   const hintOf = fromStock ? (code) => fromStock.items[code] || 0 : undefined;
   const total = qtysTotal(qtys);
   const reset = () => { setQtys({}); setNote(""); setDate(today); setPhotos([]); setVehicleNo(""); setOutSign(null); };
-  // 출고/이동은 출발 센터 재고 한도 내. 반납(거래처→센터)은 한도 없음.
-  useEffect(() => { setQtys({}); }, [center, dir]);
-  const themeColor = isRet ? C.amber : isMv ? "#5b3aa6" : isFree ? C.blue : C.teal;
-  const themeBg = isRet ? C.amberBg : isMv ? "#efe8ff" : isFree ? C.blueBg : C.tealBg;
-  const canSubmit = total > 0 && !busy && (isFree ? !!fromWp && !!toWp && fromNo !== toNo : isMv ? center !== toCenter : !!sel);
+  const color = kindLabel ? kindLabel.color : C.teal, bg = kindLabel ? kindLabel.bg : C.tealBg;
+  const canSubmit = total > 0 && !busy && !!fromWp && !!toWp && fromNo !== toNo && mineOk;
   const submit = async () => {
     if (!photos.length) { alert("현장 사진을 촬영/첨부한 후 등록해주세요."); return; }
     if (!outSign) { alert("서명을 완료한 후 등록해주세요. (사인 후 손을 떼면 자동 저장돼요)"); return; }
     if (hintOf) {
       const over = qtysToLines(qtys).filter((l) => l.qty > hintOf(l.pallet));
-      if (over.length && !window.confirm("현재고(EDI 기준)보다 많아요:\n" + over.map((l) => `${l.pallet} 요청 ${l.qty}장 / 현재고 ${hintOf(l.pallet)}장`).join("\n") + "\n\n실물이 있으면 그대로 등록할까요?")) return;
+      if (over.length && !window.confirm("출고처 현재고(EDI 기준)보다 많아요:\n" + over.map((l) => `${l.pallet} 요청 ${l.qty}장 / 현재고 ${hintOf(l.pallet)}장`).join("\n") + "\n\n실물이 있으면 그대로 등록할까요?")) return;
     }
     setBusy(true);
-    const rows = isFree ? await onFree(fromWp, toWp, qtysToLines(qtys), date, note, photos, vehicleNo, outSign)
-      : isMv ? await onTransfer(center, toCenter, qtysToLines(qtys), photos, vehicleNo, note, outSign)
-      : await onRegister(sel, qtysToLines(qtys), date, note, dir, center, photos, vehicleNo, outSign);
-    setBusy(false); reset();
-    if (rows && rows.length) setSlipRows(rows); // 등록 직후 전표 바로 출력
+    const rows = await onFree(fromWp, toWp, qtysToLines(qtys), date, note, photos, vehicleNo, outSign);
+    setBusy(false);
+    if (rows && rows.length) { saveRecent(fromNo, toNo); setRecent(readRecent()); reset(); setSlipRows(rows); } // 등록 직후 전표 바로 출력
   };
+  const lbl = { fontSize: 13, color: C.sub, marginBottom: 7 };
 
   return (
     <>
-      <Head title="출고 등록" sub="방향을 고르고, 거래처·여러 유형·수량 입력" />
+      <Head title="출고 등록" sub="출고처(보내는 곳) → 입고처(받는 곳). 출고·반납·센터이동은 자동으로 구분돼요" />
       <div style={{ maxWidth: 480, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>방향</div>
-        <div style={{ display: "flex", gap: 6, marginBottom: 18, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
-          {[["자유", "출고처 → 입고처"], ["출고", "센터→거래처"], ["반납", "반납"], ["이동", "센터이동"]].map(([v, label]) => (
-            <button key={v} onClick={() => setDir(v)} style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500, background: dir === v ? (v === "반납" ? C.amber : v === "이동" ? "#5b3aa6" : v === "자유" ? C.blue : C.teal) : "transparent", color: dir === v ? "#fff" : C.sub }}>{label}</button>
-          ))}
+        {recentRoutes.length > 0 && <div style={{ marginBottom: 16 }}>
+          <div style={lbl}>최근 경로 <span style={{ color: C.hint, fontSize: 11 }}>· 누르면 채워져요</span></div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{recentRoutes.map((r) => (
+            <button key={r.f.no + "-" + r.t.no} onClick={() => { setFromNo(r.f.no); setToNo(r.t.no); }} style={{ ...btnGhost, padding: "4px 9px", fontSize: 12, background: r.f.no === fromNo && r.t.no === toNo ? C.tealBg : "#fff" }}>{ediClean(r.f.name)} → {ediClean(r.t.name)}</button>
+          ))}</div>
+        </div>}
+
+        <div style={lbl}>출고처 <span style={{ color: C.hint, fontSize: 11 }}>· 보내는 곳 (센터·시공팀·업체 검색)</span></div>
+        <WorkplacePicker wps={wpList} value={fromNo} onChange={setFromNo} width="100%" placeholder={ediIdx ? "보내는 곳 (이름·번호)" : "작업장 목록 불러오는 중…"} />
+        {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>현재고(EDI {(fromStock.date || "").slice(5)} 기준 + 당일 이동·PMS 예정): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
+        <div style={{ display: "flex", justifyContent: "center", margin: "8px 0" }}>
+          <button onClick={swap} disabled={!fromNo && !toNo} title="출고처와 입고처 바꾸기 (반납 등록할 때)" style={{ ...btnGhost, padding: "3px 12px", fontSize: 13 }}>↓ ⇅ 바꾸기</button>
         </div>
+        <div style={lbl}>입고처 <span style={{ color: C.hint, fontSize: 11 }}>· 받는 곳</span></div>
+        <WorkplacePicker wps={wpList} value={toNo} onChange={setToNo} width="100%" filter={(w) => w.no !== fromNo} placeholder="받는 곳 (이름·번호)" />
+        {kindLabel && <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11.5, color: kindLabel.color, background: kindLabel.bg, padding: "2px 9px", borderRadius: 10 }}>{kindLabel.text}</span>
+          <span style={{ fontSize: 11.5, color: C.hint }}>EDI 반영 탭에서 출고처 "{ediClean(fromWp.name)}"로 자동입력돼요</span>
+        </div>}
+        {!mineOk && <div style={{ fontSize: 12, color: C.red, marginTop: 6 }}>출고처나 입고처 중 하나는 내 센터({myCenters.join(", ")})여야 해요.</div>}
+        <div style={{ height: 18 }} />
 
-        {isFree ? (
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출고처 <span style={{ color: C.hint, fontSize: 11 }}>· 보내는 곳 · EDI 작업장 전체 검색 (센터·시공팀·업체)</span></div>
-            <WorkplacePicker wps={wpList} value={fromNo} onChange={setFromNo} width="100%" placeholder={ediIdx ? "보내는 곳 (이름·번호)" : "작업장 목록 불러오는 중…"} />
-            {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>현재고(EDI {(fromStock.date || "").slice(5)} 기준 + 당일 이동·PMS 예정): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
-            <div style={{ textAlign: "center", color: C.hint, margin: "6px 0" }}>↓</div>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>입고처 <span style={{ color: C.hint, fontSize: 11 }}>· 받는 곳</span></div>
-            <WorkplacePicker wps={wpList} value={toNo} onChange={setToNo} width="100%" filter={(w) => w.no !== fromNo} placeholder="받는 곳 (이름·번호)" />
-            {fromWp && toWp && <div style={{ fontSize: 11.5, color: C.blue, marginTop: 6 }}>{ediClean(fromWp.name)} → {ediClean(toWp.name)} · EDI 반영 탭에서 출고처 "{ediClean(fromWp.name)}"로 자동입력돼요</div>}
-          </div>
-        ) : isMv ? (
-          <div style={{ display: "flex", gap: 10, marginBottom: 18, alignItems: "flex-end" }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>출발 센터</div>
-              <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }}>{myCenters.map((c) => <option key={c} value={c}>{c}</option>)}</select>
-            </div>
-            <div style={{ paddingBottom: 10, color: C.hint }}>→</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>도착 센터</div>
-              <select value={toCenter} onChange={(e) => setToCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${center === toCenter ? C.red : C.border}`, borderRadius: 8 }}>{centers.map((c) => <option key={c} value={c}>{c}</option>)}</select>
-            </div>
-          </div>
-        ) : (
-          <>
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>거래처 <span style={{ color: C.hint, fontSize: 11 }}>· 검색</span></div>
-            {!sel ? (
-              <div style={{ position: "relative", marginBottom: 18 }}>
-                <input value={q} onChange={(e) => { setQ(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)} onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }} placeholder="예: 쿠팡, 시공팀, 이케아…" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
-                {open && (
-                  <div style={{ position: "absolute", top: 44, left: 0, right: 0, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, zIndex: 5, maxHeight: 240, overflow: "auto" }}>
-                    {matches.length === 0 && <div style={{ padding: "10px 12px", fontSize: 13, color: C.hint }}>일치하는 거래처 없음</div>}
-                    {matches.map((p) => (
-                      <button key={p.code} onMouseDown={(e) => { e.preventDefault(); pick(p); }} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "10px 12px", border: "none", borderBottom: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", textAlign: "left" }}>
-                        <span style={{ fontSize: 13 }}>{p.name}</span>
-                        <TypeBadge t={p.type} />
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.teal}`, background: C.tealBg, borderRadius: 8, padding: "10px 12px", marginBottom: 18 }}>
-                <span style={{ fontSize: 14, color: C.tealDk, fontWeight: 600 }}>{sel.name} <span style={{ fontSize: 11, fontWeight: 400 }}>· {sel.type}</span></span>
-                <button onClick={() => setSel(null)} style={{ background: "none", border: "none", cursor: "pointer", color: C.tealDk, fontSize: 16 }}>✕</button>
-              </div>
-            )}
-
-            <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납 받는 센터" : "출고하는 센터"}</div>
-            <select value={center} onChange={(e) => setCenter(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }}>
-              {myCenters.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </>
-        )}
-
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· {isRet ? "여러 종류 한 번에" : "현재고(EDI 기준)보다 많으면 빨갛게 표시"}</span></div>
-        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={themeColor} bg={themeBg} hintOf={isRet ? undefined : hintOf} hintLabel="현재고" imgOf={(c) => pinfoOut[c] || null} />
+        <div style={lbl}>파렛트 유형·수량 <span style={{ color: C.hint, fontSize: 11 }}>· 출고처 현재고보다 많으면 빨갛게 표시</span></div>
+        <PalletQtyEditor palletTypes={palletTypes} qtys={qtys} setQtys={setQtys} color={color} bg={bg} hintOf={hintOf} hintLabel="현재고" imgOf={(c) => pinfoOut[c] || null} />
         {total > 0 && <div style={{ fontSize: 12, color: C.sub, marginBottom: 14, textAlign: "right" }}>합계 <b style={{ color: C.text }}>{total}</b>장</div>}
 
-        {!isMv && (
-          <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
-            <div style={{ flex: 1, minWidth: 140 }}>
-              <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>{isRet ? "반납일자" : isFree ? "이동일자" : "출고일자"}</div>
-              <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
-            </div>
-          </div>
-        )}
+        <div style={lbl}>일자</div>
+        <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }} />
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>차량번호</div>
+        <div style={lbl}>차량번호</div>
         <input value={vehicleNo} onChange={(e) => setVehicleNo(e.target.value)} placeholder="예: 12가 3456" style={{ width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18 }} />
 
-        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
+        <div style={lbl}>메모 <span style={{ color: C.hint, fontSize: 11 }}>· 선택</span></div>
         <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="기사명, 특이사항 등" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 18, resize: "vertical", fontFamily: "inherit" }} />
 
-        <div style={{ marginBottom: 18 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label={isMv || isFree ? "이동 현장 사진" : isRet ? "반납 현장 사진" : "출고 현장 사진"} color={themeColor} /></div>
+        <div style={{ marginBottom: 18 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label="현장 사진" color={color} /></div>
+        <div style={{ marginBottom: 18 }}><SignaturePad onSave={setOutSign} label="출고 담당 서명" color={color} /></div>
 
-        <div style={{ marginBottom: 18 }}><SignaturePad onSave={setOutSign} label={isMv ? "출고 담당 서명" : isRet ? "반납자 서명" : "출고자 서명"} color={themeColor} /></div>
-
-        <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : themeColor, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : isRet ? "반납 등록" : isMv ? "센터 이동" : isFree ? "작업장 간 이동 등록" : "출고 등록"}</button>
-        <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>{isRet ? "거래처가 우리에게 돌려준 파렛트를 기록해요" : isFree ? "아무 작업장 → 아무 작업장. 센터·거래처로 연결된 곳이면 출고/반납/센터이동으로 자동 분류돼요" : isMv ? "센터 간 재고를 옮겨요 (출발 −, 도착 +)" : "등록 즉시 전표 자동 발행 · Supabase에 저장"}</p>
+        <button disabled={!canSubmit} onClick={submit} style={{ width: "100%", background: !canSubmit ? "#c7cad1" : color, color: "#fff", border: "none", borderRadius: 10, padding: 13, fontSize: 15, cursor: "pointer" }}>{busy ? "처리 중…" : !fromWp || !toWp ? "출고처와 입고처를 고르세요" : "등록 · " + (kindLabel ? kindLabel.text.split(" ")[0] : "")}</button>
+        <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>등록 즉시 전표 발행 · EDI 반영 탭에서 자동입력</p>
       </div>
       {slipRows && <SlipPrint rows={slipRows} palletTypes={palletTypes} onClose={() => { setSlipRows(null); setNav && setNav("현황"); }} />}
     </>
