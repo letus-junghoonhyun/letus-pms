@@ -1540,14 +1540,21 @@ function ReceiptDiffModal({ row, palletTypes = [], onClose, onSave }) {
   );
 }
 function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = null, onCloseFocus }) {
-  const [days, setDays] = useState(14);
+  const today = localD(new Date().toISOString());
+  const [from, setFrom] = useState(localD(new Date(Date.now() - 6 * 86400000).toISOString()));
+  const [to, setTo] = useState(today);
   const [rows, setRows] = useState(null); const [err, setErr] = useState(""); const [tick, setTick] = useState(0);
-  const [tab, setTab] = useState("todo"); const [q, setQ] = useState(""); const [toF, setToF] = useState("");
+  const [tab, setTab] = useState("todo"); const [q, setQ] = useState(""); const [toF, setToF] = useState(""); const [chip, setChip] = useState("all");
   const [sel, setSel] = useState({}); const [diff, setDiff] = useState(null); const [scan, setScan] = useState(false); const [busy, setBusy] = useState(false);
   const [batch, setBatch] = useState(focusBatch);
   const [msg, setMsg] = useState("");
+  // 폰 화면에서는 표 대신 한 줄 카드로
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.innerWidth < 700);
+  useEffect(() => { const f = () => setNarrow(window.innerWidth < 700); window.addEventListener("resize", f); return () => window.removeEventListener("resize", f); }, []);
+  // 서버는 '오늘부터 며칠 전까지'로 받으므로 시작일까지 덮는 일수로 부르고, 끝일은 화면에서 거른다
+  const days = Math.min(90, Math.max(1, Math.round((new Date(today + "T12:00:00") - new Date(from + "T12:00:00")) / 86400000) + 1));
   useEffect(() => {
-    let alive = true;
+    let alive = true; setRows(null);
     supabase.rpc("receipt_incoming", { p_days: days }).then(({ data, error }) => {
       if (!alive) return;
       if (error) { setErr("입고 확인 목록을 못 불러왔어요. letus_edi14.sql 실행 여부를 확인해주세요. (" + error.message + ")"); setRows([]); return; }
@@ -1556,65 +1563,144 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
     return () => { alive = false; };
   }, [days, tick]);
   const batchIds = useMemo(() => (batch ? new Set(ships.filter((s) => (s.batch_id || s.id) === batch).map((s) => String(s.id))) : null), [batch, ships]);
-  const all = rows || [];
-  const todo = all.filter((r) => !r.r_status);
-  const done = all.filter((r) => r.r_status);
-  const base = (tab === "done" ? done : todo).filter((r) => (!batchIds || batchIds.has(String(r.ship_id))) && (!toF || r.to_name === toF) && (!q || (r.from_name + " " + r.to_name + " " + (r.slip_no || "") + " " + (r.move_code || "")).includes(q)))
-    .sort((a, b) => (a.move_date < b.move_date ? 1 : a.move_date > b.move_date ? -1 : 0));
-  const toNames = [...new Set(all.map((r) => r.to_name))].sort();
-  const save = async (list) => {
+  const inRange = (rows || []).filter((r) => r.move_date >= from && r.move_date <= to && (!batchIds || batchIds.has(String(r.ship_id))));
+  const todoAll = inRange.filter((r) => !r.r_status), doneAll = inRange.filter((r) => r.r_status);
+  const dlOf = (r) => rcptDeadline(r.move_date).t;
+  const cnt = { today: todoAll.filter((r) => dlOf(r) === "오늘까지").length, late: todoAll.filter((r) => dlOf(r).startsWith("기한")).length, diff: doneAll.filter((r) => r.r_status === "다름").length };
+  const chipOk = (r) => chip === "all" || (chip === "today" ? dlOf(r) === "오늘까지" : chip === "late" ? dlOf(r).startsWith("기한") : chip === "aj" ? r.move_type === "렌탈입고" : chip === "pms" ? r.src === "pms" : chip === "diff" ? r.r_status === "다름" : chip === "auto" ? r.r_status === "자동확인" : true);
+  const list = (tab === "done" ? doneAll : todoAll).filter((r) => chipOk(r) && (!toF || r.to_name === toF) && (!q || (r.from_name + " " + r.to_name + " " + r.item + " " + (r.slip_no || "") + " " + (r.move_code || "") + " " + (r.vehicle_no || "")).includes(q)));
+  // 받는 곳별로 묶기 (기한 급한 곳 먼저)
+  const groups = useMemo(() => {
+    const m = {};
+    list.forEach((r) => { (m[r.to_name] = m[r.to_name] || { name: r.to_name, rows: [], qty: 0, late: 0 }).rows.push(r); m[r.to_name].qty += r.qty; if (dlOf(r).startsWith("기한")) m[r.to_name].late++; });
+    return Object.values(m).map((g) => ({ ...g, rows: g.rows.sort((a, b) => (a.move_date < b.move_date ? -1 : 1)) })).sort((a, b) => b.late - a.late || b.rows.length - a.rows.length);
+  }, [list]); // eslint-disable-line
+  const toNames = [...new Set((rows || []).map((r) => r.to_name))].sort();
+  const save = async (lst) => {
     setBusy(true);
-    const payload = list.map((r) => ({ src: r.src, account: r.account, move_code: r.move_code, item: r.item, ship_id: r.ship_id, qty: r.qty, move_date: r.move_date, move_type: r.move_type, from_name: r.from_name, to_name: r.to_name, to_wp: r.to_wp, status: r.status || "확인", recv: r.recv || null, photos: r.photos && r.photos.length ? r.photos : null, note: r.note || null }));
+    const payload = lst.map((r) => ({ src: r.src, account: r.account, move_code: r.move_code, item: r.item, ship_id: r.ship_id, qty: r.qty, move_date: r.move_date, move_type: r.move_type, from_name: r.from_name, to_name: r.to_name, to_wp: r.to_wp, status: r.status || "확인", recv: r.recv || null, photos: r.photos && r.photos.length ? r.photos : null, note: r.note || null }));
     const { data, error } = await supabase.rpc("receipt_confirm", { p_rows: payload });
     setBusy(false);
     if (error) { alert("저장 실패: " + error.message); return false; }
-    setMsg(`${data}건 저장했어요.` + (list.some((r) => r.status === "다름") ? " 다르게 받은 건은 관리자 확인 후 EDI에 고쳐져요." : "")); setSel({}); setTick((t) => t + 1);
+    setMsg(`${data}건 저장했어요.` + (lst.some((r) => r.status === "다름") ? " 다르게 받은 건은 관리자 확인 후 EDI에 고쳐져요." : "")); setSel({}); setTick((t) => t + 1);
     return true;
   };
-  const selected = base.filter((r) => sel[rcptKey(r)]);
+  const selected = list.filter((r) => sel[rcptKey(r)]);
   const photo = (r) => { const p = Array.isArray(r.out_photos) ? r.out_photos : []; return p[0] || null; };
   const ST = { 확인: [C.green, C.greenBg, "맞게 받음"], 다름: [C.amber, C.amberBg, "다르게 받음"], 자동확인: [C.sub, "#f1f2f4", "자동확인"], EDI확인: [C.green, C.greenBg, "EDI에서 확인"] };
+  const kindTag = (r) => r.move_type === "렌탈입고" ? ["AJ 공급", C.amber, C.amberBg] : r.src === "pms" ? ["PMS 등록", C.blue, C.blueBg] : ["EDI", C.sub, "#f1f2f4"];
+  const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
+  const chips = tab === "todo" ? [["all", `전체 ${todoAll.length}`], ["today", `오늘까지 ${cnt.today}`], ["late", `기한 지남 ${cnt.late}`], ["aj", "AJ 공급"], ["pms", "PMS 등록"]] : [["all", `전체 ${doneAll.length}`], ["diff", `다르게 받음 ${cnt.diff}`], ["auto", "자동확인"], ["aj", "AJ 공급"]];
+
   return (
     <>
-      <Head title="입고 확인" sub="들어온 파렛트를 받는 쪽에서 확인해요 · 이동일 다음날까지 안 누르면 자동확인" />
+      <Head title="입고 확인" sub="들어온 파렛트를 받는 쪽에서 확인해요 · 이동일 다음날까지 안 누르면 자동확인돼요" />
       {err && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{err}</div>}
       {msg && <div style={{ background: C.greenBg, color: C.green, padding: 10, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
-      {batch && <div style={{ background: C.blueBg, color: C.blue, padding: 10, borderRadius: 10, fontSize: 13, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>전표 QR로 연 건만 보고 있어요.<button onClick={() => { setBatch(null); onCloseFocus && onCloseFocus(); }} style={btnGhost}>전체 보기</button></div>}
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-        {[["todo", `받을 것 ${todo.length}`], ["done", `처리됨 ${done.length}`], ...(caps.users ? [["stats", "확인 현황(관리자)"]] : [])].map(([k, l]) => (
-          <button key={k} onClick={() => setTab(k)} style={{ ...btnGhost, padding: "7px 14px", background: tab === k ? C.teal : "#fff", color: tab === k ? "#fff" : C.text }}>{l}</button>
-        ))}
-        <button onClick={() => setScan(true)} style={{ ...btnGhost, padding: "7px 14px" }}>📷 전표 QR 스캔</button>
+      {batch && <div style={{ background: C.blueBg, color: C.blue, padding: 10, borderRadius: 10, fontSize: 13, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>전표 QR로 연 건만 보고 있어요.<button onClick={() => { setBatch(null); onCloseFocus && onCloseFocus(); }} style={btnGhost}>전체 보기</button></div>}
+
+      <div style={{ display: "grid", gridTemplateColumns: narrow ? "1fr 1fr" : "repeat(4, 1fr)", gap: 10, marginBottom: 14 }}>
+        <Metric label="받을 것" value={todoAll.length} unit="건" tone={todoAll.length ? "info" : "success"} />
+        <Metric label="오늘까지" value={cnt.today} unit="건" tone={cnt.today ? "warn" : "plain"} />
+        <Metric label="기한 지남" value={cnt.late} unit="건" tone={cnt.late ? "danger" : "plain"} />
+        <Metric label="다르게 받음" value={cnt.diff} unit="건" tone={cnt.diff ? "warn" : "plain"} />
       </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+        {[["todo", "받을 것"], ["done", "처리됨"], ...(caps.users ? [["stats", "확인 현황(관리자)"]] : [])].map(([k, l]) => (
+          <button key={k} onClick={() => { setTab(k); setChip("all"); }} style={{ ...btnGhost, padding: "7px 16px", fontWeight: tab === k ? 600 : 400, background: tab === k ? C.teal : "#fff", color: tab === k ? "#fff" : C.text }}>{l}</button>
+        ))}
+        <button onClick={() => setScan(true)} style={{ ...btnGhost, padding: "7px 14px", marginLeft: "auto" }}>📷 전표 QR 스캔</button>
+      </div>
+
       {tab === "stats" ? <ReceiptStats onRun={() => setTick((t) => t + 1)} /> : (
         <>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-            <select value={toF} onChange={(e) => setToF(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, maxWidth: 220 }}><option value="">받는 곳 전체</option>{toNames.map((n) => <option key={n}>{n}</option>)}</select>
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="보낸 곳·전표 검색" style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, width: 160 }} />
-            <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }}><option value={7}>최근 7일</option><option value={14}>최근 14일</option><option value={30}>최근 30일</option></select>
-            {tab === "todo" && selected.length > 0 && <button disabled={busy} onClick={() => save(selected.map((r) => ({ ...r, status: "확인" })))} style={btnTealSm}>선택 {selected.length}건 맞게 받음</button>}
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 12, display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 12.5, color: C.sub, width: 44 }}>기간</span>
+              <DateRange from={from} to={to} onApply={(f, t) => { setFrom(f); setTo(t); }}>
+                {[["오늘", 0], ["3일", 2], ["7일", 6], ["30일", 29]].map(([l, d]) => <button key={l} onClick={() => { setFrom(localD(new Date(Date.now() - d * 86400000).toISOString())); setTo(today); }} style={{ ...btnGhost, padding: "5px 9px" }}>{l}</button>)}
+              </DateRange>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 12.5, color: C.sub, width: 44 }}>받는 곳</span>
+              <input list="rcpt-to-list" value={toF} onChange={(e) => setToF(e.target.value)} placeholder="받는 곳 검색 (전체)" style={{ ...inp, width: 220 }} />
+              <datalist id="rcpt-to-list">{toNames.map((n) => <option key={n} value={n} />)}</datalist>
+              {toF && <button onClick={() => setToF("")} style={{ ...btnGhost, padding: "5px 9px" }}>✕ 전체</button>}
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="보낸 곳·제품·전표·차량 검색" style={{ ...inp, width: 200 }} />
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {chips.map(([k, l]) => <button key={k} onClick={() => setChip(k)} style={{ fontSize: 12, padding: "4px 11px", borderRadius: 20, border: `1px solid ${chip === k ? C.teal : C.border}`, background: chip === k ? C.tealBg : "#fff", color: chip === k ? C.tealDk : C.sub, cursor: "pointer" }}>{l}</button>)}
+            </div>
           </div>
-          {!rows ? <Splash text="불러오는 중…" /> : !base.length ? <div style={{ fontSize: 13, color: C.sub, padding: 16 }}>{tab === "todo" ? "확인할 건이 없어요." : "처리된 건이 없어요."}</div> : (
-            <div style={{ display: "grid", gap: 8 }}>{base.slice(0, 300).map((r) => {
-              const k = rcptKey(r), dl = rcptDeadline(r.move_date), st = ST[r.r_status];
+
+          {tab === "todo" && selected.length > 0 && <div style={{ position: "sticky", top: "env(safe-area-inset-top, 0px)", zIndex: 5, background: C.tealBg, border: `1px solid ${C.teal}`, borderRadius: 10, padding: "8px 12px", marginBottom: 10, display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 13, color: C.tealDk, flex: 1 }}>{selected.length}건 선택 · {selected.reduce((a, r) => a + r.qty, 0).toLocaleString()}장</span>
+            <button onClick={() => setSel({})} style={btnGhost}>선택 해제</button>
+            <button disabled={busy} onClick={() => save(selected.map((r) => ({ ...r, status: "확인" })))} style={btnTealSm}>선택 맞게 받음</button>
+          </div>}
+
+          {!rows ? <Splash text="불러오는 중…" /> : !groups.length ? <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 24, fontSize: 13, color: C.sub, textAlign: "center" }}>{tab === "todo" ? "이 기간·조건에 확인할 건이 없어요." : "이 기간·조건에 처리된 건이 없어요."}</div> : (
+            <div style={{ display: "grid", gap: 12 }}>{groups.slice(0, 60).map((g) => {
+              const allSel = tab === "todo" && g.rows.every((r) => sel[rcptKey(r)]);
               return (
-                <div key={k} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", display: "flex", gap: 10, alignItems: "center" }}>
-                  {tab === "todo" && <input type="checkbox" checked={!!sel[k]} onChange={(e) => setSel((o) => ({ ...o, [k]: e.target.checked }))} style={{ width: 18, height: 18, flexShrink: 0 }} />}
-                  {photo(r) ? <img src={photo(r)} alt="" style={{ width: 46, height: 46, objectFit: "cover", borderRadius: 6, flexShrink: 0 }} /> : null}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13.5 }}><b>{r.item} {r.qty}장</b> · {r.from_name} → {r.to_name}</div>
-                    <div style={{ fontSize: 11.5, color: C.hint }}>{r.move_date.slice(5)} · {r.move_type === "렌탈입고" ? "AJ 공급" : r.src === "pms" ? "PMS 등록(EDI 반영 전)" : "EDI"}{r.slip_no ? " · 전표 " + r.slip_no : ""}{r.vehicle_no ? " · " + r.vehicle_no : ""}{tab === "todo" ? <span style={{ color: dl.c }}> · {dl.t}</span> : ""}</div>
-                    {tab === "done" && st && <div style={{ fontSize: 11.5, marginTop: 2 }}><span style={{ color: st[0], background: st[1], padding: "1px 7px", borderRadius: 10 }}>{st[2]}</span> <span style={{ color: C.hint }}>{r.r_name || ""} {r.r_at ? fmtDT(r.r_at) : ""}{r.edi_conf === "대기" ? " · EDI 입고확인 대기" : r.edi_conf === "완료" ? " · EDI 반영됨" : ""}</span>
-                      {r.r_recv && <span style={{ color: C.amber }}> · 실제 {r.r_recv.map((l) => l.item + " " + l.qty).join(", ")}</span>}</div>}
+                <div key={g.name} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: "#f7f8fa", borderBottom: `1px solid ${C.border}`, flexWrap: "wrap" }}>
+                    {tab === "todo" && <input type="checkbox" checked={allSel} onChange={(e) => setSel((o) => { const n = { ...o }; g.rows.forEach((r) => { n[rcptKey(r)] = e.target.checked; }); return n; })} style={{ width: 17, height: 17 }} title="이 곳 전부 선택" />}
+                    <b style={{ fontSize: 14 }}>{g.name}</b>
+                    <span style={{ fontSize: 12, color: C.sub }}>{g.rows.length}건 · {g.qty.toLocaleString()}장</span>
+                    {g.late > 0 && tab === "todo" && <span style={{ fontSize: 11, color: C.red, background: C.redBg, padding: "1px 8px", borderRadius: 10 }}>기한 지남 {g.late}</span>}
+                    {tab === "todo" && <button disabled={busy} onClick={() => { if (window.confirm(`${g.name} ${g.rows.length}건을 모두 맞게 받음으로 처리할까요?`)) save(g.rows.map((r) => ({ ...r, status: "확인" }))); }} style={{ ...btnGhost, marginLeft: "auto", padding: "4px 10px", fontSize: 12 }}>이 곳 전부 맞게 받음</button>}
                   </div>
-                  {tab === "todo" && <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
-                    <button disabled={busy} onClick={() => save([{ ...r, status: "확인" }])} style={btnTealSm}>맞게 받음</button>
-                    <button disabled={busy} onClick={() => setDiff(r)} style={{ ...btnGhost, color: C.amber }}>다르게 받음</button>
+                  {narrow ? <div>{g.rows.map((r) => {
+                    const k = rcptKey(r), dl = rcptDeadline(r.move_date), st = ST[r.r_status], kt = kindTag(r);
+                    return (
+                      <div key={k} style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 12px", borderTop: `1px solid ${C.border}`, background: sel[k] ? C.tealBg : "transparent" }}>
+                        {tab === "todo" && <input type="checkbox" checked={!!sel[k]} onChange={(e) => setSel((o) => ({ ...o, [k]: e.target.checked }))} style={{ width: 18, height: 18, flexShrink: 0 }} />}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 14 }}><b>{r.item} {r.qty.toLocaleString()}장</b> <span style={{ color: C.sub }}>· {r.from_name}</span></div>
+                          <div style={{ fontSize: 11.5, color: C.hint, marginTop: 2, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                            <span>{r.move_date.slice(5)}</span><span style={{ color: kt[1], background: kt[2], padding: "0 6px", borderRadius: 10 }}>{kt[0]}</span>
+                            {r.slip_no && <span>{r.slip_no}</span>}{r.vehicle_no && <span>{r.vehicle_no}</span>}
+                            {tab === "todo" ? <span style={{ color: dl.c }}>{dl.t}</span> : st && <span style={{ color: st[0] }}>{st[2]}{r.edi_conf === "대기" ? " · EDI 대기" : ""}</span>}
+                          </div>
+                          {tab === "done" && r.r_recv && <div style={{ fontSize: 11.5, color: C.amber }}>실제 {r.r_recv.map((l) => l.item + " " + l.qty).join(", ")}</div>}
+                        </div>
+                        {tab === "todo" && <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
+                          <button disabled={busy} onClick={() => save([{ ...r, status: "확인" }])} style={{ ...btnTealSm, padding: "6px 10px" }}>맞게 받음</button>
+                          <button disabled={busy} onClick={() => setDiff(r)} style={{ ...btnGhost, padding: "4px 9px", color: C.amber }}>다르게</button>
+                        </div>}
+                      </div>
+                    );
+                  })}</div> : <div style={{ overflowX: "auto" }}>
+                    <table style={{ ...tbl, minWidth: 640 }}>
+                      <thead><tr>{tab === "todo" && <Th></Th>}<Th>일자</Th><Th>보낸 곳</Th><Th>제품</Th><Th r>수량</Th><Th>구분</Th><Th>전표·차량</Th><Th>{tab === "todo" ? "기한" : "처리"}</Th><Th></Th></tr></thead>
+                      <tbody>{g.rows.map((r) => {
+                        const k = rcptKey(r), dl = rcptDeadline(r.move_date), st = ST[r.r_status], kt = kindTag(r);
+                        return (
+                          <tr key={k} style={{ borderTop: `1px solid ${C.border}`, background: sel[k] ? C.tealBg : "transparent" }}>
+                            {tab === "todo" && <td style={{ padding: "8px 7px" }}><input type="checkbox" checked={!!sel[k]} onChange={(e) => setSel((o) => ({ ...o, [k]: e.target.checked }))} style={{ width: 16, height: 16 }} /></td>}
+                            <Td>{r.move_date.slice(5)}</Td>
+                            <Td><div style={{ display: "flex", alignItems: "center", gap: 6 }}>{photo(r) && <a href={photo(r)} target="_blank" rel="noreferrer"><img src={photo(r)} alt="" style={{ width: 30, height: 30, objectFit: "cover", borderRadius: 4 }} /></a>}{r.from_name}</div></Td>
+                            <Td b>{r.item}</Td><Td r b>{r.qty.toLocaleString()}</Td>
+                            <Td><span style={{ fontSize: 11, color: kt[1], background: kt[2], padding: "1px 7px", borderRadius: 10, whiteSpace: "nowrap" }}>{kt[0]}</span></Td>
+                            <Td><span style={{ fontSize: 12, color: C.sub }}>{[r.slip_no, r.vehicle_no].filter(Boolean).join(" · ") || "—"}</span></Td>
+                            <Td>{tab === "todo" ? <span style={{ fontSize: 12, color: dl.c, whiteSpace: "nowrap" }}>{dl.t}</span>
+                              : st ? <span style={{ fontSize: 11.5 }}><span style={{ color: st[0], background: st[1], padding: "1px 7px", borderRadius: 10 }}>{st[2]}</span><div style={{ color: C.hint, marginTop: 2 }}>{r.r_name || ""} {r.r_at ? fmtDT(r.r_at) : ""}{r.edi_conf === "대기" ? " · EDI 대기" : r.edi_conf === "완료" ? " · EDI 반영" : ""}</div>{r.r_recv && <div style={{ color: C.amber }}>실제 {r.r_recv.map((l) => l.item + " " + l.qty).join(", ")}</div>}</span> : "—"}</Td>
+                            <Td r>{tab === "todo" && <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                              <button disabled={busy} onClick={() => save([{ ...r, status: "확인" }])} style={{ ...btnTealSm, padding: "5px 10px" }}>맞게 받음</button>
+                              <button disabled={busy} onClick={() => setDiff(r)} style={{ ...btnGhost, padding: "5px 9px", color: C.amber }}>다름</button>
+                            </div>}</Td>
+                          </tr>
+                        );
+                      })}</tbody>
+                    </table>
                   </div>}
                 </div>
               );
             })}</div>
           )}
+          {groups.length > 60 && <div style={{ fontSize: 12, color: C.hint, padding: 10 }}>받는 곳 60곳까지만 보여요. 받는 곳이나 기간으로 좁혀 보세요.</div>}
         </>
       )}
       {diff && <ReceiptDiffModal row={diff} palletTypes={palletTypes} onClose={() => setDiff(null)} onSave={save} />}
