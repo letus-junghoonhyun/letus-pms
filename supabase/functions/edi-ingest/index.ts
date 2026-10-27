@@ -237,6 +237,47 @@ Deno.serve(async (req) => {
       if (error) return json({ error: error.message }, 500);
       return json({ ok: true });
     }
+    // 12) 자동확인: 이동일 다음날까지 아무도 안 누른 건 (동기화 끝에 호출)
+    if (body.action === "receipt_auto") {
+      const { data, error } = await db.rpc("receipt_auto");
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true, auto: data });
+    }
+    // 13) EDI 입고확인 대기 (이동조회/관리 상자에서 채울 것): 맞게 받음·자동확인 중 EDI에 아직 미확인
+    if (body.action === "conf_list") {
+      const out = [];
+      for (let p = 0; p < 10; p++) {
+        const { data, error } = await db.from("edi_receipt").select("move_code,move_date,item,to_name,status")
+          .eq("account", account).eq("edi_conf", "대기").not("move_code", "is", null).in("status", ["확인", "자동확인"])
+          .order("move_date").range(p * 1000, p * 1000 + 999);
+        if (error) return json({ error: error.message }, 500);
+        out.push(...(data || []));
+        if (!data || data.length < 1000) break;
+      }
+      // PMS 전표로 확인한 뒤 EDI에 반영된 건 (전표에 이동코드가 붙은 것)
+      const { data: ships } = await db.from("edi_receipt").select("ship_id,item,status,move_date,to_name").is("move_code", null).eq("edi_conf", "대기").in("status", ["확인"]).limit(1000);
+      for (const r of ships || []) {
+        const { data: s } = await db.from("shipment").select("edi_move_code").eq("id", r.ship_id).maybeSingle();
+        if (s && s.edi_move_code) out.push({ move_code: s.edi_move_code, move_date: r.move_date, item: r.item, to_name: r.to_name, status: r.status, ship_id: r.ship_id });
+      }
+      return json({ rows: out });
+    }
+    // 14) EDI에서 [입고확인] 눌러 저장된 이동코드들
+    if (body.action === "conf_done") {
+      const codes = (body.codes || []).filter((c) => /^M/.test(String(c))).slice(0, 5000);
+      if (!codes.length) return json({ ok: true, done: 0 });
+      let n = 0;
+      for (let i = 0; i < codes.length; i += 300) {
+        const { data, error } = await db.from("edi_receipt").update({ edi_conf: "완료" }).eq("account", account).in("move_code", codes.slice(i, i + 300)).eq("edi_conf", "대기").select("id");
+        if (error) return json({ error: error.message }, 500);
+        n += (data || []).length;
+      }
+      const { data: sh } = await db.from("shipment").select("id").in("edi_move_code", codes.slice(0, 1000));
+      const ids = (sh || []).map((s) => String(s.id));
+      if (ids.length) await db.from("edi_receipt").update({ edi_conf: "완료" }).in("ship_id", ids).is("move_code", null).eq("edi_conf", "대기");
+      await db.from("aj_move").update({ conf: "승인" }).eq("account", account).in("move_code", codes.slice(0, 1000));
+      return json({ ok: true, done: n });
+    }
     return json({ error: "unknown action" }, 400);
   } catch (e) {
     return json({ error: String(e) }, 500);

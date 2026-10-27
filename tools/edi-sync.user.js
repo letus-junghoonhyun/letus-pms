@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.14
+// @version      3.15
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -257,6 +257,9 @@
       mvErr = e.message;
       if (/로그인 만료|토큰이|주소가|anon 키가|로그인 계정이 바뀌었어요/.test(e.message)) st.abort = true;
     }
+
+    // ── 1-0) 자동확인: 이동일 다음날까지 받는 쪽이 안 누른 건 ──
+    if (!st.abort) { try { await call("receipt_auto", {}); } catch (e) { /* 다음 동기화 때 다시 */ } }
 
     // ── 1-1) 입고처 목록 (하루 한 번) ──
     let dsTxt = "";
@@ -641,15 +644,17 @@
     ACCOUNT = W.$("#demdCode").val(); TAG = "이동 수정";
     const $ = W.$;
     let rows;
-    try { rows = (await call("fix_list", {})).rows || []; } catch (e) { return; }
-    if (!rows.length) return; // 고칠 건이 없으면 상자를 띄우지 않는다
+    try { rows = (await call("fix_list", {})).rows || []; } catch (e) { rows = []; }
+    let conf = [];
+    try { conf = (await call("conf_list", {})).rows || []; } catch (e) { conf = []; }
+    if (!rows.length && !conf.length) return; // 할 일이 없으면 상자를 띄우지 않는다
     const panel = document.createElement("div");
     panel.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:10px 12px;border-radius:10px;width:320px;max-height:70vh;overflow:auto;box-shadow:0 4px 14px rgba(0,0,0,.3)";
     const pill = document.createElement("div");
     pill.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;color:#fff;background:#A32D2D;font:12px/1.5 sans-serif;padding:5px 12px;border-radius:14px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.3);display:none";
     document.body.appendChild(panel); document.body.appendChild(pill);
     const collapsed = () => GM_getValue("fixCollapsed") === "1";
-    const applyCollapse = () => { const c = collapsed(); panel.style.display = c ? "none" : "block"; pill.style.display = c ? "block" : "none"; pill.textContent = "LETUS ▾ 수정 " + rows.length + "건"; };
+    const applyCollapse = () => { const c = collapsed(); panel.style.display = c ? "none" : "block"; pill.style.display = c ? "block" : "none"; pill.textContent = "LETUS ▾ " + [rows.length ? "수정 " + rows.length : "", conf.length ? "입고확인 " + conf.length : ""].filter(Boolean).join(" · "); };
     pill.onclick = () => { GM_setValue("fixCollapsed", "0"); applyCollapse(); };
     draggable([panel, pill], "posFixList");
     const diffTxt = (f) => {
@@ -669,7 +674,7 @@
     };
     panel.innerHTML = "";
     const h = document.createElement("div"); h.style.cssText = "display:flex;align-items:center;gap:6px";
-    h.innerHTML = "<b style='flex:1'>LETUS PMS · 승인된 이동 수정 <span style='opacity:.7;font-weight:400'>(" + ACCOUNT + ")</span></b>";
+    h.innerHTML = "<b style='flex:1'>LETUS PMS · 이동 처리 <span style='opacity:.7;font-weight:400'>(" + ACCOUNT + ")</span></b>";
     const t = document.createElement("button"); t.textContent = "접기"; t.style.cssText = "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:1px 8px;cursor:pointer";
     t.onclick = () => { GM_setValue("fixCollapsed", "1"); applyCollapse(); }; h.appendChild(t); panel.appendChild(h);
     rows.forEach((f) => {
@@ -683,6 +688,46 @@
       b2.onclick = async () => { if (!confirm("EDI에서 수정을 저장했나요? PMS에 '반영'으로 표시해요.")) return; try { await call("fix_done", { id: f.id }); d.remove(); rows = rows.filter((x) => x.id !== f.id); applyCollapse(); say("수정 반영 완료로 표시했어요"); } catch (e) { alert(e.message); } };
       row.appendChild(b1); row.appendChild(b2); d.appendChild(row); panel.appendChild(d);
     });
+
+    // ── 입고확인 대기: PMS에서 받는 쪽이 확인(맞게 받음·자동확인)한 이동을 받는 쪽 기준으로 찾아 선택해 둔다. [입고확인]은 사람이 ──
+    const confBox = document.createElement("div");
+    const drawConf = () => {
+      confBox.innerHTML = "";
+      if (!conf.length) return;
+      confBox.style.cssText = "padding:8px 0 2px;border-top:1px solid rgba(255,255,255,.25);margin-top:4px";
+      const dates = conf.map((c) => c.move_date).sort();
+      confBox.innerHTML = "<b>입고확인 대기 " + conf.length + "건</b> <span style='opacity:.65'>(" + String(dates[0]).slice(5) + " ~ " + String(dates[dates.length - 1]).slice(5) + ")</span><div style='opacity:.7'>받는 쪽이 PMS에서 맞게 받음·자동확인한 건이에요. [채우기] → 표에서 선택된 줄 확인 → EDI [입고확인]</div>";
+      const b = document.createElement("button"); b.textContent = "채우기 (오래된 7일)"; b.style.cssText = "margin-top:5px;background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:3px 10px;cursor:pointer";
+      b.onclick = () => fillConf(dates[0]).catch((e) => alert("채우기 실패: " + e.message));
+      confBox.appendChild(b);
+    };
+    const fillConf = async (from) => {
+      const to = fmt(new Date(Math.min(addDays(parse(from), 6), new Date())));
+      const want = new Set(conf.filter((c) => c.move_date >= from && c.move_date <= to).map((c) => c.move_code));
+      $("#flag").val("stor"); try { if (W.changType) W.changType(); } catch (e) {}
+      $("#demdNumb").val(""); $("#confFlag").val("NULL"); $("#begnDate").val(from); $("#enddDate").val(to);
+      W.doAction("search");
+      await wait(800); await until(() => W.mySheet1.RowCount() > 0, 20000); await wait(500);
+      const S = W.mySheet1; let n = 0;
+      for (let i = S.GetDataFirstRow(); i <= S.LastRow(); i++) {
+        if (want.has(S.GetCellValue(i, "MOVE_CODE")) && S.GetCellValue(i, "CONF_FLAG") !== "확인") { S.SetCellValue(i, "sCheck", 1); n++; }
+      }
+      alert(from.slice(5) + " ~ " + to.slice(5) + " 입고확인 대상 " + want.size + "건 중 " + n + "건을 선택했어요.\n선택된 줄을 확인하고 [입고확인]을 눌러 주세요." + (n < want.size ? "\n(못 찾은 건은 이미 확인됐거나 다른 작업장 기준이에요)" : ""));
+    };
+    // EDI [입고확인] 저장이 끝나면 선택돼 있던 이동코드를 PMS에 알린다
+    const origAjax = W.ajaxExecute;
+    W.ajaxExecute = function (url) {
+      let codes = [];
+      try { if (/EDI_WARE_MOVE_CONF_UPDT\.do/.test(String(url))) { const S = W.mySheet1; for (let i = S.GetDataFirstRow(); i <= S.LastRow(); i++) if (S.GetCellValue(i, "sCheck") == 1) codes.push(S.GetCellValue(i, "MOVE_CODE")); } } catch (e) {}
+      const rtn = origAjax.apply(this, arguments);
+      try {
+        if (codes.length && String(rtn).indexOf("OK") === 0) {
+          call("conf_done", { codes }).then((r) => { const done = new Set(codes); conf = conf.filter((c) => !done.has(c.move_code)); drawConf(); applyCollapse(); say("입고확인 " + r.done + "건을 PMS에 반영했어요"); }).catch((e) => say("PMS 반영 실패: " + e.message));
+        }
+      } catch (e) { /* 원래 동작 우선 */ }
+      return rtn;
+    };
+    drawConf(); panel.appendChild(confBox);
     applyCollapse();
   }
 

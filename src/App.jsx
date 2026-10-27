@@ -789,13 +789,13 @@ function Shell({ session, initialConfirm }) {
             {err}<br /><br />혹시 supabase.js에 anon key를 안 넣었거나, 쓰기 권한(RLS) 설정이 필요할 수 있어요. 화면을 캡처해서 Claude에게 물어보세요.
           </div>
         ) : focusBatch ? (
-          <QuickConfirm rows={ships.filter((s) => (s.batch_id || s.id) === focusBatch)} setStatus={setStatus} onClose={() => { setFocusBatch(null); window.history.replaceState({}, "", window.location.pathname); }} />
+          <ReceiptScreen {...{ ships, palletTypes, caps }} focusBatch={focusBatch} onCloseFocus={() => { setFocusBatch(null); window.history.replaceState({}, "", window.location.pathname); }} />
         ) : (
           <>
             {nav === "현황" && <Dashboard {...{ ships, ajReqs, flash, setStatus, setNav, caps, palletTypes, editShipment, cancelShipment, resetData, confirmAjSupply, resolveDiscrepancy }} />}
             {nav === "출고" && caps.outbound && <Outbound partners={partnersFull} palletTypes={palletTypes} ships={ships} centers={centerList} myCenters={myCenters} onFree={registerFree} setNav={setNav} />}
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
-            {nav === "확인" && <Confirm {...{ ships, setStatus, caps, ajReqs, confirmAjSupply }} />}
+            {nav === "확인" && <ReceiptScreen {...{ ships, palletTypes, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
             {nav === "재고" && caps.inventory && <InventoryScreen {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, finishAjSupply, skipAjEdi, ships, caps, centers: centerList }} />}
@@ -1502,6 +1502,155 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
         <p style={{ textAlign: "center", fontSize: 11, color: C.hint, marginTop: 10 }}>등록 즉시 전표 발행 · EDI 반영 탭에서 자동입력</p>
       </div>
       {slipRows && <SlipPrint rows={slipRows} palletTypes={palletTypes} onClose={() => { setSlipRows(null); setNav && setNav("현황"); }} />}
+    </>
+  );
+}
+
+// 입고 확인: 받는 쪽(센터 작업자·시공팀·현장 담당)이 들어온 파렛트를 확인. PMS 전표 + EDI에만 있는 이동을 함께 보여준다
+// 이동일 다음날까지 안 누르면 자동확인. 맞게 받음·자동확인은 EDI 입고확인 대기로, 다르게 받음은 이동 수정요청으로 이어진다
+const rcptKey = (r) => (r.move_code ? r.account + "|" + r.move_code + "|" + r.item : "pms|" + r.ship_id);
+const rcptDeadline = (d) => {
+  const today = localD(new Date().toISOString());
+  const gap = Math.round((new Date(today + "T12:00:00") - new Date(d + "T12:00:00")) / 86400000);
+  return gap <= 0 ? { t: "내일까지", c: C.sub } : gap === 1 ? { t: "오늘까지", c: C.amber } : { t: "기한 지남 · 자동확인 예정", c: C.red };
+};
+function ReceiptDiffModal({ row, palletTypes = [], onClose, onSave }) {
+  const codes = [...new Set([row.item, ...palletTypes.map((p) => p.code)])];
+  const [lines, setLines] = useState({ [row.item]: row.qty });
+  const [note, setNote] = useState(""); const [photos, setPhotos] = useState([]); const [busy, setBusy] = useState(false);
+  const changed = codes.some((c) => (lines[c] || 0) !== (c === row.item ? row.qty : 0));
+  const save = async () => {
+    if (!note.trim()) { alert("어떻게 달랐는지 적어 주세요. (예: 18F 8장 + 14C 2장 도착)"); return; }
+    setBusy(true);
+    await onSave([{ ...row, status: "다름", recv: codes.filter((c) => (lines[c] || 0) > 0 || c === row.item).map((c) => ({ item: c, qty: lines[c] || 0 })), note: note.trim(), photos }]);
+    setBusy(false); onClose();
+  };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 80, padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 14, padding: 20, width: "100%", maxWidth: 440, maxHeight: "92vh", overflow: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0, fontSize: 16 }}>다르게 받음</h3><button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, color: C.sub, cursor: "pointer" }}>✕</button></div>
+        <div style={{ fontSize: 12.5, color: C.sub, margin: "4px 0 14px" }}>{row.move_date} · {row.from_name} → {row.to_name} · 보낸 수량 {row.item} {row.qty}장</div>
+        <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>실제로 받은 것 <span style={{ color: C.hint, fontSize: 11 }}>· 다른 제품이 섞여 왔으면 그 제품에도 입력</span></div>
+        <PalletQtyEditor palletTypes={codes.map((c) => ({ code: c }))} qtys={lines} setQtys={setLines} color={C.amber} bg={C.amberBg} />
+        <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="어떻게 달랐나요? (예: 18F 10장이라 했는데 8장 + 14C 2장)" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12, resize: "vertical", fontFamily: "inherit" }} />
+        <div style={{ marginBottom: 14 }}><PhotoCapture photos={photos} setPhotos={setPhotos} label="받은 파렛트 사진" hint="수량이 보이게" color={C.amber} /></div>
+        <button disabled={busy || !changed} onClick={save} style={{ width: "100%", background: busy || !changed ? "#c7cad1" : C.amber, color: "#fff", border: "none", borderRadius: 10, padding: 12, fontSize: 14, cursor: "pointer" }}>{busy ? "저장 중…" : !changed ? "수량을 바꿔야 저장할 수 있어요" : "저장 (관리자 확인 후 EDI 수정)"}</button>
+      </div>
+    </div>
+  );
+}
+function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = null, onCloseFocus }) {
+  const [days, setDays] = useState(14);
+  const [rows, setRows] = useState(null); const [err, setErr] = useState(""); const [tick, setTick] = useState(0);
+  const [tab, setTab] = useState("todo"); const [q, setQ] = useState(""); const [toF, setToF] = useState("");
+  const [sel, setSel] = useState({}); const [diff, setDiff] = useState(null); const [scan, setScan] = useState(false); const [busy, setBusy] = useState(false);
+  const [batch, setBatch] = useState(focusBatch);
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    let alive = true;
+    supabase.rpc("receipt_incoming", { p_days: days }).then(({ data, error }) => {
+      if (!alive) return;
+      if (error) { setErr("입고 확인 목록을 못 불러왔어요. letus_edi14.sql 실행 여부를 확인해주세요. (" + error.message + ")"); setRows([]); return; }
+      setErr(""); setRows(data || []);
+    });
+    return () => { alive = false; };
+  }, [days, tick]);
+  const batchIds = useMemo(() => (batch ? new Set(ships.filter((s) => (s.batch_id || s.id) === batch).map((s) => String(s.id))) : null), [batch, ships]);
+  const all = rows || [];
+  const todo = all.filter((r) => !r.r_status);
+  const done = all.filter((r) => r.r_status);
+  const base = (tab === "done" ? done : todo).filter((r) => (!batchIds || batchIds.has(String(r.ship_id))) && (!toF || r.to_name === toF) && (!q || (r.from_name + " " + r.to_name + " " + (r.slip_no || "") + " " + (r.move_code || "")).includes(q)))
+    .sort((a, b) => (a.move_date < b.move_date ? 1 : a.move_date > b.move_date ? -1 : 0));
+  const toNames = [...new Set(all.map((r) => r.to_name))].sort();
+  const save = async (list) => {
+    setBusy(true);
+    const payload = list.map((r) => ({ src: r.src, account: r.account, move_code: r.move_code, item: r.item, ship_id: r.ship_id, qty: r.qty, move_date: r.move_date, move_type: r.move_type, from_name: r.from_name, to_name: r.to_name, to_wp: r.to_wp, status: r.status || "확인", recv: r.recv || null, photos: r.photos && r.photos.length ? r.photos : null, note: r.note || null }));
+    const { data, error } = await supabase.rpc("receipt_confirm", { p_rows: payload });
+    setBusy(false);
+    if (error) { alert("저장 실패: " + error.message); return false; }
+    setMsg(`${data}건 저장했어요.` + (list.some((r) => r.status === "다름") ? " 다르게 받은 건은 관리자 확인 후 EDI에 고쳐져요." : "")); setSel({}); setTick((t) => t + 1);
+    return true;
+  };
+  const selected = base.filter((r) => sel[rcptKey(r)]);
+  const photo = (r) => { const p = Array.isArray(r.out_photos) ? r.out_photos : []; return p[0] || null; };
+  const ST = { 확인: [C.green, C.greenBg, "맞게 받음"], 다름: [C.amber, C.amberBg, "다르게 받음"], 자동확인: [C.sub, "#f1f2f4", "자동확인"], EDI확인: [C.green, C.greenBg, "EDI에서 확인"] };
+  return (
+    <>
+      <Head title="입고 확인" sub="들어온 파렛트를 받는 쪽에서 확인해요 · 이동일 다음날까지 안 누르면 자동확인" />
+      {err && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{err}</div>}
+      {msg && <div style={{ background: C.greenBg, color: C.green, padding: 10, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      {batch && <div style={{ background: C.blueBg, color: C.blue, padding: 10, borderRadius: 10, fontSize: 13, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>전표 QR로 연 건만 보고 있어요.<button onClick={() => { setBatch(null); onCloseFocus && onCloseFocus(); }} style={btnGhost}>전체 보기</button></div>}
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        {[["todo", `받을 것 ${todo.length}`], ["done", `처리됨 ${done.length}`], ...(caps.users ? [["stats", "확인 현황(관리자)"]] : [])].map(([k, l]) => (
+          <button key={k} onClick={() => setTab(k)} style={{ ...btnGhost, padding: "7px 14px", background: tab === k ? C.teal : "#fff", color: tab === k ? "#fff" : C.text }}>{l}</button>
+        ))}
+        <button onClick={() => setScan(true)} style={{ ...btnGhost, padding: "7px 14px" }}>📷 전표 QR 스캔</button>
+      </div>
+      {tab === "stats" ? <ReceiptStats onRun={() => setTick((t) => t + 1)} /> : (
+        <>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+            <select value={toF} onChange={(e) => setToF(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, maxWidth: 220 }}><option value="">받는 곳 전체</option>{toNames.map((n) => <option key={n}>{n}</option>)}</select>
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="보낸 곳·전표 검색" style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, width: 160 }} />
+            <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }}><option value={7}>최근 7일</option><option value={14}>최근 14일</option><option value={30}>최근 30일</option></select>
+            {tab === "todo" && selected.length > 0 && <button disabled={busy} onClick={() => save(selected.map((r) => ({ ...r, status: "확인" })))} style={btnTealSm}>선택 {selected.length}건 맞게 받음</button>}
+          </div>
+          {!rows ? <Splash text="불러오는 중…" /> : !base.length ? <div style={{ fontSize: 13, color: C.sub, padding: 16 }}>{tab === "todo" ? "확인할 건이 없어요." : "처리된 건이 없어요."}</div> : (
+            <div style={{ display: "grid", gap: 8 }}>{base.slice(0, 300).map((r) => {
+              const k = rcptKey(r), dl = rcptDeadline(r.move_date), st = ST[r.r_status];
+              return (
+                <div key={k} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", display: "flex", gap: 10, alignItems: "center" }}>
+                  {tab === "todo" && <input type="checkbox" checked={!!sel[k]} onChange={(e) => setSel((o) => ({ ...o, [k]: e.target.checked }))} style={{ width: 18, height: 18, flexShrink: 0 }} />}
+                  {photo(r) ? <img src={photo(r)} alt="" style={{ width: 46, height: 46, objectFit: "cover", borderRadius: 6, flexShrink: 0 }} /> : null}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5 }}><b>{r.item} {r.qty}장</b> · {r.from_name} → {r.to_name}</div>
+                    <div style={{ fontSize: 11.5, color: C.hint }}>{r.move_date.slice(5)} · {r.move_type === "렌탈입고" ? "AJ 공급" : r.src === "pms" ? "PMS 등록(EDI 반영 전)" : "EDI"}{r.slip_no ? " · 전표 " + r.slip_no : ""}{r.vehicle_no ? " · " + r.vehicle_no : ""}{tab === "todo" ? <span style={{ color: dl.c }}> · {dl.t}</span> : ""}</div>
+                    {tab === "done" && st && <div style={{ fontSize: 11.5, marginTop: 2 }}><span style={{ color: st[0], background: st[1], padding: "1px 7px", borderRadius: 10 }}>{st[2]}</span> <span style={{ color: C.hint }}>{r.r_name || ""} {r.r_at ? fmtDT(r.r_at) : ""}{r.edi_conf === "대기" ? " · EDI 입고확인 대기" : r.edi_conf === "완료" ? " · EDI 반영됨" : ""}</span>
+                      {r.r_recv && <span style={{ color: C.amber }}> · 실제 {r.r_recv.map((l) => l.item + " " + l.qty).join(", ")}</span>}</div>}
+                  </div>
+                  {tab === "todo" && <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
+                    <button disabled={busy} onClick={() => save([{ ...r, status: "확인" }])} style={btnTealSm}>맞게 받음</button>
+                    <button disabled={busy} onClick={() => setDiff(r)} style={{ ...btnGhost, color: C.amber }}>다르게 받음</button>
+                  </div>}
+                </div>
+              );
+            })}</div>
+          )}
+        </>
+      )}
+      {diff && <ReceiptDiffModal row={diff} palletTypes={palletTypes} onClose={() => setDiff(null)} onSave={save} />}
+      {scan && <QrScanner onResult={(b) => { setScan(false); setBatch(b); setTab("todo"); }} onClose={() => setScan(false)} />}
+    </>
+  );
+}
+// 관리자: 작업장별 직접 확인률·자동확인·EDI 입고확인 대기, 자동확인 지금 실행
+function ReceiptStats({ onRun }) {
+  const [rows, setRows] = useState(null); const [tick, setTick] = useState(0); const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    (async () => {
+      const since = localD(new Date(Date.now() - 30 * 86400000).toISOString()); const all = [];
+      for (let p = 0; p < 20; p++) { const { data } = await supabase.from("edi_receipt").select("to_name,status,edi_conf").gte("move_date", since).range(p * 1000, p * 1000 + 999); all.push(...(data || [])); if (!data || data.length < 1000) break; }
+      const m = {}; all.forEach((r) => { const x = (m[r.to_name] = m[r.to_name] || { name: r.to_name, direct: 0, diff: 0, auto: 0, wait: 0 }); if (r.status === "자동확인") x.auto++; else x.direct++; if (r.status === "다름") x.diff++; if (r.edi_conf === "대기") x.wait++; });
+      setRows(Object.values(m).sort((a, b) => (b.direct + b.auto) - (a.direct + a.auto)));
+    })();
+  }, [tick]);
+  const run = async () => { setBusy(true); const { data, error } = await supabase.rpc("receipt_auto"); setBusy(false); if (error) { alert(error.message); return; } alert(`자동확인 ${data}건 처리했어요.`); setTick((t) => t + 1); onRun && onRun(); };
+  const tot = (rows || []).reduce((a, r) => ({ direct: a.direct + r.direct, auto: a.auto + r.auto, wait: a.wait + r.wait }), { direct: 0, auto: 0, wait: 0 });
+  return (
+    <>
+      <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <Metric label="직접 확인 (30일)" value={tot.direct.toLocaleString()} unit="건" tone="success" />
+        <Metric label="자동확인" value={tot.auto.toLocaleString()} unit="건" tone="plain" />
+        <Metric label="직접 확인률" value={tot.direct + tot.auto ? Math.round((tot.direct / (tot.direct + tot.auto)) * 100) : 0} unit="%" tone="info" />
+        <Metric label="EDI 입고확인 대기" value={tot.wait.toLocaleString()} unit="건" tone={tot.wait ? "warn" : "success"} />
+        <button disabled={busy} onClick={run} style={btnGhost}>자동확인 지금 실행</button>
+      </div>
+      <div style={{ fontSize: 12, color: C.hint, marginBottom: 8 }}>EDI 입고확인 대기는 EDI 이동조회/관리 화면 LETUS 상자에서 [채우기] → [입고확인]으로 처리돼요. 자동확인은 매일 동기화 때도 돌아요.</div>
+      {!rows ? <Splash text="불러오는 중…" /> : (
+        <div style={{ overflowX: "auto" }}><table style={tbl}>
+          <thead><tr><Th>받는 곳</Th><Th r>직접 확인</Th><Th r>다르게 받음</Th><Th r>자동확인</Th><Th r>직접 확인률</Th><Th r>EDI 대기</Th></tr></thead>
+          <tbody>{rows.slice(0, 200).map((r) => <tr key={r.name} style={{ borderTop: `1px solid ${C.border}` }}><Td>{r.name}</Td><Td r>{r.direct}</Td><Td r c={r.diff ? C.amber : C.hint}>{r.diff}</Td><Td r>{r.auto}</Td><Td r b>{Math.round((r.direct / Math.max(1, r.direct + r.auto)) * 100)}%</Td><Td r c={r.wait ? C.amber : C.hint}>{r.wait}</Td></tr>)}</tbody>
+        </table></div>
+      )}
     </>
   );
 }
@@ -2613,7 +2762,7 @@ function EdiInventory({ ships = [] }) {
           if (!d || !d.length) continue;
           dates[a.code] = d[0].stoc_date;
           for (let p = 0; p < 20; p++) {
-            const { data, error } = await supabase.from("aj_stock_daily").select("account,workplace_no,item,this_stoc")
+            const { data, error } = await supabase.from("aj_stock_daily").select("account,workplace_no,item,this_stoc,conf:raw->>CONF_STOC")
               .eq("account", a.code).eq("stoc_date", d[0].stoc_date).neq("item", "-").order("workplace_no").order("item").range(p * 1000, p * 1000 + 999);
             if (error) throw error;
             rows.push(...(data || []));
@@ -2632,12 +2781,13 @@ function EdiInventory({ ships = [] }) {
     const wpByNo = {}; idx.wps.forEach((w) => { wpByNo[w.no] = w; });
     const items = ITEM_ORDER.filter((it) => stock.rows.some((r) => r.item === it));
     stock.rows.forEach((r) => { if (!items.includes(r.item)) items.push(r.item); });
-    const total = {}; // EDI 전체 합계(0번)
+    const total = {}, confTot = {}; // EDI 전체 합계(0번) / 그중 입고확인된 재고(확인재고)
     const m = {}; // wp no → { wp, edi: {item}, pend: {item} }
     const at = (no) => (m[no] = m[no] || { wp: wpByNo[no] || { no, name: "작업장 " + no, kind: "업체" }, edi: {}, pend: {} });
     stock.rows.forEach((r) => {
-      if (r.workplace_no === 0) { total[r.item] = (total[r.item] || 0) + r.this_stoc; return; }
+      if (r.workplace_no === 0) { total[r.item] = (total[r.item] || 0) + r.this_stoc; confTot[r.item] = (confTot[r.item] || 0) + (parseInt(r.conf, 10) || 0); return; }
       const x = at(r.workplace_no); x.edi[r.item] = (x.edi[r.item] || 0) + r.this_stoc;
+      x.unconf = (x.unconf || 0) + (r.this_stoc - (parseInt(r.conf, 10) || 0));
     });
     // EDI 기준일 이후(오늘) EDI에 들어간 이동: 출발 −, 도착 + (EDI 숫자에 합침)
     const byName = wpByNameOf(idx); let todayN = 0;
@@ -2664,7 +2814,7 @@ function EdiInventory({ ships = [] }) {
       return { ...x, now, tot, neg, any };
     });
     const byKind = (k, it) => list.filter((x) => (x.wp.kind || "업체") === k).reduce((a, x) => a + (x.edi[it] || 0), 0);
-    return { items, total, list, byKind, pendN, unmapped, todayN };
+    return { items, total, confTot, list, byKind, pendN, unmapped, todayN };
   }, [idx, stock, ships]);
 
   const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
@@ -2672,7 +2822,7 @@ function EdiInventory({ ships = [] }) {
   if (err2) return (<><Head title="재고 현황" sub="EDI 기준" /><div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13 }}>{err2}</div></>);
   if (!data) return (<><Head title="재고 현황" sub="EDI 기준" /><Splash text="불러오는 중…" /></>);
 
-  const { items, total, list, byKind, pendN, unmapped, todayN } = data;
+  const { items, total, confTot, list, byKind, pendN, unmapped, todayN } = data;
   const view = list.filter((x) => (!kind || (x.wp.kind || "업체") === kind) && (!q || (x.wp.name + " " + x.wp.no).includes(q)) && (only === "all" ? true : only === "neg" ? x.neg : x.any))
     .sort((a, b) => b.tot - a.tot || a.wp.name.localeCompare(b.wp.name));
   const dateTxt = [...new Set(Object.values(stock.dates))].sort().map((d) => d.slice(5)).join(", ");
@@ -2683,12 +2833,12 @@ function EdiInventory({ ships = [] }) {
       <Head title="재고 현황" sub={`EDI 기준일 ${dateTxt} 재고 + 그 뒤 EDI 이동 ${todayN}건 + PMS 미반영 ${pendN}건(예정)`} />
       <div style={{ overflowX: "auto", marginBottom: 16 }}>
         <table style={tbl}>
-          <thead><tr><Th>제품</Th><Th r>EDI 전체</Th><Th r>센터</Th><Th r>시공팀</Th><Th r>업체</Th><Th r>PMS 예정(순)</Th></tr></thead>
+          <thead><tr><Th>제품</Th><Th r>EDI 전체</Th><Th r>확인재고</Th><Th r>미확인</Th><Th r>센터</Th><Th r>시공팀</Th><Th r>업체</Th><Th r>PMS 예정(순)</Th></tr></thead>
           <tbody>{items.map((it) => {
             const pend = list.reduce((a, x) => a + (x.pend[it] || 0), 0);
             return (
               <tr key={it} style={{ borderTop: `1px solid ${C.border}` }}>
-                <Td b>{it}</Td><Td r b>{(total[it] || 0).toLocaleString()}</Td>
+                <Td b>{it}</Td><Td r b>{(total[it] || 0).toLocaleString()}</Td><Td r>{(confTot[it] || 0).toLocaleString()}</Td><Td r c={(total[it] || 0) - (confTot[it] || 0) ? C.amber : C.hint}>{((total[it] || 0) - (confTot[it] || 0)).toLocaleString()}</Td>
                 <Td r>{byKind("센터", it).toLocaleString()}</Td><Td r>{byKind("시공팀", it).toLocaleString()}</Td><Td r>{byKind("업체", it).toLocaleString()}</Td>
                 <Td r c={pend ? C.blue : C.hint}>{pend ? (pend > 0 ? "+" : "") + pend.toLocaleString() : "—"}</Td>
               </tr>
@@ -2705,7 +2855,7 @@ function EdiInventory({ ships = [] }) {
       </div>
       <div style={{ overflowX: "auto" }}>
         <table style={tbl}>
-          <thead><tr><Th>작업장</Th><Th>구분</Th>{items.map((it) => <Th key={it} r>{it}</Th>)}<Th r>합계</Th></tr></thead>
+          <thead><tr><Th>작업장</Th><Th>구분</Th>{items.map((it) => <Th key={it} r>{it}</Th>)}<Th r>합계</Th><Th r>미확인</Th></tr></thead>
           <tbody>{view.slice(0, 400).map((x) => (
             <tr key={x.wp.no} style={{ borderTop: `1px solid ${C.border}` }}>
               <Td b>{x.wp.name} <span style={{ color: C.hint, fontSize: 11, fontWeight: 400 }}>{x.wp.no}</span></Td>
@@ -2715,12 +2865,13 @@ function EdiInventory({ ships = [] }) {
                 return <Td key={it} r c={v < 0 ? C.red : v ? C.text : C.hint}>{v ? v.toLocaleString() : "—"}{p ? <div style={{ fontSize: 11, color: C.blue }}>{p > 0 ? "+" : ""}{p}</div> : null}</Td>;
               })}
               <Td r b c={x.tot < 0 ? C.red : C.text}>{x.tot.toLocaleString()}</Td>
+              <Td r c={x.unconf ? C.amber : C.hint}>{x.unconf ? x.unconf.toLocaleString() : "—"}</Td>
             </tr>
           ))}</tbody>
         </table>
         {view.length > 400 && <div style={{ fontSize: 12, color: C.hint, padding: 10 }}>상위 400곳만 표시 — 검색으로 좁혀 보세요.</div>}
       </div>
-      <Note>EDI 재고(전일 마감)에 동기화 때 받은 오늘 EDI 이동을 더한 값이 검은 숫자예요(EDI에 직접 입력한 건 포함, 마지막 동기화 시점까지). PMS에 등록했지만 EDI에 아직 저장되지 않은 건은 예정(파란 숫자)으로 더해요. "EDI 전체"는 전일 마감 합계예요.</Note>
+      <Note>확인재고 = 받는 쪽이 입고확인한 것만 센 EDI 재고, 미확인 = 금일재고 − 확인재고(받았다는 확인이 아직 없는 수량). EDI 재고(전일 마감)에 동기화 때 받은 오늘 EDI 이동을 더한 값이 검은 숫자예요(EDI에 직접 입력한 건 포함, 마지막 동기화 시점까지). PMS에 등록했지만 EDI에 아직 저장되지 않은 건은 예정(파란 숫자)으로 더해요. "EDI 전체"는 전일 마감 합계예요.</Note>
     </>
   );
 }
