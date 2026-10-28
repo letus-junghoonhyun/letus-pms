@@ -1849,14 +1849,14 @@ const sumOf = (o, item) => (item ? o[item] || 0 : Object.values(o).reduce((a, v)
 function PalletMap({ caps = {} }) {
   const { model, err, reload } = usePalletMapData();
   const [kinds, setKinds] = useState({ 센터: true, 시공팀: true, 업체: true });
-  const [item, setItem] = useState(""); const [onlyStock, setOnlyStock] = useState(true); const [pick, setPick] = useState(""); const [sel, setSel] = useState(null);
+  const [item, setItem] = useState(""); const [onlyStock, setOnlyStock] = useState(true); const [onlyMinus, setOnlyMinus] = useState(false); const [pick, setPick] = useState(""); const [sel, setSel] = useState(null);
   const [geoRun, setGeoRun] = useState(null); const [moving, setMoving] = useState(false); const [mapReady, setMapReady] = useState(false);
   const mapEl = useRef(null); const popRef = useRef(null);
   const view = useMemo(() => {
     if (!model) return [];
-    return model.list.filter((w) => kinds[w.kind] !== false && (!onlyStock || sumOf(w.now, item) || sumOf(w.inn, item) || sumOf(w.out, item)) && (!item || w.now[item] !== undefined || w.inn[item] || w.out[item]))
+    return model.list.filter((w) => (!onlyMinus || Object.entries(w.now).some(([k, v]) => v < 0 && (!item || k === item))) && kinds[w.kind] !== false && (!onlyStock || sumOf(w.now, item) || sumOf(w.inn, item) || sumOf(w.out, item)) && (!item || w.now[item] !== undefined || w.inn[item] || w.out[item]))
       .sort((a, b) => sumOf(b.now, item) - sumOf(a.now, item));
-  }, [model, kinds, item, onlyStock]);
+  }, [model, kinds, item, onlyStock, onlyMinus]);
   const tot = useMemo(() => {
     const t = { prev: 0, inn: 0, out: 0, now: 0 };
     view.forEach((w) => { t.prev += sumOf(w.prev, item); t.inn += sumOf(w.inn, item); t.out += sumOf(w.out, item); t.now += sumOf(w.now, item); });
@@ -1999,7 +1999,7 @@ function PalletMap({ caps = {} }) {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 12.5, color: C.sub, width: 44 }}>검색</span>
           <NamePicker options={names} value={pick} onChange={(v) => { setPick(v); const w = model && model.list.find((x) => x.name === v); if (w) setSel(w.no); }} placeholder={`업체·작업장 이름 (${names.length}곳)`} width={260} />
-          {chip(onlyStock, "재고·입출고 있는 곳만", () => setOnlyStock(!onlyStock))}
+          {chip(onlyStock, "재고·입출고 있는 곳만", () => setOnlyStock(!onlyStock))}{chip(onlyMinus, "마이너스 재고만", () => setOnlyMinus(!onlyMinus), C.red)}
           <button onClick={fit} style={{ ...btnGhost, padding: "6px 12px" }}>전체 보기</button>
           <button onClick={reload} style={{ ...btnGhost, padding: "6px 12px" }}>새로고침</button>
         </div>
