@@ -1663,7 +1663,7 @@ function AjSupplyStatus({ mode = "supply" }) {
         </div>
         {filterBox()}
         <div style={{ fontSize: 13, marginBottom: 12 }}>회수 요청 <b>{rq.length}</b>건 · 아직 덜 나감 <b style={{ color: waitN ? C.amber : C.green }}>{waitN}</b>건 · 요청 없이 나간 반납출고 <b>{backs.reduce((a, [, ms]) => a + ms.length, 0)}</b>건</div>
-        {!rq.length && <div style={{ ...box, fontSize: 13, color: C.sub, marginBottom: 12 }}>최근 45일 PMS 회수 요청이 없어요. AJ에 회수를 전화·배차로 요청했다면 <b>[요청하기]</b>에서 회수로 적어 두세요. 그래야 실제로 가져갔는지 맞춰 볼 수 있어요.</div>}
+        {!rq.length && <div style={{ ...box, fontSize: 13, color: C.sub, marginBottom: 12 }}>이 기간에 PMS 회수 요청이 없어요. AJ에 회수를 전화·배차로 요청했다면 <b>[요청하기]</b>에서 회수로 적어 두세요. 그래야 실제로 가져갔는지 맞춰 볼 수 있어요.</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10, marginBottom: 16 }}>
           {rq.map((r) => {
             const left = r.qty - r.got; const st = !r.got ? ["아직 안 나감", C.red, C.redBg] : left > 0 ? ["일부만 나감", C.amber, C.amberBg] : ["다 나감", C.green, C.greenBg];
@@ -1720,7 +1720,7 @@ function AjSupplyStatus({ mode = "supply" }) {
                   </div>
                   <div style={{ fontSize: 13, margin: "8px 0 6px" }}>요청 <b>{req.toLocaleString()}</b> → 들어옴 <b style={{ color: r.got ? C.green : C.hint }}>{r.got.toLocaleString()}</b>{r.left > 0 && <span style={{ color: r.late ? C.red : C.amber }}> · {r.left.toLocaleString()}장 {r.st === "들어올 예정" || r.st === "나눠 들어오는 중" ? "남음" : "부족"}</span>}</div>
                   <AjBar req={req} got={r.got} unconf={r.unconf} />
-                  <div style={{ fontSize: 11.5, color: C.hint, marginTop: 6 }}>{sc[2]}</div>
+                  <div style={{ fontSize: 11.5, color: C.hint, marginTop: 6 }}>{r.st === "들어올 예정" && r.want_date === localD(new Date().toISOString()) ? "오늘 들어올 예정이에요" : sc[2]}</div>
                   {r.deliv.length > 0 && <button onClick={() => setOpen((o) => ({ ...o, [k]: !o[k] }))} style={{ border: "none", background: "none", color: C.tealDk, cursor: "pointer", fontSize: 12, padding: "6px 0 0" }}>렌탈입고 {r.deliv.length}건 {open[k] ? "▴" : "▾"}</button>}
                   {open[k] && r.deliv.map((d) => (
                     <div key={d.move_code} style={{ fontSize: 12, color: C.sub, marginTop: 4, display: "flex", justifyContent: "space-between", gap: 6 }}>
