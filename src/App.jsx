@@ -1871,7 +1871,8 @@ function PalletMap({ caps = {} }) {
       const kakao = (await loadKakaoGeocoder()) ? window.kakao : null;
       if (dead || !mapEl.current || engRef.current) return;
       if (kakao) {
-        const map = new kakao.maps.Map(mapEl.current, { center: new kakao.maps.LatLng(36.3, 127.8), level: 13 });
+        const map = new kakao.maps.Map(mapEl.current, { center: new kakao.maps.LatLng(36.2, 127.8), level: 12 });
+        const onResize = () => map.relayout(); window.addEventListener("resize", onResize);
         map.addControl(new kakao.maps.ZoomControl(), kakao.maps.ControlPosition.RIGHT);
         let clickOnce = null;
         kakao.maps.event.addListener(map, "click", (e) => { if (clickOnce) { const f = clickOnce; clickOnce = null; f({ lat: e.latLng.getLat(), lng: e.latLng.getLng() }); } });
@@ -1894,9 +1895,9 @@ function PalletMap({ caps = {} }) {
             });
           },
           focus(lat, lng) { if (map.getLevel() > 6) map.setLevel(6); map.panTo(new kakao.maps.LatLng(lat, lng)); },
-          fit(pts) { const b = new kakao.maps.LatLngBounds(); pts.forEach((p) => b.extend(new kakao.maps.LatLng(p.lat, p.lng))); map.setBounds(b, 40, 40, 40, 40); },
+          fit(pts) { map.relayout(); const b = new kakao.maps.LatLngBounds(); pts.forEach((p) => b.extend(new kakao.maps.LatLng(p.lat, p.lng))); setTimeout(() => map.setBounds(b, 40, 40, 40, 40), 50); },
           pick(cb) { map.setCursor("crosshair"); clickOnce = (ll) => { map.setCursor(""); cb(ll); }; return () => { clickOnce = null; map.setCursor(""); }; },
-          destroy() { ovRef.current.forEach((o) => o.setMap(null)); ovRef.current = []; },
+          destroy() { window.removeEventListener("resize", onResize); ovRef.current.forEach((o) => o.setMap(null)); ovRef.current = []; },
         };
         setMapReady(true);
         return;
