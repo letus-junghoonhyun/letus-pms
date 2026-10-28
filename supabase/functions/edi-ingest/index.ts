@@ -226,7 +226,7 @@ Deno.serve(async (req) => {
     }
     // 11) 승인된 이동 수정요청 (이동조회/관리 화면 상자에서 찾아 고칠 건)
     if (body.action === "fix_list") {
-      const { data, error } = await db.from("edi_fix").select("id,move_code,move_date,from_name,to_name,before_lines,after_lines,reason,decide_note")
+      const { data, error } = await db.from("edi_fix").select("id,move_code,move_date,from_name,to_name,before_lines,after_lines,reason,decide_note,fix_type")
         .eq("account", account).eq("status", "승인").like("move_code", "M%").order("move_date").limit(200); // AJ 공급(D)·회수(S)는 이 화면에서 못 고쳐서 제외 → 수정요청 게시판
       if (error) return json({ error: error.message }, 500);
       return json({ rows: data || [] });

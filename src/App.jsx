@@ -1540,7 +1540,6 @@ function useAjSupply(days = 45) {
     if (!raw || !idx) return null;
     const today = localD(new Date().toISOString());
     const rc = {}; raw.rcpt.forEach((r) => { rc[r.account + "|" + r.move_code + "|" + r.item] = r; });
-    const dec = {}; raw.dec.forEach((d) => { dec[d.account + "|" + d.call_code + "|" + d.item] = d; });
     // 렌탈입고를 (계정|작업장|제품|날짜)로 묶고, 받는 쪽 확인 수량 계산
     const key = (acc, name, item, date) => acc + "|" + ediClean(name) + "|" + item + "|" + date;
     const deliv = {};
@@ -1558,14 +1557,13 @@ function useAjSupply(days = 45) {
       const unconf = ds.filter((d) => !d.rstatus).reduce((a, d) => a + d.qty, 0);
       const got = confirmed + unconf; // 확인 전 건은 EDI 수량으로 일단 셈
       const req = c.call_volm || 0;
-      const d = dec[c.account + "|" + c.call_code + "|" + c.item];
       const due = c.want_date && c.want_date < today;
       let st;
       if (c.cntr_type === "보류") st = "보류";
       else if (!ds.length) st = due ? "미입고" : "입고 전";
       else if (got >= req) st = "입고 완료";
       else st = c.cntr_type === "완료" ? "AJ 완료 · 덜 옴" : "부분 입고";
-      return { ...c, deliv: ds, edi, confirmed, unconf, got, left: Math.max(0, req - got), st, decision: d || null, late: (st === "AJ 완료 · 덜 옴" || st === "미입고" || st === "부분 입고") && due && !d };
+      return { ...c, deliv: ds, edi, confirmed, unconf, got, left: Math.max(0, req - got), st, late: (st === "AJ 완료 · 덜 옴" || st === "미입고" || st === "부분 입고") && due };
     });
     const orphan = Object.values(deliv).flat().filter((d) => !d.matched); // 요청과 안 맞는 렌탈입고(다른 계정 요청·영업 조정 등)
     // 회수: PMS 회수요청 ↔ 반납출고(S코드). 같은 작업장·제품, 요청일 이후 처음 나온 반납출고들을 요청 수량까지
@@ -1584,12 +1582,12 @@ function useAjSupply(days = 45) {
   }, [raw, idx]);
   return { rows: data ? data.rows : null, data, err, reload: () => setTick((t) => t + 1) };
 }
-function AjSupplyStatus({ onReorder, canEdit }) {
+function AjSupplyStatus({ mode = "supply" }) {
   const { data, err, reload } = useAjSupply(45);
-  const [f, setF] = useState("open"); const [q, setQ] = useState(""); const [tab, setTab] = useState("supply"); const [open, setOpen] = useState({});
+  const [f, setF] = useState("open"); const [q, setQ] = useState(""); const tab = mode; const [open, setOpen] = useState({});
   const rows = data ? data.rows : null;
-  const OPEN = (r) => ["AJ 완료 · 덜 옴", "미입고", "부분 입고", "입고 전"].includes(r.st) && !r.decision;
-  const fl = { open: OPEN, short: (r) => r.st === "AJ 완료 · 덜 옴" && !r.decision, wait: (r) => r.st === "입고 전", done: (r) => r.st === "입고 완료" || !!r.decision, hold: (r) => r.st === "보류", all: () => true };
+  const OPEN = (r) => ["AJ 완료 · 덜 옴", "미입고", "부분 입고", "입고 전"].includes(r.st);
+  const fl = { open: OPEN, short: (r) => r.st === "AJ 완료 · 덜 옴", wait: (r) => r.st === "입고 전", done: (r) => r.st === "입고 완료", hold: (r) => r.st === "보류", all: () => true };
   const view = (rows || []).filter((r) => fl[f](r) && (!q || (r.post_name + " " + r.call_code + " " + r.item).includes(q)));
   const n = (fn) => (rows || []).filter(fn).length;
   const STC = { "입고 완료": [C.green, C.greenBg], "부분 입고": [C.amber, C.amberBg], "AJ 완료 · 덜 옴": [C.red, C.redBg], 미입고: [C.red, C.redBg], "입고 전": [C.blue, C.blueBg], 보류: [C.sub, "#f1f2f4"] };
@@ -1605,7 +1603,7 @@ function AjSupplyStatus({ onReorder, canEdit }) {
   return (
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-        {[["supply", "AJ 공급 현황"], ["recall", "AJ 회수 현황"]].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ ...btnGhost, padding: "6px 14px", fontWeight: tab === k ? 600 : 400, background: tab === k ? C.teal : "#fff", color: tab === k ? "#fff" : C.text }}>{l}</button>)}
+        <b style={{ fontSize: 14 }}>{tab === "supply" ? "AJ 공급 현황" : "AJ 회수 현황"}</b>
         <span style={{ fontSize: 12, color: C.hint }}>{tab === "supply" ? "납품요청 ↔ 렌탈입고(같은 작업장·제품·희망일). 실입고는 받는 쪽 확인 기준" : "PMS 회수요청 ↔ 반납출고(같은 작업장·제품, 요청일 이후)"}</span>
       </div>
       {err && <div style={{ background: C.redBg, color: C.red, padding: 10, borderRadius: 8, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
@@ -1628,12 +1626,12 @@ function AjSupplyStatus({ onReorder, canEdit }) {
       ) : (
         <>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
-            {chip("open", `처리 필요 ${n(OPEN)}`)}{chip("short", `AJ 완료인데 덜 옴 ${n(fl.short)}`)}{chip("wait", `입고 전 ${n(fl.wait)}`)}{chip("done", `끝남 ${n(fl.done)}`)}{chip("hold", `보류 ${n(fl.hold)}`)}{chip("all", "전체")}
+            {chip("open", `진행·부족 ${n(OPEN)}`)}{chip("short", `AJ 완료인데 덜 옴 ${n(fl.short)}`)}{chip("wait", `입고 전 ${n(fl.wait)}`)}{chip("done", `다 들어옴 ${n(fl.done)}`)}{chip("hold", `보류 ${n(fl.hold)}`)}{chip("all", "전체")}
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·요청코드" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140 }} />
           </div>
           {!view.length ? <div style={{ fontSize: 13, color: C.sub, padding: 10 }}>해당하는 요청이 없어요.</div> : (
             <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 820 }}>
-              <thead><tr><Th>희망일</Th><Th>작업장</Th><Th>제품</Th><Th r>요청</Th><Th r>EDI 입고</Th><Th r>받는 쪽 확인</Th><Th r>남음</Th><Th>상태</Th><Th>요청코드</Th><Th></Th></tr></thead>
+              <thead><tr><Th>희망일</Th><Th>작업장</Th><Th>제품</Th><Th r>요청</Th><Th r>EDI 입고</Th><Th r>받는 쪽 확인</Th><Th r>덜 옴</Th><Th>상태</Th><Th>요청코드</Th></tr></thead>
               <tbody>{view.slice(0, 300).map((r) => {
                 const k = r.account + r.call_code + r.item, sc = STC[r.st] || STC["입고 전"];
                 return (
@@ -1644,19 +1642,15 @@ function AjSupplyStatus({ onReorder, canEdit }) {
                       <Td r>{r.deliv.length ? <button onClick={() => setOpen((o) => ({ ...o, [k]: !o[k] }))} style={{ border: "none", background: "none", color: C.tealDk, cursor: "pointer", fontSize: 13.5, padding: 0 }}>{r.edi.toLocaleString()} ▾</button> : <span style={{ color: C.hint }}>0</span>}</Td>
                       <Td r>{r.deliv.length ? <span style={{ color: r.unconf ? C.amber : C.green }}>{r.confirmed.toLocaleString()}{r.unconf ? <span style={{ fontSize: 11, color: C.amber }}> (+{r.unconf} 확인 전)</span> : ""}</span> : "—"}</Td>
                       <Td r b c={r.left ? C.amber : C.green}>{r.left ? r.left.toLocaleString() : "✓"}</Td>
-                      <Td><span style={{ fontSize: 11.5, color: sc[0], background: sc[1], padding: "1px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>{r.st}</span>{r.decision && <div style={{ fontSize: 11, color: C.hint }}>{r.decision.decision}{r.decision.note ? " · " + r.decision.note : ""}</div>}</Td>
+                      <Td><span style={{ fontSize: 11.5, color: sc[0], background: sc[1], padding: "1px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>{r.st}</span>{r.st === "AJ 완료 · 덜 옴" && <div style={{ fontSize: 11, color: C.hint }}>필요하면 새로 요청하세요</div>}</Td>
                       <Td><span style={{ fontSize: 11.5, color: C.hint }}>{r.call_code}<br />EDI {r.cntr_type}{r.inst_empn ? " · " + r.inst_empn : ""}</span></Td>
-                      <Td r>{canEdit && r.left > 0 && !r.decision && r.st !== "입고 전" && r.st !== "보류" && <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                        <button onClick={() => decide(r, "재요청")} title="남은 수량으로 새 공급요청을 채워 줘요" style={{ ...btnTealSm, padding: "3px 8px", fontSize: 11.5 }}>남은 {r.left} 재요청</button>
-                        <button onClick={() => decide(r, "종결")} style={{ ...btnGhost, padding: "3px 8px", fontSize: 11.5 }}>이대로 종결</button>
-                      </div>}</Td>
                     </tr>
                     {open[k] && r.deliv.map((d) => (
                       <tr key={d.move_code} style={{ background: "#fafbfc" }}>
                         <td></td><td colSpan={3} style={{ padding: "5px 7px", fontSize: 12, color: C.sub }}>↳ {d.move_code} · {d.from_name} → {d.to_name}</td>
                         <td style={{ padding: "5px 7px", fontSize: 12, textAlign: "right" }}>{d.qty}</td>
                         <td style={{ padding: "5px 7px", fontSize: 12, textAlign: "right", color: d.rstatus === "다름" ? C.amber : d.rstatus ? C.green : C.hint }}>{d.rstatus === "다름" ? `상이 · 실제 ${d.actual}` : d.rstatus === "확인" ? "정상" : d.rstatus === "자동확인" ? "자동확인" : "확인 전"}</td>
-                        <td colSpan={4}></td>
+                        <td colSpan={3}></td>
                       </tr>
                     ))}
                   </Fragment>
@@ -2348,6 +2342,7 @@ function Inventory({ ships, ajReqs, partners, palletTypes, centers = CENTERS }) 
 // AJ 연동 — 공급/회수 요청 등록·완료 처리 (가설정: 수동 2단계)
 function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, finishAjSupply, skipAjEdi, ships, caps = {}, centers = CENTERS }) {
   const canCreate = !!caps.aj; // 내부만 요청 생성, AJ직원은 처리만
+  const [ajTab, setAjTab] = useState("req");
   const [type, setType] = useState("공급");
   const [qtys, setQtys] = useState({});
   const [note, setNote] = useState(""); const [busy, setBusy] = useState(false);
@@ -2406,13 +2401,11 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
 
   return (
     <>
-      {canCreate && <AjSupplyStatus canEdit={canCreate} onReorder={(r) => {
-        const e = ediIdx && Object.entries(ediIdx.local).find(([k, v]) => v === r.local_no && k.startsWith(r.account + "|"));
-        if (e) setWpNo(Number(e[0].split("|")[1]));
-        setType("공급"); setQtys({ [r.item]: r.left }); setNote(`재요청 · ${r.call_code} 남은 ${r.left}장`);
-        setTimeout(() => { const el = document.getElementById("aj-new-request"); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); }, 50);
-      }} />}
-      <Head title={canCreate ? "AJ 요청" : "AJ 요청 처리"} sub={canCreate ? "AJ네트웍스에 공급/회수 요청 · 완료 시 재고 반영 (가설정 수동)" : "접수된 요청을 처리(완료)하세요 · AJ네트웍스 직원용"} />
+      <Head title={canCreate ? "AJ 요청" : "AJ 요청 처리"} sub={canCreate ? "AJ네트웍스에 공급·회수 요청 · 공급은 EDI 납품요청으로 자동입력" : "접수된 요청을 처리(완료)하세요 · AJ네트웍스 직원용"} />
+      {canCreate && <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {[["req", "요청하기"], ["supply", "공급 현황"], ["recall", "회수 현황"]].map(([k, l]) => <button key={k} onClick={() => setAjTab(k)} style={{ ...btnGhost, padding: "8px 18px", fontSize: 13.5, fontWeight: ajTab === k ? 600 : 400, background: ajTab === k ? C.teal : "#fff", color: ajTab === k ? "#fff" : C.text }}>{l}</button>)}
+      </div>}
+      {canCreate && ajTab !== "req" ? <AjSupplyStatus mode={ajTab} /> : <>
       <div style={{ display: "grid", gridTemplateColumns: canCreate ? "repeat(auto-fit, minmax(300px, 1fr))" : "1fr", gap: 16, alignItems: "start" }}>
         {/* 요청 등록 (내부만) */}
         {canCreate && <div id="aj-new-request" style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
@@ -2510,6 +2503,7 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
         </div>
       )}
       <Note>공급요청 완료 → 센터 재고 +. 회수요청 완료 → 센터/거래처 재고 −, AJ로. 지금은 수동 2단계(가설정)예요 — 나중에 실제 AJ EDI 연동으로 이 완료 처리가 자동화됩니다.</Note>
+      </>}
     </>
   );
 }
@@ -3505,13 +3499,19 @@ function EdiFixList({ caps = {} }) {
     let note = null;
     if (status === "반려") { note = window.prompt("반려 사유"); if (note === null) return; }
     const ajSide = /^[DS]/.test(String(f.move_code || ""));
+    // 보낸 곳이 우리 작업장이 아니면(다른 회사) 우리가 못 고치므로 EDI 승인거부(수량불일치)로
+    const extSender = !ajSide && idx && !wpByNameOf(idx)[ediClean(f.from_name)];
+    if (status === "승인") {
+      const { error: et } = await supabase.from("edi_fix").update({ fix_type: ajSide ? "AJ" : extSender ? "거부" : "수정" }).eq("id", f.id);
+      if (et) { alert(et.message + " (letus_edi18.sql 실행 필요)"); return; }
+    }
     if (status === "승인" && ajSide) {
       const ln = (l) => (l || []).map((x) => x.item + " " + x.qty + "장").join(", ");
       const text = [`[${/^D/.test(f.move_code) ? "렌탈입고 수량 상이" : "반납 수량 상이"}] 이동코드 ${f.move_code} (${f.move_date})`, `${f.from_name || ""} → ${f.to_name || ""}`, `EDI 등록: ${ln(f.before_lines)}`, `실제 확인: ${ln(f.after_lines)}`, `사유: ${f.reason || ""}`, "확인 후 수량 정정 부탁드립니다. (LETUS PMS)"].join("\n");
       const { error: e1 } = await supabase.from("edi_fix").update({ aj_text: text }).eq("id", f.id);
       if (e1) { alert(e1.message + " (letus_edi17.sql 실행 필요)"); return; }
     }
-    if (status === "승인" && !ajSide) {
+    if (status === "승인" && !ajSide && !extSender) {
       // 새로 생긴 제품은 EDI 새 이동으로 자동입력 대기열에
       const adds = fixDiff(f).filter((d) => d.before === null && d.after > 0);
       if (adds.length) {
@@ -3553,6 +3553,7 @@ function EdiFixList({ caps = {} }) {
             </div>
             <div style={{ fontSize: 13, margin: "6px 0" }}>{fixDiff(f).map((d) => <span key={d.item} style={{ marginRight: 12 }}><b>{d.item}</b> {d.before === null ? <span style={{ color: C.blue }}>+{d.after} (새 이동)</span> : <>{d.before} → <b style={{ color: C.amber }}>{d.after}</b></>}</span>)}</div>
             <div style={{ fontSize: 12, color: C.sub }}>사유: {f.reason} · 요청 {f.requested_name || ""} {fmtDT(f.created_at)}{f.decide_note ? " · 메모: " + f.decide_note : ""}</div>
+            {!/^[DS]/.test(String(f.move_code || "")) && idx && !wpByNameOf(idx)[ediClean(f.from_name)] && <div style={{ fontSize: 12, color: C.amber, marginTop: 4 }}>다른 회사({f.from_name})가 보낸 이동 — 우리가 수량을 못 고쳐서 승인하면 <b>EDI 이동조회/관리(받는 쪽)</b> LETUS 상자에서 <b>승인거부(수량불일치)</b>를 채워요. 보낸 회사의 상이내역 회신으로 넘어가요.</div>}
             {/^[DS]/.test(String(f.move_code || "")) && <div style={{ fontSize: 12, color: C.amber, marginTop: 4 }}>{/^D/.test(f.move_code) ? "AJ 공급(렌탈입고)" : "AJ 회수(반납출고)"} 건 — 우리가 EDI에서 못 고쳐서 승인하면 <b>EDI 수정요청등록 → [추가]</b> 창의 LETUS 상자에 정정 요청 글이 채워져요.{f.aj_rqst_code ? ` · AJ 요청번호 ${f.aj_rqst_code}` : ""}</div>}
             {f.photos && f.photos.length > 0 && <div style={{ display: "flex", gap: 6, marginTop: 6 }}>{f.photos.map((u, i) => <a key={i} href={u} target="_blank" rel="noreferrer"><img src={u} alt="" style={{ width: 52, height: 52, objectFit: "cover", borderRadius: 6 }} /></a>)}</div>}
             {admin && <div style={{ display: "flex", gap: 6, marginTop: 10 }}>

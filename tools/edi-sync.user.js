@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.17
+// @version      3.18
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -342,6 +342,24 @@
     say(st.abort ? `중단됨 · ${label()} — ${st.lastErr || mvErr} (다시 접속하면 이어서 받아요)`
       : st.failed ? `완료 ${label()} · 마지막 오류 ${st.lastErr}${mvTxt}`
       : `동기화 완료 · 재고 ${st.done}곳 ${st.total}행(어제까지)${mvTxt}(오늘까지)`, st.abort || st.failed || !!mvErr);
+  }
+
+  // EDI 메인 화면이 열려 있는 동안 30분마다 오늘 이동만 가볍게 다시 받는다 → AJ 렌탈입고·당일 이동이 입고 확인에 빨리 뜸
+  function startLiveMoves() {
+    const LIVE_MS = 30 * 60 * 1000;
+    setInterval(async () => {
+      try {
+        if (!GM_getValue("fnUrl")) return;
+        const demd = await demdInfo();
+        if (ACCOUNT && demd.code !== ACCOUNT) return; // 다른 계정으로 바뀌었으면 쉰다(다음 새로고침 때 정식 동기화)
+        ACCOUNT = demd.code;
+        const today = fmt(new Date());
+        const rows = await pullMoves(demd, await instEmpn(), today, today);
+        if (rows.length) await call("moves_upsert", { rows, note: "live " + today });
+        await call("receipt_auto", {});
+        say("오늘 이동 " + rows.length + "건 다시 받았어요 (30분마다)");
+      } catch (e) { /* 세션이 끊겼거나 일시 오류: 다음 주기에 */ }
+    }, LIVE_MS);
   }
 
   // 상자·알약을 꾹 눌러 끌어서 옮기기. 위치는 화면마다 기억, 펼친 상자와 접힌 알약이 같은 자리에 뜬다
@@ -686,6 +704,34 @@
       const b = {}, a = {}; (f.before_lines || []).forEach((l) => { b[l.item] = l.qty; }); (f.after_lines || []).forEach((l) => { a[l.item] = l.qty; });
       return [...new Set([...Object.keys(b), ...Object.keys(a)])].map((it) => !(it in b) ? it + " +" + a[it] + " (새 이동, 자동입력 대기열)" : !(it in a) || a[it] === 0 ? it + " " + b[it] + " → 0" : b[it] !== a[it] ? it + " " + b[it] + " → " + a[it] : null).filter(Boolean).join("<br>");
     };
+    // 다른 회사가 보낸 이동: 우리가 못 고치므로 받는 쪽 기준에서 승인거부(02 수량불일치) + 실제 수량을 비고로
+    const reject = async (f) => {
+      const d = String(f.move_date || "");
+      $("#flag").val("stor"); try { if (W.changType) W.changType(); } catch (e) {}
+      $("#demdNumb").val(""); $("#confFlag").val(""); $("#begnDate").val(d); $("#enddDate").val(d);
+      W.doAction("search");
+      await wait(800); await until(() => W.mySheet1.RowCount() > 0, 15000); await wait(400);
+      const S = W.mySheet1; let n = 0;
+      const after = (f.after_lines || []).map((l) => l.item + " " + l.qty + "장").join(", ");
+      for (let i = S.GetDataFirstRow(); i <= S.LastRow(); i++) {
+        if (S.GetCellValue(i, "MOVE_CODE") !== f.move_code) continue;
+        if (S.GetCellValue(i, "CONF_FLAG") === "확인") { alert("이 이동은 이미 입고확인돼 있어 승인거부할 수 없어요. AJ 수정요청 게시판으로 요청해 주세요."); return; }
+        S.SetCellValue(i, "sCheck", 1); S.SetCellValue(i, "ENDD_TYPE", "02"); S.SetCellValue(i, "ENDD_DESC", ("실제 받은 수량: " + after + ". " + (f.reason || "")).slice(0, 200));
+        S.SetRowBackColor(i, "#FFF2A8"); n++;
+      }
+      if (!n) { alert("이동코드 " + f.move_code + "를 받는 쪽 기준 " + d + " 조회에서 못 찾았어요."); return; }
+      watchReject = f;
+      alert("노란 줄에 승인거부 사유(수량불일치)와 실제 수량을 채웠어요.\n확인 후 [승인거부]를 눌러 주세요. 보낸 회사의 상이내역 회신으로 넘어가요.");
+    };
+    let watchReject = null;
+    setInterval(async () => {
+      if (!watchReject) return;
+      try {
+        const S = W.mySheet1; let done = false;
+        for (let i = S.GetDataFirstRow(); i <= S.LastRow(); i++) if (S.GetCellValue(i, "MOVE_CODE") === watchReject.move_code && S.GetCellValue(i, "CONF_FLAG") === "승인거부") done = true;
+        if (done) { const f = watchReject; watchReject = null; await call("fix_done", { id: f.id }); say("승인거부를 PMS에 반영했어요"); }
+      } catch (e) { /* 다음 주기 */ }
+    }, 1500);
     const find = async (f) => {
       const d = String(f.move_date || "");
       if ($("#begnDate").length) { $("#begnDate").val(d); $("#enddDate").val(d); }
@@ -707,8 +753,10 @@
       d.style.cssText = "padding:6px 0;border-top:1px solid rgba(255,255,255,.12)";
       d.innerHTML = "<div>" + String(f.move_date || "").slice(5) + " · " + (f.from_name || "") + " → " + (f.to_name || "") + " <span style='opacity:.6'>" + f.move_code + "</span></div><div style='color:#ffd27a'>" + diffTxt(f) + "</div>" + (f.reason ? "<div style='opacity:.65'>사유: " + f.reason + "</div>" : "");
       const row = document.createElement("div"); row.style.cssText = "display:flex;gap:6px;margin-top:4px";
-      const b1 = document.createElement("button"); b1.textContent = "찾기"; b1.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:3px 10px;cursor:pointer";
-      b1.onclick = () => find(f).catch((e) => alert("찾기 실패: " + e.message));
+      const isRej = f.fix_type === "거부";
+      const b1 = document.createElement("button"); b1.textContent = isRej ? "승인거부 채우기" : "찾기"; b1.style.cssText = "background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:3px 10px;cursor:pointer";
+      b1.onclick = () => (isRej ? reject(f) : find(f)).catch((e) => alert((isRej ? "채우기" : "찾기") + " 실패: " + e.message));
+      if (isRej) d.insertAdjacentHTML("beforeend", "<div style='opacity:.7'>다른 회사가 보낸 이동이라 받는 쪽에서 승인거부(수량불일치)로 처리해요</div>");
       const b2 = document.createElement("button"); b2.textContent = "반영 완료"; b2.style.cssText = "background:transparent;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:3px 8px;cursor:pointer";
       b2.onclick = async () => { if (!confirm("EDI에서 수정을 저장했나요? PMS에 '반영'으로 표시해요.")) return; try { await call("fix_done", { id: f.id }); d.remove(); rows = rows.filter((x) => x.id !== f.id); applyCollapse(); say("수정 반영 완료로 표시했어요"); } catch (e) { alert(e.message); } };
       row.appendChild(b1); row.appendChild(b2); d.appendChild(row); panel.appendChild(d);
@@ -807,5 +855,5 @@
   if (/WARE_MOVE_LIST.do/.test(location.pathname)) { runFix().catch((e) => say("수정 목록 실패: " + e.message)); return; }
   if (/OTHR_SIGN_LIST.do/.test(location.pathname)) { runSign().catch((e) => say("납품요청 실패: " + e.message)); return; }
   if (/WARE_MOVE_DETL.do/.test(location.pathname)) { runFill().catch((e) => say("자동입력 실패: " + e.message)); return; }
-  run().catch((e) => say("동기화 실패: " + e.message));
+  run().catch((e) => say("동기화 실패: " + e.message)).finally(startLiveMoves);
 })();
