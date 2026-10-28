@@ -1873,6 +1873,8 @@ function PalletMap({ caps = {} }) {
       const map = new ml.Map({ container: mapEl.current, style: MAP_STYLE_URL, center: [127.6, 36.4], zoom: 6.3, attributionControl: { compact: true } });
       map.addControl(new ml.NavigationControl({ showCompass: false }), "top-right");
       map.on("load", () => {
+        // 바탕 지도 이름을 한글로
+        map.getStyle().layers.forEach((l) => { if (l.type === "symbol" && l.layout && l.layout["text-field"]) { try { map.setLayoutProperty(l.id, "text-field", ["coalesce", ["get", "name:ko"], ["get", "name"]]); } catch (e) { /* 무시 */ } } });
         map.addSource("wp", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
         map.addLayer({ id: "wp-c", type: "circle", source: "wp", paint: {
           "circle-color": ["get", "color"], "circle-opacity": 0.82, "circle-stroke-color": ["case", ["get", "sel"], "#111", "#fff"], "circle-stroke-width": ["case", ["get", "sel"], 3, 1.5],
