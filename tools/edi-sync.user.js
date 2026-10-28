@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.16
+// @version      3.17
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -9,6 +9,7 @@
 // @match        http://edi.ajuprs.com/edi/ware/WARE_MOVE_DETL.do*
 // @match        http://edi.ajuprs.com/edi/othr/OTHR_SIGN_LIST.do*
 // @match        http://edi.ajuprs.com/edi/ware/WARE_MOVE_LIST.do*
+// @match        http://edi.ajuprs.com/edi/othr/OTHR_UPDT_DETL.do*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -755,9 +756,54 @@
     applyCollapse();
   }
 
+  // ── EDI 수정요청 작성 창: AJ 공급(D)·회수(S) 상이를 AJ에 알리는 글을 채운다. [저장]은 사람이 ──
+  async function runAjFix() {
+    const W = unsafeWindow;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (fn, ms = 15000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { try { if (fn()) return true; } catch (e) {} await wait(300); } return false; };
+    if (!(await until(() => W.$ && W.$("#rqstDesc").length && W.$("#userCode").val()))) return;
+    if (!GM_getValue("fnUrl") || !GM_getValue("anon") || !GM_getValue("token")) return;
+    const $ = W.$;
+    if ($("#rqstCode").val()) return; // 이미 저장된 글을 연 경우
+    ACCOUNT = $("#userCode").val(); TAG = "AJ 수정요청";
+    let rows = [];
+    try { rows = (await call("fix_aj_list", {})).rows || []; } catch (e) { return; }
+    if (!rows.length) return;
+    const lines = (l) => (l || []).map((x) => x.item + " " + x.qty + "장").join(", ");
+    const textOf = (f) => f.aj_text || [
+      "[" + (/^D/.test(f.move_code) ? "렌탈입고 수량 상이" : "반납 수량 상이") + "] 이동코드 " + f.move_code + " (" + f.move_date + ")",
+      (f.from_name || "") + " → " + (f.to_name || ""),
+      "EDI 등록: " + lines(f.before_lines),
+      "실제 확인: " + lines(f.after_lines),
+      "사유: " + (f.reason || ""),
+      "확인 후 수량 정정 부탁드립니다. (LETUS PMS)",
+    ].join("\n");
+    const panel = document.createElement("div");
+    panel.style.cssText = "position:fixed;right:10px;top:10px;z-index:99999;background:#0f1424;color:#fff;font:12px/1.5 sans-serif;padding:10px 12px;border-radius:10px;width:290px;max-height:80vh;overflow:auto;box-shadow:0 4px 14px rgba(0,0,0,.3)";
+    document.body.appendChild(panel);
+    draggable([panel], "posAjFix");
+    let current = null;
+    panel.innerHTML = "<b>LETUS PMS · AJ 수정요청 " + rows.length + "건</b><div style='opacity:.7;margin:3px 0 6px'>[채우기] → 요청내용 확인 → [저장]. 저장하면 PMS에 요청번호가 남아요.</div>";
+    rows.forEach((f) => {
+      const d = document.createElement("div"); d.style.cssText = "padding:6px 0;border-top:1px solid rgba(255,255,255,.12)";
+      d.innerHTML = "<div>" + String(f.move_date || "").slice(5) + " · " + (f.to_name || "") + " <span style='opacity:.6'>" + f.move_code + "</span></div><div style='color:#ffd27a'>" + lines(f.before_lines) + " → 실제 " + lines(f.after_lines) + "</div>";
+      const b = document.createElement("button"); b.textContent = "채우기"; b.style.cssText = "margin-top:4px;background:#1D9E75;color:#fff;border:0;border-radius:6px;padding:3px 10px;cursor:pointer";
+      b.onclick = () => { $("#rqstDesc").val(textOf(f)); current = f; say("요청내용을 채웠어요. 확인 후 [저장]을 누르세요"); };
+      d.appendChild(b); panel.appendChild(d);
+    });
+    // 저장되면 화면에 요청번호가 생긴다 → PMS에 알림
+    setInterval(async () => {
+      try {
+        const code = $("#rqstCode").val();
+        if (current && code) { const f = current; current = null; await call("fix_aj_sent", { id: f.id, rqst_code: code }); say("AJ 수정요청 " + code + "을(를) PMS에 남겼어요"); }
+      } catch (e) { /* 다음 주기에 */ }
+    }, 1000);
+  }
+
   // Tampermonkey 메뉴: 1시간 제한을 무시하고 지금 다시 동기화
   GM_registerMenuCommand("LETUS PMS · 지금 다시 동기화", () => { GM_setValue("lastRunMap", "{}"); location.reload(); });
 
+  if (/OTHR_UPDT_DETL.do/.test(location.pathname)) { runAjFix().catch((e) => say("AJ 수정요청 실패: " + e.message)); return; }
   if (/WARE_MOVE_LIST.do/.test(location.pathname)) { runFix().catch((e) => say("수정 목록 실패: " + e.message)); return; }
   if (/OTHR_SIGN_LIST.do/.test(location.pathname)) { runSign().catch((e) => say("납품요청 실패: " + e.message)); return; }
   if (/WARE_MOVE_DETL.do/.test(location.pathname)) { runFill().catch((e) => say("자동입력 실패: " + e.message)); return; }

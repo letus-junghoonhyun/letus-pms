@@ -227,7 +227,7 @@ Deno.serve(async (req) => {
     // 11) 승인된 이동 수정요청 (이동조회/관리 화면 상자에서 찾아 고칠 건)
     if (body.action === "fix_list") {
       const { data, error } = await db.from("edi_fix").select("id,move_code,move_date,from_name,to_name,before_lines,after_lines,reason,decide_note")
-        .eq("account", account).eq("status", "승인").order("move_date").limit(200);
+        .eq("account", account).eq("status", "승인").like("move_code", "M%").order("move_date").limit(200); // AJ 공급(D)·회수(S)는 이 화면에서 못 고쳐서 제외 → 수정요청 게시판
       if (error) return json({ error: error.message }, 500);
       return json({ rows: data || [] });
     }
@@ -293,6 +293,20 @@ Deno.serve(async (req) => {
       // 이번 조회 기간 안에서 EDI에서 사라진(삭제된) 요청은 정리
       if (body.from) await db.from("aj_call").delete().eq("account", account).gte("inst_date", body.from).lt("synced_at", now);
       return json({ ok: true, upserted: rows.length });
+    }
+    // 16) AJ 수정요청 게시판에 올릴 것: 승인된 AJ 공급(D)·회수(S) 상이
+    if (body.action === "fix_aj_list") {
+      const { data, error } = await db.from("edi_fix").select("id,move_code,move_date,from_name,to_name,before_lines,after_lines,reason,aj_text")
+        .eq("account", account).eq("status", "승인").is("aj_rqst_code", null).or("move_code.like.D%,move_code.like.S%").order("move_date").limit(100);
+      if (error) return json({ error: error.message }, 500);
+      return json({ rows: data || [] });
+    }
+    if (body.action === "fix_aj_sent") {
+      if (!body.id || !body.rqst_code) return json({ error: "id·요청번호 없음" }, 400);
+      const { error } = await db.from("edi_fix").update({ aj_rqst_code: String(body.rqst_code).slice(0, 50), aj_sent_at: new Date().toISOString(), status: "반영", applied_at: new Date().toISOString() })
+        .eq("id", body.id).eq("account", account);
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true });
     }
     return json({ error: "unknown action" }, 400);
   } catch (e) {

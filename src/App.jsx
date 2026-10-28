@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import { createPortal } from "react-dom";
 import * as XLSX from "xlsx";
 import QRCode from "qrcode";
@@ -1513,73 +1513,159 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
   );
 }
 
-// AJ 공급 현황: EDI 납품요청(직접 넣은 것 포함) ↔ 렌탈입고 누적. 같은 작업장·제품은 먼저 요청한 것부터 입고를 채운다
+// AJ 공급 현황: EDI 납품요청(직접 넣은 것 포함) ↔ 렌탈입고(D코드).
+// 매칭 규칙(실데이터 검증: 10/01~ 47줄 전부 1:1): 같은 계정 + 받는 작업장 + 제품 + 렌탈입고일 = 희망일
+// 실입고 = 받는 쪽 확인 수량(상이면 실제 수량, 정상·자동확인이면 EDI 수량, 미확인이면 EDI 수량을 '확인 전'으로)
 function useAjSupply(days = 45) {
   const { idx } = useEdiIndex();
-  const [calls, setCalls] = useState(null); const [moves, setMoves] = useState([]); const [err, setErr] = useState("");
+  const [raw, setRaw] = useState(null); const [err, setErr] = useState(""); const [tick, setTick] = useState(0);
   useEffect(() => {
     let alive = true;
     (async () => {
       const since = localD(new Date(Date.now() - days * 86400000).toISOString());
-      const c = await supabase.from("aj_call").select("*").gte("inst_date", since).order("inst_date").limit(3000);
-      const m = await supabase.from("aj_move").select("account,move_date,item,to_name,qty").eq("move_type", "렌탈입고").gte("move_date", since).limit(5000);
+      const [c, m, r, dcs, rq] = await Promise.all([
+        supabase.from("aj_call").select("*").gte("want_date", since).order("want_date", { ascending: false }).limit(3000),
+        supabase.from("aj_move").select("account,move_code,move_date,item,from_name,to_name,qty,move_type").in("move_type", ["렌탈입고", "반납출고"]).gte("move_date", since).limit(5000),
+        supabase.from("edi_receipt").select("account,move_code,item,status,recv_lines,confirmed_name").gte("move_date", since).or("move_code.like.D%,move_code.like.S%").limit(5000),
+        supabase.from("aj_call_decision").select("*").limit(3000),
+        supabase.from("aj_request").select("*").eq("type", "회수").gte("requested_at", since).limit(1000),
+      ]);
       if (!alive) return;
-      if (c.error) { setErr("납품요청 목록을 못 불러왔어요. letus_edi16.sql 실행과 스크립트 v3.16 동기화가 필요해요. (" + c.error.message + ")"); setCalls([]); return; }
-      setCalls(c.data || []); setMoves(m.data || []);
+      if (c.error) { setErr("납품요청 목록을 못 불러왔어요. (" + c.error.message + ")"); setRaw({ calls: [], moves: [], rcpt: [], dec: [], recall: [] }); return; }
+      setRaw({ calls: c.data || [], moves: m.data || [], rcpt: r.data || [], dec: dcs.error ? [] : dcs.data || [], recall: rq.data || [] });
     })();
     return () => { alive = false; };
-  }, [days]);
-  const rows = useMemo(() => {
-    if (!calls || !idx) return null;
-    const wpOf = (acc, local) => { const e = Object.entries(idx.local).find(([k, v]) => v === local && k.startsWith(acc + "|")); return e ? idx.wpByNo[Number(e[0].split("|")[1])] : null; };
-    const out = calls.map((c) => ({ ...c, wp: wpOf(c.account, c.local_no), got: 0 }));
-    // 작업장·제품별로 입고를 요청 순서대로 나눠 담기
-    const key = (name, item) => ediClean(name) + "|" + item;
-    const pool = {}; moves.forEach((m) => { const k = key(m.to_name, m.item); (pool[k] = pool[k] || []).push({ ...m }); });
-    Object.values(pool).forEach((l) => l.sort((a, b) => (a.move_date < b.move_date ? -1 : 1)));
-    out.forEach((c) => {
-      const k = key(c.wp ? c.wp.name : c.post_name, c.item); const l = pool[k] || []; const start = String(c.inst_date || "").slice(0, 10);
-      let need = c.call_volm || 0;
-      for (const m of l) { if (need <= 0) break; if (m.move_date < start || m.qty <= 0) continue; const take = Math.min(need, m.qty); m.qty -= take; need -= take; c.got += take; c.last = m.move_date; }
-    });
+  }, [days, tick]);
+  const data = useMemo(() => {
+    if (!raw || !idx) return null;
     const today = localD(new Date().toISOString());
-    return out.map((c) => ({ ...c, left: Math.max(0, (c.call_volm || 0) - c.got), late: c.want_date && c.want_date < today && c.got < (c.call_volm || 0) && c.cntr_type !== "보류" })).sort((a, b) => (b.inst_date || "").localeCompare(a.inst_date || ""));
-  }, [calls, moves, idx]);
-  return { rows, err };
+    const rc = {}; raw.rcpt.forEach((r) => { rc[r.account + "|" + r.move_code + "|" + r.item] = r; });
+    const dec = {}; raw.dec.forEach((d) => { dec[d.account + "|" + d.call_code + "|" + d.item] = d; });
+    // 렌탈입고를 (계정|작업장|제품|날짜)로 묶고, 받는 쪽 확인 수량 계산
+    const key = (acc, name, item, date) => acc + "|" + ediClean(name) + "|" + item + "|" + date;
+    const deliv = {};
+    raw.moves.filter((m) => m.move_type === "렌탈입고" && m.qty > 0 && !/^\[관리\]/.test(m.from_name)).forEach((m) => {
+      const k = key(m.account, m.to_name, m.item, m.move_date);
+      const r = rc[m.account + "|" + m.move_code + "|" + m.item];
+      const actual = r && r.status === "다름" ? (r.recv_lines || []).filter((l) => l.item === m.item).reduce((a, l) => a + l.qty, 0) : m.qty;
+      (deliv[k] = deliv[k] || []).push({ ...m, rstatus: r ? r.status : null, actual, matched: false });
+    });
+    const rows = raw.calls.map((c) => {
+      const ds = deliv[key(c.account, c.post_name, c.item, c.want_date)] || [];
+      ds.forEach((d) => { d.matched = true; });
+      const edi = ds.reduce((a, d) => a + d.qty, 0);
+      const confirmed = ds.filter((d) => d.rstatus).reduce((a, d) => a + d.actual, 0);
+      const unconf = ds.filter((d) => !d.rstatus).reduce((a, d) => a + d.qty, 0);
+      const got = confirmed + unconf; // 확인 전 건은 EDI 수량으로 일단 셈
+      const req = c.call_volm || 0;
+      const d = dec[c.account + "|" + c.call_code + "|" + c.item];
+      const due = c.want_date && c.want_date < today;
+      let st;
+      if (c.cntr_type === "보류") st = "보류";
+      else if (!ds.length) st = due ? "미입고" : "입고 전";
+      else if (got >= req) st = "입고 완료";
+      else st = c.cntr_type === "완료" ? "AJ 완료 · 덜 옴" : "부분 입고";
+      return { ...c, deliv: ds, edi, confirmed, unconf, got, left: Math.max(0, req - got), st, decision: d || null, late: (st === "AJ 완료 · 덜 옴" || st === "미입고" || st === "부분 입고") && due && !d };
+    });
+    const orphan = Object.values(deliv).flat().filter((d) => !d.matched); // 요청과 안 맞는 렌탈입고(다른 계정 요청·영업 조정 등)
+    // 회수: PMS 회수요청 ↔ 반납출고(S코드). 같은 작업장·제품, 요청일 이후 처음 나온 반납출고들을 요청 수량까지
+    const back = raw.moves.filter((m) => m.move_type === "반납출고" && m.qty > 0).sort((a, b) => (a.move_date < b.move_date ? -1 : 1)).map((m) => ({ ...m, left: m.qty }));
+    const recall = raw.recall.slice().sort((a, b) => (a.requested_at < b.requested_at ? -1 : 1)).map((r) => {
+      const w = r.wp_no ? idx.wpByNo[r.wp_no] : idx.wpByCenter[r.center];
+      let need = r.qty, got = 0; const used = [];
+      back.forEach((m) => {
+        if (need <= 0 || m.left <= 0 || m.item !== r.pallet_code || !w || ediClean(m.from_name) !== ediClean(w.name) || m.move_date < localD(r.requested_at)) return;
+        const take = Math.min(need, m.left); m.left -= take; need -= take; got += take; used.push(m.move_code + " " + m.move_date.slice(5));
+      });
+      return { ...r, wpName: w ? ediClean(w.name) : r.center, got, used };
+    }).reverse();
+    const backOrphan = back.filter((m) => m.left > 0);
+    return { rows, orphan, recall, backOrphan };
+  }, [raw, idx]);
+  return { rows: data ? data.rows : null, data, err, reload: () => setTick((t) => t + 1) };
 }
-function AjSupplyStatus() {
-  const { rows, err } = useAjSupply(45);
-  const [f, setF] = useState("open"); const [q, setQ] = useState("");
-  const view = (rows || []).filter((r) => (f === "all" || (f === "open" ? r.left > 0 && r.cntr_type !== "보류" : f === "late" ? r.late : f === "hold" ? r.cntr_type === "보류" : r.left === 0)) && (!q || (r.post_name + " " + r.call_code + " " + r.item).includes(q)));
+function AjSupplyStatus({ onReorder, canEdit }) {
+  const { data, err, reload } = useAjSupply(45);
+  const [f, setF] = useState("open"); const [q, setQ] = useState(""); const [tab, setTab] = useState("supply"); const [open, setOpen] = useState({});
+  const rows = data ? data.rows : null;
+  const OPEN = (r) => ["AJ 완료 · 덜 옴", "미입고", "부분 입고", "입고 전"].includes(r.st) && !r.decision;
+  const fl = { open: OPEN, short: (r) => r.st === "AJ 완료 · 덜 옴" && !r.decision, wait: (r) => r.st === "입고 전", done: (r) => r.st === "입고 완료" || !!r.decision, hold: (r) => r.st === "보류", all: () => true };
+  const view = (rows || []).filter((r) => fl[f](r) && (!q || (r.post_name + " " + r.call_code + " " + r.item).includes(q)));
   const n = (fn) => (rows || []).filter(fn).length;
-  const ST = { 완료: C.green, 처리중: C.blue, 접수: C.blue, 등록: C.sub, 보류: C.red };
+  const STC = { "입고 완료": [C.green, C.greenBg], "부분 입고": [C.amber, C.amberBg], "AJ 완료 · 덜 옴": [C.red, C.redBg], 미입고: [C.red, C.redBg], "입고 전": [C.blue, C.blueBg], 보류: [C.sub, "#f1f2f4"] };
+  const decide = async (r, decision) => {
+    const note = decision === "종결" ? window.prompt(`${r.post_name} ${r.item} 남은 ${r.left}장을 이대로 종결할까요? 메모(선택)`, "AJ 재고 부족") : "남은 수량 재요청";
+    if (note === null) return;
+    const { error } = await supabase.from("aj_call_decision").upsert({ account: r.account, call_code: r.call_code, item: r.item, decision, note, decided_at: new Date().toISOString() });
+    if (error) { alert(error.message + " (letus_edi17.sql 실행 필요)"); return; }
+    if (decision === "재요청" && onReorder) onReorder(r);
+    reload();
+  };
+  const chip = (k, l) => <button key={k} onClick={() => setF(k)} style={{ fontSize: 12, padding: "4px 11px", borderRadius: 20, border: `1px solid ${f === k ? C.teal : C.border}`, background: f === k ? C.tealBg : "#fff", color: f === k ? C.tealDk : C.sub, cursor: "pointer" }}>{l}</button>;
   return (
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>AJ 공급 현황</h3>
-        <span style={{ fontSize: 12, color: C.hint }}>EDI 납품요청(최근 45일, EDI 직접 요청 포함) ↔ 렌탈입고. 같은 곳·제품은 먼저 요청한 것부터 채워요</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        {[["supply", "AJ 공급 현황"], ["recall", "AJ 회수 현황"]].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ ...btnGhost, padding: "6px 14px", fontWeight: tab === k ? 600 : 400, background: tab === k ? C.teal : "#fff", color: tab === k ? "#fff" : C.text }}>{l}</button>)}
+        <span style={{ fontSize: 12, color: C.hint }}>{tab === "supply" ? "납품요청 ↔ 렌탈입고(같은 작업장·제품·희망일). 실입고는 받는 쪽 확인 기준" : "PMS 회수요청 ↔ 반납출고(같은 작업장·제품, 요청일 이후)"}</span>
       </div>
       {err && <div style={{ background: C.redBg, color: C.red, padding: 10, borderRadius: 8, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
-        {[["open", `남은 것 ${n((r) => r.left > 0 && r.cntr_type !== "보류")}`], ["late", `희망일 지남 ${n((r) => r.late)}`], ["hold", `보류 ${n((r) => r.cntr_type === "보류")}`], ["done", `다 들어옴 ${n((r) => r.left === 0)}`], ["all", "전체"]].map(([k, l]) => (
-          <button key={k} onClick={() => setF(k)} style={{ fontSize: 12, padding: "4px 11px", borderRadius: 20, border: `1px solid ${f === k ? C.teal : C.border}`, background: f === k ? C.tealBg : "#fff", color: f === k ? C.tealDk : C.sub, cursor: "pointer" }}>{l}</button>
-        ))}
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·요청코드" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140 }} />
-      </div>
-      {!rows ? <Splash text="불러오는 중…" /> : !view.length ? <div style={{ fontSize: 13, color: C.sub, padding: 10 }}>해당하는 요청이 없어요.</div> : (
-        <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 720 }}>
-          <thead><tr><Th>요청일</Th><Th>작업장</Th><Th>제품</Th><Th r>요청</Th><Th r>입고</Th><Th r>남음</Th><Th>희망일</Th><Th>EDI 상태</Th><Th>요청코드</Th></tr></thead>
-          <tbody>{view.slice(0, 300).map((r) => (
-            <tr key={r.account + r.call_code + r.item} style={{ borderTop: `1px solid ${C.border}`, background: r.late ? C.redBg : "transparent" }}>
-              <Td>{String(r.inst_date || "").slice(5, 10)}</Td><Td>{r.post_name}</Td><Td b>{r.item}</Td>
-              <Td r>{(r.call_volm || 0).toLocaleString()}</Td><Td r c={r.got ? C.green : C.hint}>{r.got.toLocaleString()}{r.last ? <div style={{ fontSize: 10.5, color: C.hint }}>{r.last.slice(5)}</div> : null}</Td>
-              <Td r b c={r.left ? C.amber : C.green}>{r.left ? r.left.toLocaleString() : "✓"}</Td>
-              <Td><span style={{ color: r.late ? C.red : C.text }}>{String(r.want_date || "").slice(5)} {r.want_time && r.want_time !== "-" ? r.want_time : ""}</span></Td>
-              <Td><span style={{ color: ST[r.cntr_type] || C.sub, fontSize: 12 }}>{r.cntr_type}</span> <span style={{ color: C.hint, fontSize: 11 }}>{r.cars_oper}</span></Td>
-              <Td><span style={{ fontSize: 11.5, color: C.hint }}>{r.call_code}{r.inst_empn ? " · " + r.inst_empn : ""}</span></Td>
-            </tr>
-          ))}</tbody>
-        </table></div>
+      {!data ? <Splash text="불러오는 중…" /> : tab === "recall" ? (
+        <>
+          {!data.recall.length ? <div style={{ fontSize: 13, color: C.sub, padding: 8 }}>최근 45일 PMS 회수요청이 없어요. (회수는 EDI에 요청 메뉴가 없어 PMS에 전화·배차 내용을 적어 두면 반납출고와 맞춰 봐요)</div> : (
+            <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 640 }}>
+              <thead><tr><Th>요청일</Th><Th>보내는 곳</Th><Th>제품</Th><Th r>요청</Th><Th r>실제 회수</Th><Th r>남음</Th><Th>반납출고</Th><Th>메모</Th></tr></thead>
+              <tbody>{data.recall.map((r) => (
+                <tr key={r.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <Td>{localD(r.requested_at).slice(5)}</Td><Td>{r.wpName}</Td><Td b>{r.pallet_code}</Td><Td r>{r.qty}</Td>
+                  <Td r c={r.got ? C.green : C.hint}>{r.got}</Td><Td r b c={r.qty - r.got > 0 ? C.amber : C.green}>{r.qty - r.got > 0 ? r.qty - r.got : "✓"}</Td>
+                  <Td><span style={{ fontSize: 11.5, color: C.hint }}>{r.used.join(", ") || "아직 없음"}</span></Td><Td><span style={{ fontSize: 12, color: C.sub }}>{r.note || ""}</span></Td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+          )}
+          {data.backOrphan.length > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 10 }}>요청 없이 나간 반납출고 {data.backOrphan.length}건: {data.backOrphan.slice(0, 6).map((m) => `${m.move_date.slice(5)} ${ediClean(m.from_name)} ${m.item} ${m.left}`).join(" · ")}</div>}
+        </>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
+            {chip("open", `처리 필요 ${n(OPEN)}`)}{chip("short", `AJ 완료인데 덜 옴 ${n(fl.short)}`)}{chip("wait", `입고 전 ${n(fl.wait)}`)}{chip("done", `끝남 ${n(fl.done)}`)}{chip("hold", `보류 ${n(fl.hold)}`)}{chip("all", "전체")}
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·요청코드" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140 }} />
+          </div>
+          {!view.length ? <div style={{ fontSize: 13, color: C.sub, padding: 10 }}>해당하는 요청이 없어요.</div> : (
+            <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 820 }}>
+              <thead><tr><Th>희망일</Th><Th>작업장</Th><Th>제품</Th><Th r>요청</Th><Th r>EDI 입고</Th><Th r>받는 쪽 확인</Th><Th r>남음</Th><Th>상태</Th><Th>요청코드</Th><Th></Th></tr></thead>
+              <tbody>{view.slice(0, 300).map((r) => {
+                const k = r.account + r.call_code + r.item, sc = STC[r.st] || STC["입고 전"];
+                return (
+                  <Fragment key={k}>
+                    <tr style={{ borderTop: `1px solid ${C.border}`, background: r.late ? "#fff7f6" : "transparent" }}>
+                      <Td>{String(r.want_date || "").slice(5)}{r.want_time && r.want_time !== "-" ? " " + r.want_time : ""}</Td><Td>{r.post_name}</Td><Td b>{r.item}</Td>
+                      <Td r>{(r.call_volm || 0).toLocaleString()}</Td>
+                      <Td r>{r.deliv.length ? <button onClick={() => setOpen((o) => ({ ...o, [k]: !o[k] }))} style={{ border: "none", background: "none", color: C.tealDk, cursor: "pointer", fontSize: 13.5, padding: 0 }}>{r.edi.toLocaleString()} ▾</button> : <span style={{ color: C.hint }}>0</span>}</Td>
+                      <Td r>{r.deliv.length ? <span style={{ color: r.unconf ? C.amber : C.green }}>{r.confirmed.toLocaleString()}{r.unconf ? <span style={{ fontSize: 11, color: C.amber }}> (+{r.unconf} 확인 전)</span> : ""}</span> : "—"}</Td>
+                      <Td r b c={r.left ? C.amber : C.green}>{r.left ? r.left.toLocaleString() : "✓"}</Td>
+                      <Td><span style={{ fontSize: 11.5, color: sc[0], background: sc[1], padding: "1px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>{r.st}</span>{r.decision && <div style={{ fontSize: 11, color: C.hint }}>{r.decision.decision}{r.decision.note ? " · " + r.decision.note : ""}</div>}</Td>
+                      <Td><span style={{ fontSize: 11.5, color: C.hint }}>{r.call_code}<br />EDI {r.cntr_type}{r.inst_empn ? " · " + r.inst_empn : ""}</span></Td>
+                      <Td r>{canEdit && r.left > 0 && !r.decision && r.st !== "입고 전" && r.st !== "보류" && <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        <button onClick={() => decide(r, "재요청")} title="남은 수량으로 새 공급요청을 채워 줘요" style={{ ...btnTealSm, padding: "3px 8px", fontSize: 11.5 }}>남은 {r.left} 재요청</button>
+                        <button onClick={() => decide(r, "종결")} style={{ ...btnGhost, padding: "3px 8px", fontSize: 11.5 }}>이대로 종결</button>
+                      </div>}</Td>
+                    </tr>
+                    {open[k] && r.deliv.map((d) => (
+                      <tr key={d.move_code} style={{ background: "#fafbfc" }}>
+                        <td></td><td colSpan={3} style={{ padding: "5px 7px", fontSize: 12, color: C.sub }}>↳ {d.move_code} · {d.from_name} → {d.to_name}</td>
+                        <td style={{ padding: "5px 7px", fontSize: 12, textAlign: "right" }}>{d.qty}</td>
+                        <td style={{ padding: "5px 7px", fontSize: 12, textAlign: "right", color: d.rstatus === "다름" ? C.amber : d.rstatus ? C.green : C.hint }}>{d.rstatus === "다름" ? `상이 · 실제 ${d.actual}` : d.rstatus === "확인" ? "정상" : d.rstatus === "자동확인" ? "자동확인" : "확인 전"}</td>
+                        <td colSpan={4}></td>
+                      </tr>
+                    ))}
+                  </Fragment>
+                );
+              })}</tbody>
+            </table></div>
+          )}
+          {data.orphan.length > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 10, lineHeight: 1.6 }}>요청과 맞지 않는 렌탈입고 {data.orphan.length}줄 (다른 계정에서 요청했거나 희망일과 다른 날 들어온 것): {data.orphan.slice(0, 6).map((d) => `${d.move_date.slice(5)} ${ediClean(d.to_name)} ${d.item} ${d.qty}`).join(" · ")}{data.orphan.length > 6 ? " …" : ""}</div>}
+        </>
       )}
     </div>
   );
@@ -1667,6 +1753,7 @@ function ReceiptDiffModal({ row, palletTypes = [], onClose, onSave }) {
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 14, padding: 20, width: "100%", maxWidth: 440, maxHeight: "92vh", overflow: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><h3 style={{ margin: 0, fontSize: 16 }}>상이 (보낸 것과 다르게 옴)</h3><button onClick={onClose} style={{ background: "none", border: "none", fontSize: 18, color: C.sub, cursor: "pointer" }}>✕</button></div>
         <div style={{ fontSize: 12.5, color: C.sub, margin: "4px 0 14px" }}>{row.move_date} · {row.from_name} → {row.to_name} · 보낸 수량 {row.item} {row.qty}장</div>
+        {row.move_type === "렌탈입고" && <div style={{ fontSize: 12, color: C.amber, background: C.amberBg, padding: "7px 10px", borderRadius: 8, marginBottom: 12 }}>AJ 공급 건은 EDI에서 우리가 못 고쳐요. 관리자 확인 후 AJ 수정요청 게시판에 정정 요청이 올라가요.</div>}
         <div style={{ fontSize: 13, color: C.sub, marginBottom: 7 }}>실제로 받은 것 <span style={{ color: C.hint, fontSize: 11 }}>· 다른 제품이 섞여 왔으면 그 제품에도 입력</span></div>
         <PalletQtyEditor palletTypes={codes.map((c) => ({ code: c }))} qtys={lines} setQtys={setLines} color={C.amber} bg={C.amberBg} />
         <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="어떻게 달랐나요? (예: 18F 10장이라 했는데 8장 + 14C 2장)" rows={2} style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12, resize: "vertical", fontFamily: "inherit" }} />
@@ -1718,6 +1805,10 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
   const [sel, setSel] = useState({}); const [diff, setDiff] = useState(null); const [scan, setScan] = useState(false); const [busy, setBusy] = useState(false);
   const [batch, setBatch] = useState(focusBatch);
   const [msg, setMsg] = useState("");
+  // AJ 공급(렌탈입고)이 어느 납품요청분인지: 같은 계정·작업장·제품·희망일
+  const [calls, setCalls] = useState({});
+  useEffect(() => { if (!caps.users && !caps.aj && !caps.operate) return; supabase.from("aj_call").select("account,call_code,item,post_name,want_date,call_volm,cntr_type").gte("want_date", localD(new Date(Date.now() - 60 * 86400000).toISOString())).limit(3000).then(({ data }) => { const m = {}; (data || []).forEach((c) => { m[c.account + "|" + ediClean(c.post_name) + "|" + c.item + "|" + c.want_date] = c; }); setCalls(m); }); }, []); // eslint-disable-line
+  const callOf = (r) => r.move_type === "렌탈입고" ? calls[r.account + "|" + ediClean(r.to_name) + "|" + r.item + "|" + r.move_date] : null;
   // 폰 화면에서는 표 대신 한 줄 카드로
   const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.innerWidth < 700);
   useEffect(() => { const f = () => setNarrow(window.innerWidth < 700); window.addEventListener("resize", f); return () => window.removeEventListener("resize", f); }, []);
@@ -1840,7 +1931,7 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 14 }}><b>{r.item} {r.qty.toLocaleString()}장</b> <span style={{ color: C.sub }}>· {r.from_name}</span></div>
                           <div style={{ fontSize: 11.5, color: C.hint, marginTop: 2, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                            <span>{r.move_date.slice(5)}</span><span style={{ color: kt[1], background: kt[2], padding: "0 6px", borderRadius: 10 }}>{kt[0]}</span>
+                            <span>{r.move_date.slice(5)}</span><span style={{ color: kt[1], background: kt[2], padding: "0 6px", borderRadius: 10 }}>{kt[0]}{callOf(r) ? ` · 요청 ${callOf(r).call_volm}장 중` : ""}</span>
                             {r.slip_no && <span>{r.slip_no}</span>}{r.vehicle_no && <span>{r.vehicle_no}</span>}
                             {tab === "todo" ? <span style={{ color: dl.c }}>{dl.t}</span> : st && <span style={{ color: st[0] }}>{st[2]}{r.edi_conf === "대기" ? " · EDI 대기" : ""}</span>}
                           </div>
@@ -1863,7 +1954,7 @@ function ReceiptScreen({ ships = [], palletTypes = [], caps = {}, focusBatch = n
                             <Td>{r.move_date.slice(5)}</Td>
                             <Td><div style={{ display: "flex", alignItems: "center", gap: 6 }}>{photo(r) && <a href={photo(r)} target="_blank" rel="noreferrer"><img src={photo(r)} alt="" style={{ width: 30, height: 30, objectFit: "cover", borderRadius: 4 }} /></a>}{r.from_name}</div></Td>
                             <Td b>{r.item}</Td><Td r b>{r.qty.toLocaleString()}</Td>
-                            <Td><span style={{ fontSize: 11, color: kt[1], background: kt[2], padding: "1px 7px", borderRadius: 10, whiteSpace: "nowrap" }}>{kt[0]}</span></Td>
+                            <Td><span style={{ fontSize: 11, color: kt[1], background: kt[2], padding: "1px 7px", borderRadius: 10, whiteSpace: "nowrap" }}>{kt[0]}</span>{callOf(r) && <div style={{ fontSize: 11, color: C.hint, marginTop: 2, whiteSpace: "nowrap" }} title={callOf(r).call_code}>요청 {callOf(r).call_volm}장 중</div>}</Td>
                             <Td><span style={{ fontSize: 12, color: C.sub }}>{[r.slip_no, r.vehicle_no].filter(Boolean).join(" · ") || "—"}</span></Td>
                             <Td>{tab === "todo" ? <span style={{ fontSize: 12, color: dl.c, whiteSpace: "nowrap" }}>{dl.t}</span>
                               : st ? <span style={{ fontSize: 11.5 }}><span style={{ color: st[0], background: st[1], padding: "1px 7px", borderRadius: 10 }}>{st[2]}</span><div style={{ color: C.hint, marginTop: 2 }}>{r.r_name || ""} {r.r_at ? fmtDT(r.r_at) : ""}{r.edi_conf === "대기" ? " · EDI 대기" : r.edi_conf === "완료" ? " · EDI 반영" : ""}</div>{r.r_recv && <div style={{ color: C.amber }}>실제 {r.r_recv.map((l) => l.item + " " + l.qty).join(", ")}</div>}</span> : "—"}</Td>
@@ -2315,11 +2406,16 @@ function AjLink({ ajReqs, palletTypes, createAjRequest, completeAjRequest, confi
 
   return (
     <>
-      {canCreate && <AjSupplyStatus />}
+      {canCreate && <AjSupplyStatus canEdit={canCreate} onReorder={(r) => {
+        const e = ediIdx && Object.entries(ediIdx.local).find(([k, v]) => v === r.local_no && k.startsWith(r.account + "|"));
+        if (e) setWpNo(Number(e[0].split("|")[1]));
+        setType("공급"); setQtys({ [r.item]: r.left }); setNote(`재요청 · ${r.call_code} 남은 ${r.left}장`);
+        setTimeout(() => { const el = document.getElementById("aj-new-request"); if (el) el.scrollIntoView({ behavior: "smooth", block: "start" }); }, 50);
+      }} />}
       <Head title={canCreate ? "AJ 요청" : "AJ 요청 처리"} sub={canCreate ? "AJ네트웍스에 공급/회수 요청 · 완료 시 재고 반영 (가설정 수동)" : "접수된 요청을 처리(완료)하세요 · AJ네트웍스 직원용"} />
       <div style={{ display: "grid", gridTemplateColumns: canCreate ? "repeat(auto-fit, minmax(300px, 1fr))" : "1fr", gap: 16, alignItems: "start" }}>
         {/* 요청 등록 (내부만) */}
-        {canCreate && <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+        {canCreate && <div id="aj-new-request" style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
           <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600 }}>새 요청</h3>
           <div style={{ display: "flex", gap: 6, marginBottom: 16, background: "#eef0f3", borderRadius: 10, padding: 4 }}>
             {[["공급", "공급요청 (AJ→센터)"], ["회수", "회수요청 (센터→AJ)"]].map(([v, label]) => (
@@ -3408,7 +3504,14 @@ function EdiFixList({ caps = {} }) {
   const decide = async (f, status) => {
     let note = null;
     if (status === "반려") { note = window.prompt("반려 사유"); if (note === null) return; }
-    if (status === "승인") {
+    const ajSide = /^[DS]/.test(String(f.move_code || ""));
+    if (status === "승인" && ajSide) {
+      const ln = (l) => (l || []).map((x) => x.item + " " + x.qty + "장").join(", ");
+      const text = [`[${/^D/.test(f.move_code) ? "렌탈입고 수량 상이" : "반납 수량 상이"}] 이동코드 ${f.move_code} (${f.move_date})`, `${f.from_name || ""} → ${f.to_name || ""}`, `EDI 등록: ${ln(f.before_lines)}`, `실제 확인: ${ln(f.after_lines)}`, `사유: ${f.reason || ""}`, "확인 후 수량 정정 부탁드립니다. (LETUS PMS)"].join("\n");
+      const { error: e1 } = await supabase.from("edi_fix").update({ aj_text: text }).eq("id", f.id);
+      if (e1) { alert(e1.message + " (letus_edi17.sql 실행 필요)"); return; }
+    }
+    if (status === "승인" && !ajSide) {
       // 새로 생긴 제품은 EDI 새 이동으로 자동입력 대기열에
       const adds = fixDiff(f).filter((d) => d.before === null && d.after > 0);
       if (adds.length) {
@@ -3450,6 +3553,7 @@ function EdiFixList({ caps = {} }) {
             </div>
             <div style={{ fontSize: 13, margin: "6px 0" }}>{fixDiff(f).map((d) => <span key={d.item} style={{ marginRight: 12 }}><b>{d.item}</b> {d.before === null ? <span style={{ color: C.blue }}>+{d.after} (새 이동)</span> : <>{d.before} → <b style={{ color: C.amber }}>{d.after}</b></>}</span>)}</div>
             <div style={{ fontSize: 12, color: C.sub }}>사유: {f.reason} · 요청 {f.requested_name || ""} {fmtDT(f.created_at)}{f.decide_note ? " · 메모: " + f.decide_note : ""}</div>
+            {/^[DS]/.test(String(f.move_code || "")) && <div style={{ fontSize: 12, color: C.amber, marginTop: 4 }}>{/^D/.test(f.move_code) ? "AJ 공급(렌탈입고)" : "AJ 회수(반납출고)"} 건 — 우리가 EDI에서 못 고쳐서 승인하면 <b>EDI 수정요청등록 → [추가]</b> 창의 LETUS 상자에 정정 요청 글이 채워져요.{f.aj_rqst_code ? ` · AJ 요청번호 ${f.aj_rqst_code}` : ""}</div>}
             {f.photos && f.photos.length > 0 && <div style={{ display: "flex", gap: 6, marginTop: 6 }}>{f.photos.map((u, i) => <a key={i} href={u} target="_blank" rel="noreferrer"><img src={u} alt="" style={{ width: 52, height: 52, objectFit: "cover", borderRadius: 6 }} /></a>)}</div>}
             {admin && <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
               {f.status === "요청" && <><button onClick={() => decide(f, "승인")} style={btnTealSm}>승인 (EDI 반영으로)</button><button onClick={() => decide(f, "반려")} style={btnGhost}>반려</button></>}
