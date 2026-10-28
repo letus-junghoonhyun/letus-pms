@@ -1753,11 +1753,11 @@ function TodayBoard({ ships = [], caps = {}, setNav }) {
         supabase.from("edi_fix").select("id,status", { count: "exact", head: false }).in("status", ["요청", "승인"]).limit(500),
         supabase.from("aj_move").select("account,move_code,move_date,item,from_name,to_name,qty,note").eq("conf", "승인거부").gte("move_date", since).order("move_date", { ascending: false }).limit(50),
         supabase.from("aj_account").select("code,label,name,last_seen"),
-        supabase.from("aj_sync_log").select("account,created_at,status").order("created_at", { ascending: false }).limit(60),
+        supabase.from("aj_sync_log").select("account,ran_at,status").order("ran_at", { ascending: false }).limit(200),
       ]);
       if (!alive) return;
       const inc = (rc.data || []).filter((r) => !r.r_status);
-      const lastSync = {}; (logs.data || []).forEach((l) => { if (!lastSync[l.account]) lastSync[l.account] = l.created_at; });
+      const lastSync = {}; (logs.data || []).forEach((l) => { if (!lastSync[l.account]) lastSync[l.account] = l.ran_at; });
       setD({ inc, fixReq: (fx.data || []).filter((r) => r.status === "요청").length, fixOk: (fx.data || []).filter((r) => r.status === "승인").length, rej: rej.data || [], accs: accs.data || [], lastSync });
     })();
     return () => { alive = false; };
