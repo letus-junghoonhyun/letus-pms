@@ -1883,7 +1883,7 @@ function PalletMap({ caps = {} }) {
             ovRef.current.forEach((o) => o.setMap(null)); ovRef.current = [];
             const showName = map.getLevel() <= 8;
             pts.forEach((p) => {
-              const r = Math.round(p.qty <= 0 ? 5 : Math.min(28, 5 + Math.sqrt(p.qty) * 1.9));
+              const r = Math.round(p.qty <= 0 ? 5 : Math.min(map.getLevel() >= 11 ? 14 : 22, 4 + Math.sqrt(p.qty) * (map.getLevel() >= 11 ? 0.9 : 1.4)));
               const el = document.createElement("div");
               el.style.cssText = "position:relative;cursor:pointer";
               el.innerHTML = `<div title="${p.label} · ${p.kind} · 보유 ${p.qty.toLocaleString()}장" style="width:${r * 2}px;height:${r * 2}px;border-radius:50%;background:${p.color};opacity:.85;border:${p.sel ? "3px solid #111" : "1.5px solid #fff"};box-shadow:0 1px 3px rgba(0,0,0,.25);transform:translate(-50%,-50%)"></div>` +
@@ -1937,7 +1937,12 @@ function PalletMap({ caps = {} }) {
   const [zoomTick, setZoomTick] = useState(0);
   const pinned = useMemo(() => view.filter((w) => w.geo && w.geo.lat), [view]);
   const pts = useMemo(() => pinned.map((w) => ({ no: w.no, lat: w.geo.lat, lng: w.geo.lng, label: w.name, kind: w.kind, color: KIND_COLOR[w.kind] || "#888", qty: Math.max(0, sumOf(w.now, item)), sel: w.no === sel })), [pinned, item, sel]);
-  useEffect(() => { if (mapReady && engRef.current) engRef.current.setPoints(pts); }, [mapReady, pts, zoomTick]);
+  const fitted = useRef(false);
+  useEffect(() => {
+    if (!mapReady || !engRef.current) return;
+    engRef.current.setPoints(pts);
+    if (!fitted.current && pts.length) { fitted.current = true; engRef.current.fit(pts); } // 처음엔 작업장이 다 보이게
+  }, [mapReady, pts, zoomTick]);
   // 선택하면 그 곳으로
   useEffect(() => {
     if (!engRef.current || !selW || !selW.geo || !selW.geo.lat) return;
