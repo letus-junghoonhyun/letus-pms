@@ -1915,8 +1915,9 @@ function PalletMap({ caps = {} }) {
     map.once("click", h);
     return () => { map.off("click", h); };
   }, [moving]); // eslint-disable-line
-  const runGeocode = async () => {
-    const todo = model.list.filter((w) => w.addr && !w.geo);
+  const runGeocode = async (redo = false) => {
+    // redo: 카카오가 아닌 방법(OSM·못찾음)으로 찍힌 곳을 다시 찾기. 직접 찍은 곳(수동)은 건드리지 않는다
+    const todo = model.list.filter((w) => w.addr && (!w.geo || (redo && w.geo.src !== "카카오" && w.geo.src !== "수동")));
     if (!todo.length) { alert("주소가 있는 곳은 모두 위치를 찾았어요."); return; }
     if (!window.confirm(`주소로 위치를 찾을 곳이 ${todo.length}곳이에요. 처음 한 번만 하면 되고 몇 분 걸려요. 시작할까요?`)) return;
     let ok = 0, miss = 0;
@@ -1976,7 +1977,8 @@ function PalletMap({ caps = {} }) {
           {!model && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}><Splash text="불러오는 중…" /></div>}
           {model && <div style={{ position: "absolute", left: 10, bottom: 10, background: "rgba(255,255,255,.94)", borderRadius: 8, padding: "6px 10px", fontSize: 11.5, color: C.sub, boxShadow: "0 1px 4px rgba(0,0,0,.12)" }}>
             지도 표시 {pinned.length}곳 · 원 크기 = 보유 수량{noGeo ? ` · 위치 없음 ${noGeo}곳` : ""}
-            {caps.users && noGeo > 0 && !geoRun && <button onClick={runGeocode} style={{ marginLeft: 8, border: "none", background: C.teal, color: "#fff", borderRadius: 6, padding: "3px 9px", cursor: "pointer", fontSize: 11.5 }}>주소로 위치 찾기</button>}
+            {caps.users && noGeo > 0 && !geoRun && <button onClick={() => runGeocode(false)} style={{ marginLeft: 8, border: "none", background: C.teal, color: "#fff", borderRadius: 6, padding: "3px 9px", cursor: "pointer", fontSize: 11.5 }}>주소로 위치 찾기</button>}
+            {caps.users && !geoRun && model.list.some((w) => w.addr && w.geo && w.geo.src !== "카카오" && w.geo.src !== "수동") && <button onClick={() => runGeocode(true)} style={{ marginLeft: 6, border: `1px solid ${C.teal}`, background: "#fff", color: C.tealDk, borderRadius: 6, padding: "3px 9px", cursor: "pointer", fontSize: 11.5 }}>정확한 위치로 다시 찾기</button>}
             {geoRun && <span style={{ marginLeft: 8, color: C.tealDk }}>위치 찾는 중 {geoRun.i + 1}/{geoRun.n}</span>}
           </div>}
           {moving && <div style={{ position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", background: C.text, color: "#fff", borderRadius: 8, padding: "7px 12px", fontSize: 12.5 }}>{selW && selW.name} 위치를 지도에서 눌러 주세요 <button onClick={() => setMoving(false)} style={{ marginLeft: 6, background: "none", border: "1px solid #fff", color: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 11.5 }}>취소</button></div>}
