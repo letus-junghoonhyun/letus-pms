@@ -1851,7 +1851,7 @@ function PalletMap({ caps = {} }) {
   const [kinds, setKinds] = useState({ 센터: true, 시공팀: true, 업체: true });
   const [item, setItem] = useState(""); const [onlyStock, setOnlyStock] = useState(true); const [pick, setPick] = useState(""); const [sel, setSel] = useState(null);
   const [geoRun, setGeoRun] = useState(null); const [moving, setMoving] = useState(false); const [mapReady, setMapReady] = useState(false);
-  const mapEl = useRef(null); const mapRef = useRef(null); const mlRef = useRef(null); const popRef = useRef(null);
+  const mapEl = useRef(null); const popRef = useRef(null);
   const view = useMemo(() => {
     if (!model) return [];
     return model.list.filter((w) => kinds[w.kind] !== false && (!onlyStock || sumOf(w.now, item) || sumOf(w.inn, item) || sumOf(w.out, item)) && (!item || w.now[item] !== undefined || w.inn[item] || w.out[item]))
@@ -1863,13 +1863,46 @@ function PalletMap({ caps = {} }) {
     return t;
   }, [view, item]);
   const selW = sel && model ? model.list.find((w) => w.no === sel) : null;
-  // 지도 만들기 (maplibre는 이 화면에서만 불러온다)
+  // 지도 만들기: 카카오맵 우선, 안 되면(도메인·네트워크 문제) 무료 지도(MapLibre)로. 둘 다 같은 함수(eng)로 다룬다
+  const engRef = useRef(null); const ovRef = useRef([]);
   useEffect(() => {
     let dead = false;
     (async () => {
+      const kakao = (await loadKakaoGeocoder()) ? window.kakao : null;
+      if (dead || !mapEl.current || engRef.current) return;
+      if (kakao) {
+        const map = new kakao.maps.Map(mapEl.current, { center: new kakao.maps.LatLng(36.3, 127.8), level: 13 });
+        map.addControl(new kakao.maps.ZoomControl(), kakao.maps.ControlPosition.RIGHT);
+        let clickOnce = null;
+        kakao.maps.event.addListener(map, "click", (e) => { if (clickOnce) { const f = clickOnce; clickOnce = null; f({ lat: e.latLng.getLat(), lng: e.latLng.getLng() }); } });
+        const draw = () => setZoomTick((t) => t + 1);
+        kakao.maps.event.addListener(map, "zoom_changed", draw);
+        engRef.current = {
+          kind: "kakao",
+          setPoints(pts) {
+            ovRef.current.forEach((o) => o.setMap(null)); ovRef.current = [];
+            const showName = map.getLevel() <= 8;
+            pts.forEach((p) => {
+              const r = Math.round(p.qty <= 0 ? 5 : Math.min(28, 5 + Math.sqrt(p.qty) * 1.9));
+              const el = document.createElement("div");
+              el.style.cssText = "position:relative;cursor:pointer";
+              el.innerHTML = `<div title="${p.label} · ${p.kind} · 보유 ${p.qty.toLocaleString()}장" style="width:${r * 2}px;height:${r * 2}px;border-radius:50%;background:${p.color};opacity:.85;border:${p.sel ? "3px solid #111" : "1.5px solid #fff"};box-shadow:0 1px 3px rgba(0,0,0,.25);transform:translate(-50%,-50%)"></div>` +
+                (showName || p.sel ? `<div style="position:absolute;left:0;top:${r + 2}px;transform:translateX(-50%);white-space:nowrap;font-size:11.5px;color:#222;text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff;font-weight:${p.sel ? 700 : 500}">${p.label}</div>` : "");
+              el.onclick = (ev) => { ev.stopPropagation(); setSel(p.no); };
+              const ov = new kakao.maps.CustomOverlay({ position: new kakao.maps.LatLng(p.lat, p.lng), content: el, xAnchor: 0, yAnchor: 0, zIndex: p.sel ? 10 : 1, clickable: true });
+              ov.setMap(map); ovRef.current.push(ov);
+            });
+          },
+          focus(lat, lng) { if (map.getLevel() > 6) map.setLevel(6); map.panTo(new kakao.maps.LatLng(lat, lng)); },
+          fit(pts) { const b = new kakao.maps.LatLngBounds(); pts.forEach((p) => b.extend(new kakao.maps.LatLng(p.lat, p.lng))); map.setBounds(b, 40, 40, 40, 40); },
+          pick(cb) { map.setCursor("crosshair"); clickOnce = (ll) => { map.setCursor(""); cb(ll); }; return () => { clickOnce = null; map.setCursor(""); }; },
+          destroy() { ovRef.current.forEach((o) => o.setMap(null)); ovRef.current = []; },
+        };
+        setMapReady(true);
+        return;
+      }
       const ml = (await import("maplibre-gl")).default; await import("maplibre-gl/dist/maplibre-gl.css");
-      if (dead || !mapEl.current || mapRef.current) return;
-      mlRef.current = ml;
+      if (dead || !mapEl.current) return;
       const map = new ml.Map({ container: mapEl.current, style: MAP_STYLE_URL, center: [127.6, 36.4], zoom: 6.3, attributionControl: { compact: true } });
       map.addControl(new ml.NavigationControl({ showCompass: false }), "top-right");
       map.on("load", () => {
@@ -1888,32 +1921,36 @@ function PalletMap({ caps = {} }) {
           popRef.current = new ml.Popup({ closeButton: false, offset: 10 }).setLngLat(e.features[0].geometry.coordinates).setHTML(`<div style="font-size:12.5px"><b>${p.label}</b><br>${p.kind} · 보유 ${Number(p.qty).toLocaleString()}장</div>`).addTo(map);
         });
         map.on("mouseleave", "wp-c", () => { map.getCanvas().style.cursor = ""; popRef.current && popRef.current.remove(); });
-        mapRef.current = map; setMapReady(true);
+        engRef.current = {
+          kind: "ml",
+          setPoints(pts) { map.getSource("wp").setData({ type: "FeatureCollection", features: pts.map((p) => ({ type: "Feature", geometry: { type: "Point", coordinates: [p.lng, p.lat] }, properties: p })) }); },
+          focus(lat, lng) { map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 11), speed: 1.4 }); },
+          fit(pts) { const b = new ml.LngLatBounds(); pts.forEach((p) => b.extend([p.lng, p.lat])); map.fitBounds(b, { padding: 50, maxZoom: 12 }); },
+          pick(cb) { map.getCanvas().style.cursor = "crosshair"; const h = (e) => { map.getCanvas().style.cursor = ""; cb({ lat: e.lngLat.lat, lng: e.lngLat.lng }); }; map.once("click", h); return () => { map.off("click", h); map.getCanvas().style.cursor = ""; }; },
+          destroy() { map.remove(); },
+        };
+        setMapReady(true);
       });
     })();
-    return () => { dead = true; if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
+    return () => { dead = true; if (engRef.current) { engRef.current.destroy(); engRef.current = null; } };
   }, []);
+  const [zoomTick, setZoomTick] = useState(0);
   const pinned = useMemo(() => view.filter((w) => w.geo && w.geo.lat), [view]);
-  useEffect(() => {
-    const map = mapRef.current; if (!map || !mapReady) return;
-    map.getSource("wp").setData({ type: "FeatureCollection", features: pinned.map((w) => ({ type: "Feature", geometry: { type: "Point", coordinates: [w.geo.lng, w.geo.lat] }, properties: { no: w.no, label: w.name, kind: w.kind, color: KIND_COLOR[w.kind] || "#888", qty: Math.max(0, sumOf(w.now, item)), sel: w.no === sel } })) });
-  }, [mapReady, pinned, item, sel]);
+  const pts = useMemo(() => pinned.map((w) => ({ no: w.no, lat: w.geo.lat, lng: w.geo.lng, label: w.name, kind: w.kind, color: KIND_COLOR[w.kind] || "#888", qty: Math.max(0, sumOf(w.now, item)), sel: w.no === sel })), [pinned, item, sel]);
+  useEffect(() => { if (mapReady && engRef.current) engRef.current.setPoints(pts); }, [mapReady, pts, zoomTick]);
   // 선택하면 그 곳으로
   useEffect(() => {
-    const map = mapRef.current; if (!map || !selW || !selW.geo) return;
-    map.flyTo({ center: [selW.geo.lng, selW.geo.lat], zoom: Math.max(map.getZoom(), 11), speed: 1.4 });
+    if (!engRef.current || !selW || !selW.geo || !selW.geo.lat) return;
+    engRef.current.focus(selW.geo.lat, selW.geo.lng);
   }, [sel]); // eslint-disable-line
   // 위치 직접 옮기기: 지도를 누른 곳으로 저장
   useEffect(() => {
-    const map = mapRef.current; if (!map || !moving || !selW) return;
-    map.getCanvas().style.cursor = "crosshair";
-    const h = async (e) => {
-      const { error } = await supabase.from("wp_geo").upsert({ wp_no: selW.no, addr: selW.addr, lat: e.lngLat.lat, lng: e.lngLat.lng, src: "수동", updated_at: new Date().toISOString() });
-      setMoving(false); map.getCanvas().style.cursor = "";
+    if (!engRef.current || !moving || !selW) return;
+    return engRef.current.pick(async (ll) => {
+      const { error } = await supabase.from("wp_geo").upsert({ wp_no: selW.no, addr: selW.addr, lat: ll.lat, lng: ll.lng, src: "수동", updated_at: new Date().toISOString() });
+      setMoving(false);
       if (error) alert(error.message); else reload();
-    };
-    map.once("click", h);
-    return () => { map.off("click", h); };
+    });
   }, [moving]); // eslint-disable-line
   const runGeocode = async (redo = false) => {
     // redo: 카카오가 아닌 방법(OSM·못찾음)으로 찍힌 곳을 다시 찾기. 직접 찍은 곳(수동)은 건드리지 않는다
@@ -1929,10 +1966,7 @@ function PalletMap({ caps = {} }) {
     }
     setGeoRun(null); alert(`위치 찾기 끝: ${ok}곳 찾음 · ${miss}곳 못 찾음 (못 찾은 곳은 목록에서 골라 [위치 직접 찍기])`); reload();
   };
-  const fit = () => {
-    const map = mapRef.current, ml = mlRef.current; if (!map || !ml || !pinned.length) return;
-    const b = new ml.LngLatBounds(); pinned.forEach((w) => b.extend([w.geo.lng, w.geo.lat])); map.fitBounds(b, { padding: 50, maxZoom: 12 });
-  };
+  const fit = () => { if (engRef.current && pts.length) engRef.current.fit(pts); };
   const chip = (on, label, onClick, color) => <button onClick={onClick} style={{ fontSize: 12.5, padding: "5px 12px", borderRadius: 20, border: `1px solid ${on ? color || C.teal : C.border}`, background: on ? (color ? color + "18" : C.tealBg) : "#fff", color: on ? color || C.tealDk : C.sub, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>{color && <i style={{ width: 8, height: 8, borderRadius: 8, background: color, display: "inline-block" }} />}{label}</button>;
   const diff = (v) => <span style={{ color: v > 0 ? C.blue : v < 0 ? C.red : C.hint }}>{v > 0 ? "+" : ""}{v.toLocaleString()}</span>;
   const Stat = ({ label, value, sub, tone }) => (
