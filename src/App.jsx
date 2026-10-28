@@ -1744,7 +1744,7 @@ function AjSupplyStatus({ mode = "supply" }) {
 
 // ───────── 파렛트 현황 지도: 작업장(센터·시공팀·업체)을 주소 기준으로 지도에 찍고, 제품별 보유·금일 입출고·전일 대비를 보여준다
 // 재고 = EDI 마지막 재고일 재고 + 그 뒤 EDI 이동(오늘까지). 전일 = 어제까지 반영한 재고
-const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron"; // 밝고 단순한 지도(키·도메인 등록 불필요)
+const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/bright"; // 색 있는 기본 지도(키·도메인 등록 불필요)
 const KAKAO_JS_KEY = "d712ecc83595cf3e71c966965c007f0c";
 const KIND_COLOR = { 센터: "#1D9E75", 시공팀: "#3B6FD8", 업체: "#D98A1E" };
 let kakaoGeo = null;
