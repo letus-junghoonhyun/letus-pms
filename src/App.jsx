@@ -1560,10 +1560,10 @@ function useAjSupply(days = 45) {
       const due = c.want_date && c.want_date < today;
       let st;
       if (c.cntr_type === "보류") st = "보류";
-      else if (!ds.length) st = due ? "미입고" : "입고 전";
-      else if (got >= req) st = "입고 완료";
-      else st = c.cntr_type === "완료" ? "AJ 완료 · 덜 옴" : "부분 입고";
-      return { ...c, deliv: ds, edi, confirmed, unconf, got, left: Math.max(0, req - got), st, late: (st === "AJ 완료 · 덜 옴" || st === "미입고" || st === "부분 입고") && due };
+      else if (!ds.length) st = due ? "안 들어옴" : "들어올 예정";
+      else if (got >= req) st = "다 들어옴";
+      else st = c.cntr_type === "완료" ? "덜 들어옴" : "나눠 들어오는 중"; // 덜 들어옴 = AJ는 완료 처리했는데 요청보다 적게 옴
+      return { ...c, deliv: ds, edi, confirmed, unconf, got, left: Math.max(0, req - got), st, late: (st === "덜 들어옴" || st === "안 들어옴" || st === "나눠 들어오는 중") && due };
     });
     const orphan = Object.values(deliv).flat().filter((d) => !d.matched); // 요청과 안 맞는 렌탈입고(다른 계정 요청·영업 조정 등)
     // 회수: PMS 회수요청 ↔ 반납출고(S코드). 같은 작업장·제품, 요청일 이후 처음 나온 반납출고들을 요청 수량까지
@@ -1582,86 +1582,132 @@ function useAjSupply(days = 45) {
   }, [raw, idx]);
   return { rows: data ? data.rows : null, data, err, reload: () => setTick((t) => t + 1) };
 }
-function AjSupplyStatus({ mode = "supply" }) {
-  const { data, err, reload } = useAjSupply(45);
-  const [f, setF] = useState("open"); const [q, setQ] = useState(""); const tab = mode; const [open, setOpen] = useState({});
-  const rows = data ? data.rows : null;
-  const OPEN = (r) => ["AJ 완료 · 덜 옴", "미입고", "부분 입고", "입고 전"].includes(r.st);
-  const fl = { open: OPEN, short: (r) => r.st === "AJ 완료 · 덜 옴", wait: (r) => r.st === "입고 전", done: (r) => r.st === "입고 완료", hold: (r) => r.st === "보류", all: () => true };
-  const view = (rows || []).filter((r) => fl[f](r) && (!q || (r.post_name + " " + r.call_code + " " + r.item).includes(q)));
-  const n = (fn) => (rows || []).filter(fn).length;
-  const STC = { "입고 완료": [C.green, C.greenBg], "부분 입고": [C.amber, C.amberBg], "AJ 완료 · 덜 옴": [C.red, C.redBg], 미입고: [C.red, C.redBg], "입고 전": [C.blue, C.blueBg], 보류: [C.sub, "#f1f2f4"] };
-  const decide = async (r, decision) => {
-    const note = decision === "종결" ? window.prompt(`${r.post_name} ${r.item} 남은 ${r.left}장을 이대로 종결할까요? 메모(선택)`, "AJ 재고 부족") : "남은 수량 재요청";
-    if (note === null) return;
-    const { error } = await supabase.from("aj_call_decision").upsert({ account: r.account, call_code: r.call_code, item: r.item, decision, note, decided_at: new Date().toISOString() });
-    if (error) { alert(error.message + " (letus_edi17.sql 실행 필요)"); return; }
-    if (decision === "재요청" && onReorder) onReorder(r);
-    reload();
-  };
-  const chip = (k, l) => <button key={k} onClick={() => setF(k)} style={{ fontSize: 12, padding: "4px 11px", borderRadius: 20, border: `1px solid ${f === k ? C.teal : C.border}`, background: f === k ? C.tealBg : "#fff", color: f === k ? C.tealDk : C.sub, cursor: "pointer" }}>{l}</button>;
+// AJ 공급·회수 현황: 작업장별 카드. 공급 = 요청한 만큼 실제로 들어왔나 / 회수 = 돌려보낸다고 한 만큼 실제로 나갔나
+const AJ_ST = {
+  "다 들어옴": [C.green, C.greenBg, "요청한 만큼 들어왔어요"],
+  "나눠 들어오는 중": [C.amber, C.amberBg, "AJ가 아직 처리 중 · 나머지가 더 올 수 있어요"],
+  "덜 들어옴": [C.red, C.redBg, "AJ는 완료 처리했는데 요청보다 적게 왔어요 · 더 필요하면 새로 요청"],
+  "안 들어옴": [C.red, C.redBg, "희망일이 지났는데 EDI에 렌탈입고가 없어요"],
+  "들어올 예정": [C.blue, C.blueBg, "희망일 전이에요"],
+  보류: [C.sub, "#f1f2f4", "EDI에서 보류된 요청"],
+};
+function AjBar({ req, got, unconf = 0 }) {
+  const w = (v) => Math.min(100, req ? (v / req) * 100 : 0) + "%";
   return (
-    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-        <b style={{ fontSize: 14 }}>{tab === "supply" ? "AJ 공급 현황" : "AJ 회수 현황"}</b>
-        <span style={{ fontSize: 12, color: C.hint }}>{tab === "supply" ? "납품요청 ↔ 렌탈입고(같은 작업장·제품·희망일). 실입고는 받는 쪽 확인 기준" : "PMS 회수요청 ↔ 반납출고(같은 작업장·제품, 요청일 이후)"}</span>
-      </div>
-      {err && <div style={{ background: C.redBg, color: C.red, padding: 10, borderRadius: 8, fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-      {!data ? <Splash text="불러오는 중…" /> : tab === "recall" ? (
-        <>
-          {!data.recall.length ? <div style={{ fontSize: 13, color: C.sub, padding: 8 }}>최근 45일 PMS 회수요청이 없어요. (회수는 EDI에 요청 메뉴가 없어 PMS에 전화·배차 내용을 적어 두면 반납출고와 맞춰 봐요)</div> : (
-            <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 640 }}>
-              <thead><tr><Th>요청일</Th><Th>보내는 곳</Th><Th>제품</Th><Th r>요청</Th><Th r>실제 회수</Th><Th r>남음</Th><Th>반납출고</Th><Th>메모</Th></tr></thead>
-              <tbody>{data.recall.map((r) => (
-                <tr key={r.id} style={{ borderTop: `1px solid ${C.border}` }}>
-                  <Td>{localD(r.requested_at).slice(5)}</Td><Td>{r.wpName}</Td><Td b>{r.pallet_code}</Td><Td r>{r.qty}</Td>
-                  <Td r c={r.got ? C.green : C.hint}>{r.got}</Td><Td r b c={r.qty - r.got > 0 ? C.amber : C.green}>{r.qty - r.got > 0 ? r.qty - r.got : "✓"}</Td>
-                  <Td><span style={{ fontSize: 11.5, color: C.hint }}>{r.used.join(", ") || "아직 없음"}</span></Td><Td><span style={{ fontSize: 12, color: C.sub }}>{r.note || ""}</span></Td>
-                </tr>
-              ))}</tbody>
-            </table></div>
-          )}
-          {data.backOrphan.length > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 10 }}>요청 없이 나간 반납출고 {data.backOrphan.length}건: {data.backOrphan.slice(0, 6).map((m) => `${m.move_date.slice(5)} ${ediClean(m.from_name)} ${m.item} ${m.left}`).join(" · ")}</div>}
-        </>
-      ) : (
-        <>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
-            {chip("open", `진행·부족 ${n(OPEN)}`)}{chip("short", `AJ 완료인데 덜 옴 ${n(fl.short)}`)}{chip("wait", `입고 전 ${n(fl.wait)}`)}{chip("done", `다 들어옴 ${n(fl.done)}`)}{chip("hold", `보류 ${n(fl.hold)}`)}{chip("all", "전체")}
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·요청코드" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140 }} />
-          </div>
-          {!view.length ? <div style={{ fontSize: 13, color: C.sub, padding: 10 }}>해당하는 요청이 없어요.</div> : (
-            <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 820 }}>
-              <thead><tr><Th>희망일</Th><Th>작업장</Th><Th>제품</Th><Th r>요청</Th><Th r>EDI 입고</Th><Th r>받는 쪽 확인</Th><Th r>덜 옴</Th><Th>상태</Th><Th>요청코드</Th></tr></thead>
-              <tbody>{view.slice(0, 300).map((r) => {
-                const k = r.account + r.call_code + r.item, sc = STC[r.st] || STC["입고 전"];
-                return (
-                  <Fragment key={k}>
-                    <tr style={{ borderTop: `1px solid ${C.border}`, background: r.late ? "#fff7f6" : "transparent" }}>
-                      <Td>{String(r.want_date || "").slice(5)}{r.want_time && r.want_time !== "-" ? " " + r.want_time : ""}</Td><Td>{r.post_name}</Td><Td b>{r.item}</Td>
-                      <Td r>{(r.call_volm || 0).toLocaleString()}</Td>
-                      <Td r>{r.deliv.length ? <button onClick={() => setOpen((o) => ({ ...o, [k]: !o[k] }))} style={{ border: "none", background: "none", color: C.tealDk, cursor: "pointer", fontSize: 13.5, padding: 0 }}>{r.edi.toLocaleString()} ▾</button> : <span style={{ color: C.hint }}>0</span>}</Td>
-                      <Td r>{r.deliv.length ? <span style={{ color: r.unconf ? C.amber : C.green }}>{r.confirmed.toLocaleString()}{r.unconf ? <span style={{ fontSize: 11, color: C.amber }}> (+{r.unconf} 확인 전)</span> : ""}</span> : "—"}</Td>
-                      <Td r b c={r.left ? C.amber : C.green}>{r.left ? r.left.toLocaleString() : "✓"}</Td>
-                      <Td><span style={{ fontSize: 11.5, color: sc[0], background: sc[1], padding: "1px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>{r.st}</span>{r.st === "AJ 완료 · 덜 옴" && <div style={{ fontSize: 11, color: C.hint }}>필요하면 새로 요청하세요</div>}</Td>
-                      <Td><span style={{ fontSize: 11.5, color: C.hint }}>{r.call_code}<br />EDI {r.cntr_type}{r.inst_empn ? " · " + r.inst_empn : ""}</span></Td>
-                    </tr>
-                    {open[k] && r.deliv.map((d) => (
-                      <tr key={d.move_code} style={{ background: "#fafbfc" }}>
-                        <td></td><td colSpan={3} style={{ padding: "5px 7px", fontSize: 12, color: C.sub }}>↳ {d.move_code} · {d.from_name} → {d.to_name}</td>
-                        <td style={{ padding: "5px 7px", fontSize: 12, textAlign: "right" }}>{d.qty}</td>
-                        <td style={{ padding: "5px 7px", fontSize: 12, textAlign: "right", color: d.rstatus === "다름" ? C.amber : d.rstatus ? C.green : C.hint }}>{d.rstatus === "다름" ? `상이 · 실제 ${d.actual}` : d.rstatus === "확인" ? "정상" : d.rstatus === "자동확인" ? "자동확인" : "확인 전"}</td>
-                        <td colSpan={3}></td>
-                      </tr>
-                    ))}
-                  </Fragment>
-                );
-              })}</tbody>
-            </table></div>
-          )}
-          {data.orphan.length > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 10, lineHeight: 1.6 }}>요청과 맞지 않는 렌탈입고 {data.orphan.length}줄 (다른 계정에서 요청했거나 희망일과 다른 날 들어온 것): {data.orphan.slice(0, 6).map((d) => `${d.move_date.slice(5)} ${ediClean(d.to_name)} ${d.item} ${d.qty}`).join(" · ")}{data.orphan.length > 6 ? " …" : ""}</div>}
-        </>
-      )}
+    <div style={{ height: 8, background: "#eef0f3", borderRadius: 6, overflow: "hidden", display: "flex" }}>
+      <div style={{ width: w(got - unconf), background: C.green }} /><div style={{ width: w(unconf), background: "#9fd8c4" }} />
     </div>
+  );
+}
+function AjSupplyStatus({ mode = "supply" }) {
+  const { data, err } = useAjSupply(45);
+  const [f, setF] = useState("open"); const [q, setQ] = useState(""); const [open, setOpen] = useState({});
+  const rows = data ? data.rows : null;
+  const fl = {
+    open: (r) => r.st !== "다 들어옴" && r.st !== "보류",
+    short: (r) => r.st === "덜 들어옴" || r.st === "안 들어옴",
+    coming: (r) => r.st === "나눠 들어오는 중" || r.st === "들어올 예정",
+    done: (r) => r.st === "다 들어옴",
+    all: () => true,
+  };
+  const n = (fn) => (rows || []).filter(fn).length;
+  const chip = (k, l, tone) => <button key={k} onClick={() => setF(k)} style={{ fontSize: 12.5, padding: "5px 12px", borderRadius: 20, border: `1px solid ${f === k ? C.teal : C.border}`, background: f === k ? C.tealBg : "#fff", color: f === k ? C.tealDk : tone || C.sub, cursor: "pointer" }}>{l}</button>;
+  const box = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14 };
+  const groupBy = (list, keyOf) => { const g = {}; list.forEach((r) => { (g[keyOf(r)] = g[keyOf(r)] || []).push(r); }); return Object.entries(g); };
+  if (err) return <div style={{ background: C.redBg, color: C.red, padding: 10, borderRadius: 8, fontSize: 12.5 }}>{err}</div>;
+  if (!data) return <Splash text="불러오는 중…" />;
+
+  if (mode === "recall") {
+    const rq = data.recall.filter((r) => !q || (r.wpName + " " + r.pallet_code).includes(q));
+    // 요청 없이 나간 반납출고도 작업장별로: 우리가 요청하지 않았는데 AJ가 가져간 것(전화 요청 등)
+    const backs = groupBy(data.backOrphan.filter((m) => !q || (m.from_name + m.item).includes(q)), (m) => ediClean(m.from_name));
+    const waitN = data.recall.filter((r) => r.qty - r.got > 0).length;
+    return (
+      <>
+        <div style={{ ...box, background: "#f7faf9", marginBottom: 12, fontSize: 13, lineHeight: 1.7, color: C.sub }}>
+          <b style={{ color: C.text }}>왜 보나요?</b> 우리가 AJ에 "가져가 달라"고 한 파렛트가 <b>실제로 AJ로 나갔는지</b> 확인해요.
+          안 나가면 우리 재고로 남아 <b>임차료가 계속 나가요</b>. EDI에는 회수 요청 메뉴가 없어서, PMS에 적은 회수 요청과 EDI <b>반납출고</b>(AJ가 가져간 기록)를 같은 작업장·제품으로 맞춰 봐요.
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+          <span style={{ fontSize: 13 }}>회수 요청 <b>{data.recall.length}</b>건 · 아직 덜 나감 <b style={{ color: waitN ? C.amber : C.green }}>{waitN}</b>건 · 요청 없이 나간 반납출고 <b>{data.backOrphan.length}</b>건</span>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·제품" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140, marginLeft: "auto" }} />
+        </div>
+        {!rq.length && <div style={{ ...box, fontSize: 13, color: C.sub, marginBottom: 12 }}>최근 45일 PMS 회수 요청이 없어요. AJ에 회수를 전화·배차로 요청했다면 <b>[요청하기]</b>에서 회수로 적어 두세요. 그래야 실제로 가져갔는지 맞춰 볼 수 있어요.</div>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10, marginBottom: 16 }}>
+          {rq.map((r) => {
+            const left = r.qty - r.got; const st = !r.got ? ["아직 안 나감", C.red, C.redBg] : left > 0 ? ["일부만 나감", C.amber, C.amberBg] : ["다 나감", C.green, C.greenBg];
+            return (
+              <div key={r.id} style={box}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}><b style={{ fontSize: 14 }}>{r.wpName}</b><span style={{ fontSize: 11.5, color: st[1], background: st[2], padding: "2px 9px", borderRadius: 10 }}>{st[0]}</span></div>
+                <div style={{ fontSize: 12, color: C.hint, margin: "2px 0 8px" }}>{localD(r.requested_at).slice(5)} 회수 요청 · {r.pallet_code}</div>
+                <div style={{ fontSize: 13, marginBottom: 6 }}>가져가 달라고 한 것 <b>{r.qty}</b> → 실제 나감 <b style={{ color: r.got ? C.green : C.hint }}>{r.got}</b>{left > 0 && <span style={{ color: C.amber }}> · {left}장 남음</span>}</div>
+                <AjBar req={r.qty} got={r.got} />
+                <div style={{ fontSize: 11.5, color: C.hint, marginTop: 6 }}>{r.used.length ? "EDI 반납출고 " + r.used.join(", ") : "EDI 반납출고 아직 없음"}{r.note ? " · " + r.note : ""}</div>
+              </div>
+            );
+          })}
+        </div>
+        {backs.length > 0 && <>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>요청 없이 나간 반납출고</div>
+          <div style={{ fontSize: 12, color: C.hint, marginBottom: 8 }}>PMS에 회수 요청이 없는데 AJ가 가져간 것 · 전화로 요청한 건이면 정상, 모르는 건이면 확인 필요</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
+            {backs.map(([wp, ms]) => (
+              <div key={wp} style={box}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}><b style={{ fontSize: 14 }}>{wp}</b><span style={{ fontSize: 13 }}>{ms.reduce((a, m) => a + m.left, 0).toLocaleString()}장</span></div>
+                {ms.slice(0, 6).map((m) => <div key={m.move_code + m.item} style={{ fontSize: 12, color: C.sub, marginTop: 4 }}>{m.move_date.slice(5)} · {m.item} {m.left}장 → {ediClean(m.to_name)} <span style={{ color: C.hint }}>{m.move_code}</span></div>)}
+                {ms.length > 6 && <div style={{ fontSize: 11.5, color: C.hint, marginTop: 4 }}>외 {ms.length - 6}건</div>}
+              </div>
+            ))}
+          </div>
+        </>}
+      </>
+    );
+  }
+
+  const view = rows.filter((r) => fl[f](r) && (!q || (r.post_name + " " + r.call_code + " " + r.item).includes(q)));
+  const groups = groupBy(view, (r) => r.post_name).sort((x, y) => y[1].filter((r) => r.late).length - x[1].filter((r) => r.late).length);
+  return (
+    <>
+      <div style={{ ...box, background: "#f7faf9", marginBottom: 12, fontSize: 13, lineHeight: 1.7, color: C.sub }}>
+        EDI <b>납품요청</b>(우리가 요청한 것)과 <b>렌탈입고</b>(AJ가 실제로 넣은 것)를 같은 작업장·제품·희망일로 맞춰 봐요. 들어온 수량은 <b>받는 쪽 입고 확인</b> 기준이에요(상이면 실제 받은 수량).
+        <div style={{ display: "flex", gap: 14, marginTop: 6, fontSize: 12 }}><span><i style={{ display: "inline-block", width: 10, height: 10, background: C.green, borderRadius: 2 }} /> 확인됨</span><span><i style={{ display: "inline-block", width: 10, height: 10, background: "#9fd8c4", borderRadius: 2 }} /> EDI엔 있는데 아직 확인 전</span></div>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+        {chip("open", `확인할 것 ${n(fl.open)}`)}{chip("short", `덜·안 들어옴 ${n(fl.short)}`, C.red)}{chip("coming", `들어오는 중·예정 ${n(fl.coming)}`)}{chip("done", `다 들어옴 ${n(fl.done)}`)}{chip("all", "전체")}
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·요청코드" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140, marginLeft: "auto" }} />
+      </div>
+      {!groups.length && <div style={{ ...box, fontSize: 13, color: C.sub }}>해당하는 요청이 없어요.</div>}
+      {groups.map(([wp, list]) => (
+        <div key={wp} style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}><b style={{ fontSize: 15 }}>{wp}</b><span style={{ fontSize: 12, color: C.hint }}>요청 {list.length}건{list.some((r) => r.late) ? ` · 부족 ${list.filter((r) => r.late).length}건` : ""}</span></div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
+            {list.slice(0, 60).map((r) => {
+              const k = r.account + r.call_code + r.item, sc = AJ_ST[r.st] || AJ_ST["들어올 예정"], req = r.call_volm || 0;
+              return (
+                <div key={k} style={{ ...box, borderColor: r.late ? "#f3c4bd" : C.border }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 14 }}><b>{r.item}</b> <span style={{ color: C.hint, fontSize: 12 }}>희망 {String(r.want_date || "").slice(5)}{r.want_time && r.want_time !== "-" ? " " + r.want_time : ""}</span></span>
+                    <span style={{ fontSize: 11.5, color: sc[0], background: sc[1], padding: "2px 9px", borderRadius: 10, whiteSpace: "nowrap" }}>{r.st}</span>
+                  </div>
+                  <div style={{ fontSize: 13, margin: "8px 0 6px" }}>요청 <b>{req.toLocaleString()}</b> → 들어옴 <b style={{ color: r.got ? C.green : C.hint }}>{r.got.toLocaleString()}</b>{r.left > 0 && <span style={{ color: r.late ? C.red : C.amber }}> · {r.left.toLocaleString()}장 {r.st === "들어올 예정" || r.st === "나눠 들어오는 중" ? "남음" : "부족"}</span>}</div>
+                  <AjBar req={req} got={r.got} unconf={r.unconf} />
+                  <div style={{ fontSize: 11.5, color: C.hint, marginTop: 6 }}>{sc[2]}</div>
+                  {r.deliv.length > 0 && <button onClick={() => setOpen((o) => ({ ...o, [k]: !o[k] }))} style={{ border: "none", background: "none", color: C.tealDk, cursor: "pointer", fontSize: 12, padding: "6px 0 0" }}>렌탈입고 {r.deliv.length}건 {open[k] ? "▴" : "▾"}</button>}
+                  {open[k] && r.deliv.map((d) => (
+                    <div key={d.move_code} style={{ fontSize: 12, color: C.sub, marginTop: 4, display: "flex", justifyContent: "space-between", gap: 6 }}>
+                      <span>{d.move_code} · {ediClean(d.from_name)} {d.qty}장</span>
+                      <span style={{ color: d.rstatus === "다름" ? C.amber : d.rstatus ? C.green : C.hint }}>{d.rstatus === "다름" ? `상이 · 실제 ${d.actual}` : d.rstatus === "확인" ? "정상" : d.rstatus === "자동확인" ? "자동확인" : "확인 전"}</span>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 11, color: C.hint, marginTop: 6 }}>{r.call_code} · EDI {r.cntr_type}{r.inst_empn ? " · " + r.inst_empn : ""}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      {data.orphan.length > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 4, lineHeight: 1.6 }}>요청과 맞지 않는 렌탈입고 {data.orphan.length}줄 (다른 계정에서 요청했거나 희망일과 다른 날 들어온 것): {data.orphan.slice(0, 6).map((d) => `${d.move_date.slice(5)} ${ediClean(d.to_name)} ${d.item} ${d.qty}`).join(" · ")}{data.orphan.length > 6 ? " …" : ""}</div>}
+    </>
   );
 }
 
