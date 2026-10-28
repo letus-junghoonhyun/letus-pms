@@ -1600,9 +1600,42 @@ function AjBar({ req, got, unconf = 0 }) {
   );
 }
 function AjSupplyStatus({ mode = "supply" }) {
-  const { data, err } = useAjSupply(45);
+  const { data, err } = useAjSupply(90);
+  const inp = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 };
   const [f, setF] = useState("open"); const [q, setQ] = useState(""); const [open, setOpen] = useState({});
-  const rows = data ? data.rows : null;
+  const [from, setFrom] = useState(localD(new Date(Date.now() - 29 * 86400000).toISOString())); const [to, setTo] = useState(localD(new Date(Date.now() + 7 * 86400000).toISOString()));
+  const [wpF, setWpF] = useState(""); const [itemF, setItemF] = useState("");
+  // 기간(공급=희망일, 회수=요청일)·작업장·제품으로 먼저 거르고, 상태 칩 숫자는 그 안에서 센다
+  const inRange = (d) => !!d && d >= from && d <= to;
+  const rows = data ? data.rows.filter((r) => inRange(r.want_date) && (!wpF || r.post_name === wpF) && (!itemF || r.item === itemF)) : null;
+  const wpOpts = useMemo(() => {
+    if (!data) return { names: [], counts: {} };
+    const c = {};
+    if (mode === "recall") { data.recall.forEach((r) => { c[r.wpName] = (c[r.wpName] || 0) + 1; }); data.backOrphan.forEach((m) => { const k = ediClean(m.from_name); c[k] = (c[k] || 0) + 1; }); }
+    else data.rows.filter((r) => inRange(r.want_date)).forEach((r) => { c[r.post_name] = (c[r.post_name] || 0) + 1; });
+    return { names: Object.keys(c).sort((a, b) => c[b] - c[a]), counts: c };
+  }, [data, mode, from, to]);
+  const items = useMemo(() => !data ? [] : [...new Set(mode === "recall" ? [...data.recall.map((r) => r.pallet_code), ...data.backOrphan.map((m) => m.item)] : data.rows.map((r) => r.item))].filter(Boolean).sort(), [data, mode]);
+  const filterBox = () => (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 12, display: "grid", gap: 10 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 12.5, color: C.sub, width: 44 }}>{mode === "recall" ? "요청일" : "희망일"}</span>
+        <DateRange from={from} to={to} onApply={(a, b) => { setFrom(a); setTo(b); }}>
+          {[["오늘", 0, 0], ["7일", 6, 0], ["30일", 29, 7], ["90일", 89, 7]].map(([l, d, ahead]) => <button key={l} onClick={() => { setFrom(localD(new Date(Date.now() - d * 86400000).toISOString())); setTo(localD(new Date(Date.now() + ahead * 86400000).toISOString())); }} style={{ ...btnGhost, padding: "5px 9px" }}>{l}</button>)}
+        </DateRange>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 12.5, color: C.sub, width: 44 }}>작업장</span>
+        <NamePicker options={wpOpts.names} counts={wpOpts.counts} value={wpF} onChange={setWpF} placeholder={`작업장 전체 (${wpOpts.names.length}곳)`} />
+        <span style={{ fontSize: 12.5, color: C.sub }}>제품</span>
+        {["", ...items].map((it) => <button key={it || "all"} onClick={() => setItemF(it)} style={{ fontSize: 12, padding: "4px 10px", borderRadius: 20, border: `1px solid ${itemF === it ? C.teal : C.border}`, background: itemF === it ? C.tealBg : "#fff", color: itemF === it ? C.tealDk : C.sub, cursor: "pointer" }}>{it || "전체"}</button>)}
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={mode === "recall" ? "메모·전표" : "요청코드·담당"} style={{ ...inp, width: 130 }} />
+      </div>
+      {mode !== "recall" && <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {chip("open", `확인할 것 ${n(fl.open)}`)}{chip("short", `덜·안 들어옴 ${n(fl.short)}`, C.red)}{chip("coming", `들어오는 중·예정 ${n(fl.coming)}`)}{chip("done", `다 들어옴 ${n(fl.done)}`)}{chip("all", `전체 ${n(fl.all)}`)}
+      </div>}
+    </div>
+  );
   const fl = {
     open: (r) => r.st !== "다 들어옴" && r.st !== "보류",
     short: (r) => r.st === "덜 들어옴" || r.st === "안 들어옴",
@@ -1618,20 +1651,18 @@ function AjSupplyStatus({ mode = "supply" }) {
   if (!data) return <Splash text="불러오는 중…" />;
 
   if (mode === "recall") {
-    const rq = data.recall.filter((r) => !q || (r.wpName + " " + r.pallet_code).includes(q));
+    const rq = data.recall.filter((r) => inRange(localD(r.requested_at)) && (!wpF || r.wpName === wpF) && (!itemF || r.pallet_code === itemF) && (!q || (r.note || "").includes(q) || r.used.join(" ").includes(q)));
     // 요청 없이 나간 반납출고도 작업장별로: 우리가 요청하지 않았는데 AJ가 가져간 것(전화 요청 등)
-    const backs = groupBy(data.backOrphan.filter((m) => !q || (m.from_name + m.item).includes(q)), (m) => ediClean(m.from_name));
-    const waitN = data.recall.filter((r) => r.qty - r.got > 0).length;
+    const backs = groupBy(data.backOrphan.filter((m) => inRange(m.move_date) && (!wpF || ediClean(m.from_name) === wpF) && (!itemF || m.item === itemF) && (!q || m.move_code.includes(q))), (m) => ediClean(m.from_name));
+    const waitN = rq.filter((r) => r.qty - r.got > 0).length;
     return (
       <>
         <div style={{ ...box, background: "#f7faf9", marginBottom: 12, fontSize: 13, lineHeight: 1.7, color: C.sub }}>
           <b style={{ color: C.text }}>왜 보나요?</b> 우리가 AJ에 "가져가 달라"고 한 파렛트가 <b>실제로 AJ로 나갔는지</b> 확인해요.
           안 나가면 우리 재고로 남아 <b>임차료가 계속 나가요</b>. EDI에는 회수 요청 메뉴가 없어서, PMS에 적은 회수 요청과 EDI <b>반납출고</b>(AJ가 가져간 기록)를 같은 작업장·제품으로 맞춰 봐요.
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-          <span style={{ fontSize: 13 }}>회수 요청 <b>{data.recall.length}</b>건 · 아직 덜 나감 <b style={{ color: waitN ? C.amber : C.green }}>{waitN}</b>건 · 요청 없이 나간 반납출고 <b>{data.backOrphan.length}</b>건</span>
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·제품" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140, marginLeft: "auto" }} />
-        </div>
+        {filterBox()}
+        <div style={{ fontSize: 13, marginBottom: 12 }}>회수 요청 <b>{rq.length}</b>건 · 아직 덜 나감 <b style={{ color: waitN ? C.amber : C.green }}>{waitN}</b>건 · 요청 없이 나간 반납출고 <b>{backs.reduce((a, [, ms]) => a + ms.length, 0)}</b>건</div>
         {!rq.length && <div style={{ ...box, fontSize: 13, color: C.sub, marginBottom: 12 }}>최근 45일 PMS 회수 요청이 없어요. AJ에 회수를 전화·배차로 요청했다면 <b>[요청하기]</b>에서 회수로 적어 두세요. 그래야 실제로 가져갔는지 맞춰 볼 수 있어요.</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10, marginBottom: 16 }}>
           {rq.map((r) => {
@@ -1664,7 +1695,8 @@ function AjSupplyStatus({ mode = "supply" }) {
     );
   }
 
-  const view = rows.filter((r) => fl[f](r) && (!q || (r.post_name + " " + r.call_code + " " + r.item).includes(q)));
+  const view = rows.filter((r) => fl[f](r) && (!q || (r.call_code + " " + (r.inst_empn || "")).includes(q)));
+  const orphan = data.orphan.filter((d) => inRange(d.move_date) && (!wpF || ediClean(d.to_name) === wpF) && (!itemF || d.item === itemF));
   const groups = groupBy(view, (r) => r.post_name).sort((x, y) => y[1].filter((r) => r.late).length - x[1].filter((r) => r.late).length);
   return (
     <>
@@ -1672,10 +1704,7 @@ function AjSupplyStatus({ mode = "supply" }) {
         EDI <b>납품요청</b>(우리가 요청한 것)과 <b>렌탈입고</b>(AJ가 실제로 넣은 것)를 같은 작업장·제품·희망일로 맞춰 봐요. 들어온 수량은 <b>받는 쪽 입고 확인</b> 기준이에요(상이면 실제 받은 수량).
         <div style={{ display: "flex", gap: 14, marginTop: 6, fontSize: 12 }}><span><i style={{ display: "inline-block", width: 10, height: 10, background: C.green, borderRadius: 2 }} /> 확인됨</span><span><i style={{ display: "inline-block", width: 10, height: 10, background: "#9fd8c4", borderRadius: 2 }} /> EDI엔 있는데 아직 확인 전</span></div>
       </div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
-        {chip("open", `확인할 것 ${n(fl.open)}`)}{chip("short", `덜·안 들어옴 ${n(fl.short)}`, C.red)}{chip("coming", `들어오는 중·예정 ${n(fl.coming)}`)}{chip("done", `다 들어옴 ${n(fl.done)}`)}{chip("all", "전체")}
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장·요청코드" style={{ fontSize: 12.5, padding: "5px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140, marginLeft: "auto" }} />
-      </div>
+      {filterBox()}
       {!groups.length && <div style={{ ...box, fontSize: 13, color: C.sub }}>해당하는 요청이 없어요.</div>}
       {groups.map(([wp, list]) => (
         <div key={wp} style={{ marginBottom: 16 }}>
@@ -1706,7 +1735,7 @@ function AjSupplyStatus({ mode = "supply" }) {
           </div>
         </div>
       ))}
-      {data.orphan.length > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 4, lineHeight: 1.6 }}>요청과 맞지 않는 렌탈입고 {data.orphan.length}줄 (다른 계정에서 요청했거나 희망일과 다른 날 들어온 것): {data.orphan.slice(0, 6).map((d) => `${d.move_date.slice(5)} ${ediClean(d.to_name)} ${d.item} ${d.qty}`).join(" · ")}{data.orphan.length > 6 ? " …" : ""}</div>}
+      {orphan.length > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 4, lineHeight: 1.6 }}>요청과 맞지 않는 렌탈입고 {orphan.length}줄 (다른 계정에서 요청했거나 희망일과 다른 날 들어온 것): {orphan.slice(0, 6).map((d) => `${d.move_date.slice(5)} ${ediClean(d.to_name)} ${d.item} ${d.qty}`).join(" · ")}{orphan.length > 6 ? " …" : ""}</div>}
     </>
   );
 }
