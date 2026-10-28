@@ -115,9 +115,9 @@ const toOf = (s) => isMove(s) ? (s.to_center || "—") : isReturn(s) ? (s.center
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
 const NAV_BY_ROLE = {
-  관리자: ["오늘", "출고", "확인", "재고", "AJ", "EDI", "현황", "마스터", "단가", "사용자", "설정"],
-  운송팀: ["오늘", "출고", "확인", "재고", "AJ", "EDI", "현황", "마스터", "설정"],
-  정산담당: ["오늘", "재고", "EDI", "현황", "마스터", "설정"],
+  관리자: ["오늘", "출고", "확인", "재고", "지도", "AJ", "EDI", "현황", "마스터", "단가", "사용자", "설정"],
+  운송팀: ["오늘", "출고", "확인", "재고", "지도", "AJ", "EDI", "현황", "마스터", "설정"],
+  정산담당: ["오늘", "재고", "지도", "EDI", "현황", "마스터", "설정"],
   협력업체: ["확인", "출고", "설정"],   // 시공팀: 우리 현장으로 온 것 확인, 우리 현장에서 보내는 것 등록
   AJ: ["AJ", "설정"],   // AJ네트웍스 직원: 요청 처리 + 내 설정
 };
@@ -706,7 +706,7 @@ function Shell({ session, initialConfirm }) {
     { key: "현황", label: "PMS 전표 내역" }, { key: "출고", label: "출고 등록" },
     { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
-    { key: "재고", label: "재고 현황" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
+    { key: "재고", label: "재고 현황" }, { key: "지도", label: "파렛트 현황 지도" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
     { key: "마스터", label: "거래처" }, { key: "단가", label: "파렛트·단가" },
     { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
@@ -799,6 +799,7 @@ function Shell({ session, initialConfirm }) {
             {nav === "반납" && caps.returnReg && <ReturnRegister partners={partnersFull} palletTypes={palletTypes} ships={ships} ajReqs={ajReqs} centers={centerList} onRegister={register} onAjReturn={createAjRequest} />}
             {nav === "확인" && <ReceiptScreen {...{ ships, palletTypes, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
+            {nav === "지도" && caps.inventory && <PalletMap caps={caps} />}
             {nav === "재고" && caps.inventory && <InventoryScreen {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, finishAjSupply, skipAjEdi, ships, caps, centers: centerList }} />}
             {nav === "EDI" && caps.inventory && <EdiStock {...{ caps, ships, ajReqs, palletTypes, centers: centerList }} />}
@@ -1736,6 +1737,296 @@ function AjSupplyStatus({ mode = "supply" }) {
         </div>
       ))}
       {orphan.length > 0 && <div style={{ fontSize: 12, color: C.sub, marginTop: 4, lineHeight: 1.6 }}>요청과 맞지 않는 렌탈입고 {orphan.length}줄 (다른 계정에서 요청했거나 희망일과 다른 날 들어온 것): {orphan.slice(0, 6).map((d) => `${d.move_date.slice(5)} ${ediClean(d.to_name)} ${d.item} ${d.qty}`).join(" · ")}{orphan.length > 6 ? " …" : ""}</div>}
+    </>
+  );
+}
+
+// ───────── 파렛트 현황 지도: 작업장(센터·시공팀·업체)을 주소 기준으로 지도에 찍고, 제품별 보유·금일 입출고·전일 대비를 보여준다
+// 재고 = EDI 마지막 재고일 재고 + 그 뒤 EDI 이동(오늘까지). 전일 = 어제까지 반영한 재고
+const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
+const KAKAO_JS_KEY = "d712ecc83595cf3e71c966965c007f0c";
+const KIND_COLOR = { 센터: "#1D9E75", 시공팀: "#3B6FD8", 업체: "#D98A1E" };
+let kakaoGeo = null;
+function loadKakaoGeocoder() {
+  if (kakaoGeo) return kakaoGeo;
+  kakaoGeo = new Promise((res) => {
+    if (window.kakao && window.kakao.maps && window.kakao.maps.services) { res(new window.kakao.maps.services.Geocoder()); return; }
+    const s = document.createElement("script");
+    s.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false&libraries=services`;
+    s.onload = () => { try { window.kakao.maps.load(() => res(new window.kakao.maps.services.Geocoder())); } catch (e) { res(null); } };
+    s.onerror = () => res(null);
+    document.head.appendChild(s);
+    setTimeout(() => res(null), 6000);
+  });
+  return kakaoGeo;
+}
+const SIDO = { 경기: "경기도", 강원: "강원특별자치도", 충북: "충청북도", 충남: "충청남도", 전북: "전북특별자치도", 전남: "전라남도", 경북: "경상북도", 경남: "경상남도", 제주: "제주특별자치도", 서울: "서울특별시", 부산: "부산광역시", 대구: "대구광역시", 인천: "인천광역시", 광주: "광주광역시", 대전: "대전광역시", 울산: "울산광역시", 세종: "세종특별자치시" };
+async function geocodeAddr(addr) {
+  const a = String(addr || "").replace(/\s+/g, " ").trim();
+  if (!a) return null;
+  const g = await loadKakaoGeocoder();
+  if (g) {
+    const r = await new Promise((res) => g.addressSearch(a, (out, st) => res(st === "OK" && out[0] ? { lat: +out[0].y, lng: +out[0].x, src: "카카오" } : null)));
+    if (r) return r;
+  }
+  // 카카오를 못 쓰면 OpenStreetMap(Nominatim): 1초에 1건, 주소를 점점 짧게 해서 찾는다
+  const full = a.replace(/^(\S+)/, (m) => SIDO[m] || m);
+  const road = (full.match(/^(.*?(로|길)\s*\d+(-\d+)?)/) || [])[1];
+  const area = full.split(" ").slice(0, 3).join(" ");
+  for (const q of [...new Set([road, full, area].filter(Boolean))]) {
+    await new Promise((r) => setTimeout(r, 1100));
+    try {
+      const res = await fetch("https://nominatim.openstreetmap.org/search?format=json&countrycodes=kr&limit=1&q=" + encodeURIComponent(q), { headers: { "Accept-Language": "ko" } });
+      const d = await res.json();
+      if (d && d[0]) return { lat: +d[0].lat, lng: +d[0].lon, src: q === area ? "OSM(동네)" : "OSM" };
+    } catch (e) { /* 다음 후보 */ }
+  }
+  return null;
+}
+function usePalletMapData() {
+  const [d, setD] = useState(null); const [err, setErr] = useState(""); const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const page = async (q) => { const all = []; for (let p = 0; p < 30; p++) { const { data, error } = await q().range(p * 1000, p * 1000 + 999); if (error) throw error; all.push(...(data || [])); if (!data || data.length < 1000) break; } return all; };
+        const [wps, maps, dests, accs, geo] = await Promise.all([
+          page(() => supabase.from("aj_workplace").select("no,name,kind,closed").order("no")),
+          page(() => supabase.from("aj_workplace_map").select("account,local_no,wp_no").order("account").order("local_no")),
+          page(() => supabase.from("aj_dest").select("demd_code,demd_numb,addr").order("demd_code").order("demd_numb")),
+          supabase.from("aj_account").select("code").then((r) => r.data || []),
+          supabase.from("wp_geo").select("*").limit(5000).then((r) => (r.error ? { missing: true, rows: [] } : { rows: r.data || [] })),
+        ]);
+        // 계정별 마지막 재고일 → 그날 재고
+        const base = {};
+        for (const a of accs) {
+          const { data } = await supabase.from("aj_stock_daily").select("stoc_date").eq("account", a.code).neq("item", "-").order("stoc_date", { ascending: false }).limit(1);
+          if (data && data[0]) base[a.code] = data[0].stoc_date;
+        }
+        const stock = (await Promise.all(Object.entries(base).map(([acc, dt]) => page(() => supabase.from("aj_stock_daily").select("account,workplace_no,item,this_stoc").eq("account", acc).eq("stoc_date", dt).neq("item", "-").order("workplace_no"))))).flat();
+        const minBase = Object.values(base).sort()[0] || localD(new Date().toISOString());
+        const moves = await page(() => supabase.from("aj_move").select("account,move_code,move_date,item,from_name,to_name,qty,move_type").gt("move_date", minBase).order("move_date").order("move_code"));
+        if (alive) setD({ wps, maps, dests, base, stock, moves, geo: geo.rows, geoMissing: !!geo.missing });
+      } catch (e) { if (alive) setErr("현황을 못 불러왔어요. (" + (e.message || e) + ")"); }
+    })();
+    return () => { alive = false; };
+  }, [tick]);
+  const model = useMemo(() => {
+    if (!d) return null;
+    const today = localD(new Date().toISOString());
+    const destAddr = {}; d.dests.forEach((x) => { if (x.addr) destAddr[x.demd_code + "|" + x.demd_numb] = x.addr; });
+    const addrOf = {}; d.maps.forEach((m) => { const a = destAddr[m.account + "|" + m.local_no]; if (a && !addrOf[m.wp_no]) addrOf[m.wp_no] = a; });
+    const geoOf = {}; d.geo.forEach((g) => { geoOf[g.wp_no] = g; });
+    const W = {}; const byName = {};
+    d.wps.filter((w) => w.kind !== "합계").forEach((w) => {
+      W[w.no] = { no: w.no, name: ediClean(w.name), kind: w.kind || "업체", closed: w.closed, addr: addrOf[w.no] || (geoOf[w.no] && geoOf[w.no].addr) || "", geo: geoOf[w.no] || null, prev: {}, inn: {}, out: {}, now: {}, todayMoves: [] };
+      const k = ediClean(w.name); const cur = byName[k]; if (!cur || (cur.closed && !w.closed)) byName[k] = W[w.no];
+    });
+    const add = (o, item, v) => { o[item] = (o[item] || 0) + v; };
+    d.stock.forEach((s) => { const w = W[s.workplace_no]; if (w) add(w.prev, s.item, s.this_stoc); });
+    d.moves.forEach((m) => {
+      if (!d.base[m.account] || m.move_date <= d.base[m.account] || m.move_date > today || !m.qty) return;
+      const f = byName[ediClean(m.from_name)], t = byName[ediClean(m.to_name)];
+      if (m.move_date < today) { if (f) add(f.prev, m.item, -m.qty); if (t) add(t.prev, m.item, m.qty); return; }
+      if (f) { add(f.out, m.item, m.qty); f.todayMoves.push({ ...m, dir: "출고" }); }
+      if (t) { add(t.inn, m.item, m.qty); t.todayMoves.push({ ...m, dir: "입고" }); }
+    });
+    const items = new Set();
+    Object.values(W).forEach((w) => {
+      [w.prev, w.inn, w.out].forEach((o) => Object.keys(o).forEach((k) => items.add(k)));
+    });
+    Object.values(W).forEach((w) => { items.forEach((k) => { w.now[k] = (w.prev[k] || 0) + (w.inn[k] || 0) - (w.out[k] || 0); }); });
+    const list = Object.values(W).filter((w) => !w.closed || Object.values(w.now).some((v) => v) || w.todayMoves.length);
+    return { list, items: [...items].sort(), baseDate: Object.values(d.base).sort().pop(), today, geoMissing: d.geoMissing };
+  }, [d]);
+  return { model, err, reload: () => setTick((t) => t + 1) };
+}
+const sumOf = (o, item) => (item ? o[item] || 0 : Object.values(o).reduce((a, v) => a + v, 0));
+function PalletMap({ caps = {} }) {
+  const { model, err, reload } = usePalletMapData();
+  const [kinds, setKinds] = useState({ 센터: true, 시공팀: true, 업체: true });
+  const [item, setItem] = useState(""); const [onlyStock, setOnlyStock] = useState(true); const [pick, setPick] = useState(""); const [sel, setSel] = useState(null);
+  const [geoRun, setGeoRun] = useState(null); const [moving, setMoving] = useState(false); const [mapReady, setMapReady] = useState(false);
+  const mapEl = useRef(null); const mapRef = useRef(null); const mlRef = useRef(null); const popRef = useRef(null);
+  const view = useMemo(() => {
+    if (!model) return [];
+    return model.list.filter((w) => kinds[w.kind] !== false && (!onlyStock || sumOf(w.now, item) || sumOf(w.inn, item) || sumOf(w.out, item)) && (!item || w.now[item] !== undefined || w.inn[item] || w.out[item]))
+      .sort((a, b) => sumOf(b.now, item) - sumOf(a.now, item));
+  }, [model, kinds, item, onlyStock]);
+  const tot = useMemo(() => {
+    const t = { prev: 0, inn: 0, out: 0, now: 0 };
+    view.forEach((w) => { t.prev += sumOf(w.prev, item); t.inn += sumOf(w.inn, item); t.out += sumOf(w.out, item); t.now += sumOf(w.now, item); });
+    return t;
+  }, [view, item]);
+  const selW = sel && model ? model.list.find((w) => w.no === sel) : null;
+  // 지도 만들기 (maplibre는 이 화면에서만 불러온다)
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      const ml = (await import("maplibre-gl")).default; await import("maplibre-gl/dist/maplibre-gl.css");
+      if (dead || !mapEl.current || mapRef.current) return;
+      mlRef.current = ml;
+      const map = new ml.Map({ container: mapEl.current, style: MAP_STYLE_URL, center: [127.6, 36.4], zoom: 6.3, attributionControl: { compact: true } });
+      map.addControl(new ml.NavigationControl({ showCompass: false }), "top-right");
+      map.on("load", () => {
+        map.addSource("wp", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        map.addLayer({ id: "wp-c", type: "circle", source: "wp", paint: {
+          "circle-color": ["get", "color"], "circle-opacity": 0.82, "circle-stroke-color": ["case", ["get", "sel"], "#111", "#fff"], "circle-stroke-width": ["case", ["get", "sel"], 3, 1.5],
+          "circle-radius": ["interpolate", ["linear"], ["sqrt", ["get", "qty"]], 0, 5, 10, 8, 40, 16, 120, 28] } });
+        map.addLayer({ id: "wp-t", type: "symbol", source: "wp", minzoom: 8.5, layout: { "text-field": ["get", "label"], "text-size": 11.5, "text-offset": [0, 1.5], "text-anchor": "top", "text-allow-overlap": false }, paint: { "text-color": "#333", "text-halo-color": "#fff", "text-halo-width": 1.4 } });
+        map.on("click", "wp-c", (e) => { const f = e.features && e.features[0]; if (f) setSel(f.properties.no); });
+        map.on("mouseenter", "wp-c", (e) => {
+          map.getCanvas().style.cursor = "pointer";
+          const p = e.features[0].properties;
+          popRef.current && popRef.current.remove();
+          popRef.current = new ml.Popup({ closeButton: false, offset: 10 }).setLngLat(e.features[0].geometry.coordinates).setHTML(`<div style="font-size:12.5px"><b>${p.label}</b><br>${p.kind} · 보유 ${Number(p.qty).toLocaleString()}장</div>`).addTo(map);
+        });
+        map.on("mouseleave", "wp-c", () => { map.getCanvas().style.cursor = ""; popRef.current && popRef.current.remove(); });
+        mapRef.current = map; setMapReady(true);
+      });
+    })();
+    return () => { dead = true; if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
+  }, []);
+  const pinned = useMemo(() => view.filter((w) => w.geo && w.geo.lat), [view]);
+  useEffect(() => {
+    const map = mapRef.current; if (!map || !mapReady) return;
+    map.getSource("wp").setData({ type: "FeatureCollection", features: pinned.map((w) => ({ type: "Feature", geometry: { type: "Point", coordinates: [w.geo.lng, w.geo.lat] }, properties: { no: w.no, label: w.name, kind: w.kind, color: KIND_COLOR[w.kind] || "#888", qty: Math.max(0, sumOf(w.now, item)), sel: w.no === sel } })) });
+  }, [mapReady, pinned, item, sel]);
+  // 선택하면 그 곳으로
+  useEffect(() => {
+    const map = mapRef.current; if (!map || !selW || !selW.geo) return;
+    map.flyTo({ center: [selW.geo.lng, selW.geo.lat], zoom: Math.max(map.getZoom(), 11), speed: 1.4 });
+  }, [sel]); // eslint-disable-line
+  // 위치 직접 옮기기: 지도를 누른 곳으로 저장
+  useEffect(() => {
+    const map = mapRef.current; if (!map || !moving || !selW) return;
+    map.getCanvas().style.cursor = "crosshair";
+    const h = async (e) => {
+      const { error } = await supabase.from("wp_geo").upsert({ wp_no: selW.no, addr: selW.addr, lat: e.lngLat.lat, lng: e.lngLat.lng, src: "수동", updated_at: new Date().toISOString() });
+      setMoving(false); map.getCanvas().style.cursor = "";
+      if (error) alert(error.message); else reload();
+    };
+    map.once("click", h);
+    return () => { map.off("click", h); };
+  }, [moving]); // eslint-disable-line
+  const runGeocode = async () => {
+    const todo = model.list.filter((w) => w.addr && !w.geo);
+    if (!todo.length) { alert("주소가 있는 곳은 모두 위치를 찾았어요."); return; }
+    if (!window.confirm(`주소로 위치를 찾을 곳이 ${todo.length}곳이에요. 처음 한 번만 하면 되고 몇 분 걸려요. 시작할까요?`)) return;
+    let ok = 0, miss = 0;
+    for (let i = 0; i < todo.length; i++) {
+      setGeoRun({ i, n: todo.length, ok, miss });
+      const w = todo[i]; const r = await geocodeAddr(w.addr);
+      await supabase.from("wp_geo").upsert({ wp_no: w.no, addr: w.addr, lat: r ? r.lat : null, lng: r ? r.lng : null, src: r ? r.src : "못찾음", updated_at: new Date().toISOString() });
+      r ? ok++ : miss++;
+    }
+    setGeoRun(null); alert(`위치 찾기 끝: ${ok}곳 찾음 · ${miss}곳 못 찾음 (못 찾은 곳은 목록에서 골라 [위치 직접 찍기])`); reload();
+  };
+  const fit = () => {
+    const map = mapRef.current, ml = mlRef.current; if (!map || !ml || !pinned.length) return;
+    const b = new ml.LngLatBounds(); pinned.forEach((w) => b.extend([w.geo.lng, w.geo.lat])); map.fitBounds(b, { padding: 50, maxZoom: 12 });
+  };
+  const chip = (on, label, onClick, color) => <button onClick={onClick} style={{ fontSize: 12.5, padding: "5px 12px", borderRadius: 20, border: `1px solid ${on ? color || C.teal : C.border}`, background: on ? (color ? color + "18" : C.tealBg) : "#fff", color: on ? color || C.tealDk : C.sub, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>{color && <i style={{ width: 8, height: 8, borderRadius: 8, background: color, display: "inline-block" }} />}{label}</button>;
+  const diff = (v) => <span style={{ color: v > 0 ? C.blue : v < 0 ? C.red : C.hint }}>{v > 0 ? "+" : ""}{v.toLocaleString()}</span>;
+  const Stat = ({ label, value, sub, tone }) => (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "12px 14px", minWidth: 0 }}>
+      <div style={{ fontSize: 12.5, color: C.sub }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: tone || C.text, fontVariantNumeric: "tabular-nums", marginTop: 2 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11.5, color: C.hint, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+  if (err) return (<><Head title="파렛트 현황 지도" /><div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 8 }}>{err}</div></>);
+  const names = model ? model.list.map((w) => w.name) : [];
+  const noGeo = model ? model.list.filter((w) => !w.geo && (Object.values(w.now).some((v) => v))).length : 0;
+  return (
+    <>
+      <Head title="파렛트 현황 지도" sub={model ? `EDI 재고(${model.baseDate}) + 그 뒤 EDI 이동(오늘 ${model.today.slice(5)}까지) 기준 · 동기화될수록 정확해요` : "불러오는 중…"} />
+      {model && model.geoMissing && <div style={{ background: C.amberBg, color: C.amber, padding: 10, borderRadius: 8, fontSize: 12.5, marginBottom: 12 }}>위치 저장 표(letus_edi19.sql)가 아직 없어요. 관리자에게 실행을 요청해 주세요.</div>}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 12 }}>
+        <Stat label={`현재 보유${item ? " · " + item : ""}`} value={tot.now.toLocaleString() + "장"} sub={`${view.length}곳`} />
+        <Stat label="금일 입고" value={"+" + tot.inn.toLocaleString()} tone={C.blue} sub="오늘 EDI 이동 기준" />
+        <Stat label="금일 출고" value={"−" + tot.out.toLocaleString()} tone={C.red} />
+        <Stat label="전일 대비" value={(tot.now - tot.prev > 0 ? "+" : "") + (tot.now - tot.prev).toLocaleString()} tone={tot.now - tot.prev > 0 ? C.blue : tot.now - tot.prev < 0 ? C.red : C.text} sub={`어제 ${tot.prev.toLocaleString()}장`} />
+      </div>
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, marginBottom: 12, display: "grid", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 12.5, color: C.sub, width: 44 }}>검색</span>
+          <NamePicker options={names} value={pick} onChange={(v) => { setPick(v); const w = model && model.list.find((x) => x.name === v); if (w) setSel(w.no); }} placeholder={`업체·작업장 이름 (${names.length}곳)`} width={260} />
+          {chip(onlyStock, "재고·입출고 있는 곳만", () => setOnlyStock(!onlyStock))}
+          <button onClick={fit} style={{ ...btnGhost, padding: "6px 12px" }}>전체 보기</button>
+          <button onClick={reload} style={{ ...btnGhost, padding: "6px 12px" }}>새로고침</button>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 12.5, color: C.sub, width: 44 }}>구분</span>
+          {["센터", "시공팀", "업체"].map((k) => <Fragment key={k}>{chip(kinds[k], k, () => setKinds({ ...kinds, [k]: !kinds[k] }), KIND_COLOR[k])}</Fragment>)}
+          <span style={{ fontSize: 12.5, color: C.sub, marginLeft: 10 }}>제품</span>
+          {["", ...(model ? model.items : [])].map((it) => <Fragment key={it || "all"}>{chip(item === it, it || "전체", () => setItem(it))}</Fragment>)}
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(300px, 380px)", gap: 12 }} className="pm-grid">
+        <style>{`@media (max-width: 860px){ .pm-grid{ grid-template-columns: 1fr !important; } .pm-map{ height: 380px !important; } }`}</style>
+        <div style={{ position: "relative" }}>
+          <div ref={mapEl} className="pm-map" style={{ height: 640, borderRadius: 12, overflow: "hidden", border: `1px solid ${C.border}`, background: "#eef1f3" }} />
+          {!model && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}><Splash text="불러오는 중…" /></div>}
+          {model && <div style={{ position: "absolute", left: 10, bottom: 10, background: "rgba(255,255,255,.94)", borderRadius: 8, padding: "6px 10px", fontSize: 11.5, color: C.sub, boxShadow: "0 1px 4px rgba(0,0,0,.12)" }}>
+            지도 표시 {pinned.length}곳 · 원 크기 = 보유 수량{noGeo ? ` · 위치 없음 ${noGeo}곳` : ""}
+            {caps.users && noGeo > 0 && !geoRun && <button onClick={runGeocode} style={{ marginLeft: 8, border: "none", background: C.teal, color: "#fff", borderRadius: 6, padding: "3px 9px", cursor: "pointer", fontSize: 11.5 }}>주소로 위치 찾기</button>}
+            {geoRun && <span style={{ marginLeft: 8, color: C.tealDk }}>위치 찾는 중 {geoRun.i + 1}/{geoRun.n}</span>}
+          </div>}
+          {moving && <div style={{ position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", background: C.text, color: "#fff", borderRadius: 8, padding: "7px 12px", fontSize: 12.5 }}>{selW && selW.name} 위치를 지도에서 눌러 주세요 <button onClick={() => setMoving(false)} style={{ marginLeft: 6, background: "none", border: "1px solid #fff", color: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 11.5 }}>취소</button></div>}
+        </div>
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column", maxHeight: 640 }}>
+          {selW ? (
+            <div style={{ padding: 14, overflowY: "auto" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                <div><div style={{ fontSize: 16, fontWeight: 700 }}>{selW.name}</div><div style={{ fontSize: 12, color: C.hint, marginTop: 2 }}><span style={{ color: KIND_COLOR[selW.kind] }}>● </span>{selW.kind} · {selW.addr || "주소 없음"}</div></div>
+                <button onClick={() => { setSel(null); setPick(""); }} style={{ background: "none", border: "none", color: C.sub, cursor: "pointer", fontSize: 16 }}>✕</button>
+              </div>
+              <table style={{ ...tbl, marginTop: 12 }}>
+                <thead><tr><Th>제품</Th><Th r>전일</Th><Th r>입고</Th><Th r>출고</Th><Th r>현재</Th><Th r>증감</Th></tr></thead>
+                <tbody>{model.items.filter((k) => selW.prev[k] || selW.inn[k] || selW.out[k] || selW.now[k]).map((k) => (
+                  <tr key={k} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <Td b>{k}</Td><Td r>{(selW.prev[k] || 0).toLocaleString()}</Td><Td r c={C.blue}>{selW.inn[k] ? "+" + selW.inn[k] : "—"}</Td><Td r c={C.red}>{selW.out[k] ? "−" + selW.out[k] : "—"}</Td>
+                    <Td r b>{(selW.now[k] || 0).toLocaleString()}</Td><Td r>{diff((selW.now[k] || 0) - (selW.prev[k] || 0))}</Td>
+                  </tr>))}
+                  <tr style={{ borderTop: `2px solid ${C.border}` }}><Td b>합계</Td><Td r>{sumOf(selW.prev).toLocaleString()}</Td><Td r c={C.blue}>+{sumOf(selW.inn)}</Td><Td r c={C.red}>−{sumOf(selW.out)}</Td><Td r b>{sumOf(selW.now).toLocaleString()}</Td><Td r>{diff(sumOf(selW.now) - sumOf(selW.prev))}</Td></tr>
+                </tbody>
+              </table>
+              <div style={{ fontSize: 13, fontWeight: 600, margin: "16px 0 6px" }}>오늘 이동 {selW.todayMoves.length}건</div>
+              {!selW.todayMoves.length && <div style={{ fontSize: 12.5, color: C.hint }}>오늘 EDI에 올라온 이동이 없어요.</div>}
+              {selW.todayMoves.map((m, i) => (
+                <div key={m.move_code + m.item + i} style={{ fontSize: 12.5, padding: "6px 0", borderTop: i ? `1px solid ${C.border}` : "none", display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <span><span style={{ color: m.dir === "입고" ? C.blue : C.red }}>{m.dir}</span> · {m.dir === "입고" ? ediClean(m.from_name) + "에서" : ediClean(m.to_name) + "로"}<div style={{ fontSize: 11, color: C.hint }}>{m.move_code} · {m.move_type}</div></span>
+                  <b style={{ whiteSpace: "nowrap" }}>{m.item} {m.qty}</b>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 6, marginTop: 14, flexWrap: "wrap" }}>
+                <button onClick={() => setMoving(true)} style={{ ...btnGhost, padding: "6px 12px", fontSize: 12.5 }}>{selW.geo && selW.geo.lat ? "위치 고치기" : "위치 직접 찍기"}</button>
+                {selW.geo && <span style={{ fontSize: 11.5, color: C.hint, alignSelf: "center" }}>위치: {selW.geo.src}</span>}
+              </div>
+            </div>
+          ) : (
+            <>
+              <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, fontSize: 12.5, color: C.sub, display: "flex", justifyContent: "space-between" }}><span>보유 많은 순 · {view.length}곳</span><span>현재 / 전일 대비</span></div>
+              <div style={{ overflowY: "auto" }}>
+                {view.slice(0, 300).map((w) => {
+                  const nw = sumOf(w.now, item), dv = nw - sumOf(w.prev, item);
+                  return (
+                    <div key={w.no} onClick={() => setSel(w.no)} style={{ padding: "9px 14px", borderBottom: `1px solid ${C.border}`, cursor: "pointer", display: "flex", alignItems: "center", gap: 10 }}>
+                      <i style={{ width: 9, height: 9, borderRadius: 9, background: KIND_COLOR[w.kind] || "#888", flexShrink: 0 }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}{!w.geo && <span style={{ fontSize: 10.5, color: C.hint }}> · 위치 없음</span>}</div>
+                        <div style={{ fontSize: 11.5, color: C.hint }}>{model.items.filter((k) => (!item || k === item) && w.now[k]).map((k) => `${k} ${w.now[k].toLocaleString()}`).join(" · ") || "재고 없음"}{sumOf(w.inn, item) || sumOf(w.out, item) ? ` · 오늘 +${sumOf(w.inn, item)} / −${sumOf(w.out, item)}` : ""}</div>
+                      </div>
+                      <div style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}><div style={{ fontSize: 14, fontWeight: 600 }}>{nw.toLocaleString()}</div><div style={{ fontSize: 11.5 }}>{diff(dv)}</div></div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </>
   );
 }
