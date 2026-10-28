@@ -2015,7 +2015,7 @@ function PalletMap({ caps = {} }) {
             <>
               <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, fontSize: 12.5, color: C.sub, display: "flex", justifyContent: "space-between" }}><span>보유 많은 순 · {view.length}곳</span><span>현재 / 전일 대비</span></div>
               <div style={{ overflowY: "auto" }}>
-                {view.slice(0, 300).map((w) => {
+                {view.map((w) => {
                   const nw = sumOf(w.now, item), dv = nw - sumOf(w.prev, item);
                   return (
                     <div key={w.no} onClick={() => setSel(w.no)} style={{ padding: "9px 14px", borderBottom: `1px solid ${C.border}`, cursor: "pointer", display: "flex", alignItems: "center", gap: 10 }}>
@@ -2132,7 +2132,7 @@ function ReceiptDiffModal({ row, palletTypes = [], onClose, onSave }) {
 // 이름 목록에서 고르기: 누르면 전체 목록이 뜨고, 글자를 치면 맞는 곳만 추천. 바깥을 누르거나 Esc면 닫힘
 function NamePicker({ options = [], value, onChange, placeholder = "전체", width = 220, counts }) {
   const [open, setOpen] = useState(false); const [q, setQ] = useState(""); const [hi, setHi] = useState(0);
-  const list = useMemo(() => { const t = q.trim(); return options.filter((o) => !t || o.includes(t)).slice(0, 100); }, [options, q]);
+  const list = useMemo(() => { const t = q.trim(); return options.filter((o) => !t || o.includes(t)).slice(0, 2000); }, [options, q]);
   const pick = (v) => { onChange(v); setOpen(false); setQ(""); };
   return (
     <div style={{ position: "relative", width }}>
