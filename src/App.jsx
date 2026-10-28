@@ -1773,12 +1773,15 @@ async function geocodeAddr(addr) {
   const full = a.replace(/^(\S+)/, (m) => SIDO[m] || m);
   const road = (full.match(/^(.*?(로|길)\s*\d+(-\d+)?)/) || [])[1];
   const area = full.split(" ").slice(0, 3).join(" ");
+  // OSM은 엉뚱한 도시의 같은 길 이름을 주기도 해서, 결과 주소에 시·군·구 이름이 들어 있는 것만 쓴다
+  const toks = full.split(" ").slice(1, 3).filter((t) => /(시|군|구)$/.test(t));
+  const okPlace = (dn) => toks.every((t) => String(dn || "").includes(t));
   for (const q of [...new Set([road, full, area].filter(Boolean))]) {
     await new Promise((r) => setTimeout(r, 1100));
     try {
-      const res = await fetch("https://nominatim.openstreetmap.org/search?format=json&countrycodes=kr&limit=1&q=" + encodeURIComponent(q), { headers: { "Accept-Language": "ko" } });
-      const d = await res.json();
-      if (d && d[0]) return { lat: +d[0].lat, lng: +d[0].lon, src: q === area ? "OSM(동네)" : "OSM" };
+      const res = await fetch("https://nominatim.openstreetmap.org/search?format=json&countrycodes=kr&limit=5&q=" + encodeURIComponent(q), { headers: { "Accept-Language": "ko" } });
+      const hit = ((await res.json()) || []).find((x) => okPlace(x.display_name));
+      if (hit) return { lat: +hit.lat, lng: +hit.lon, src: q === area ? "OSM(동네)" : "OSM" };
     } catch (e) { /* 다음 후보 */ }
   }
   return null;
