@@ -1419,7 +1419,8 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
   const pinfoOut = usePalletInfo();
   const wpList = useMemo(() => (ediIdx ? ediIdx.wps.filter((w) => w.no > 0 && !w.closed) : []), [ediIdx]);
   const [fromNo, setFromNo] = useState(null); const [toNo, setToNo] = useState(null);
-  const fromWp = wpList.find((w) => w.no === fromNo) || null, toWp = wpList.find((w) => w.no === toNo) || null;
+  const toList = useMemo(() => (ediIdx ? [...wpList, ...ediIdx.ext] : []), [ediIdx, wpList]);
+  const fromWp = wpList.find((w) => w.no === fromNo) || null, toWp = toList.find((w) => w.no === toNo) || null;
   // 작업장 종류: PMS 센터 / 거래처 / 그 외 EDI 작업장
   const centerOf = (w) => (w ? w.pms_center || (centers.includes(ediClean(w.name)) ? ediClean(w.name) : null) : null);
   const partnerOf = (w) => (w && w.partner_code ? partners.find((p) => p.code === w.partner_code) : null);
@@ -1445,7 +1446,7 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
     const w = ediIdx.wpByCenter[myCenters[0]]; if (w) setFromNo(w.no);
   }, [ediIdx]); // eslint-disable-line
   const [recent, setRecent] = useState(readRecent);
-  const recentRoutes = recent.map(([f, t]) => ({ f: wpList.find((w) => w.no === f), t: wpList.find((w) => w.no === t) })).filter((r) => r.f && r.t);
+  const recentRoutes = recent.map(([f, t]) => ({ f: wpList.find((w) => w.no === f), t: toList.find((w) => w.no === t) })).filter((r) => r.f && r.t);
   const fromStock = useWpStock(fromWp, ships, ediIdx);
   const hintOf = fromStock ? (code) => fromStock.items[code] || 0 : undefined;
   const total = qtysTotal(qtys);
@@ -1482,7 +1483,7 @@ function Outbound({ partners, palletTypes, ships = [], centers = CENTERS, myCent
         {fromStock && <div style={{ fontSize: 11.5, color: C.sub, marginTop: 5 }}>현재고(EDI {(fromStock.date || "").slice(5)} 기준 + 당일 이동·PMS 예정): {Object.keys(fromStock.items).length ? Object.entries(fromStock.items).map(([k, v]) => k + " " + v.toLocaleString()).join(" · ") : "없음"}</div>}
         <div style={{ textAlign: "center", color: C.hint, margin: "6px 0" }}>↓</div>
         <div style={lbl}>입고처 <span style={{ color: C.hint, fontSize: 11 }}>· 받는 곳</span></div>
-        <WorkplacePicker wps={wpList} value={toNo} onChange={setToNo} width="100%" filter={(w) => w.no !== fromNo} placeholder="받는 곳 (이름·번호)" />
+        <WorkplacePicker wps={toList} value={toNo} onChange={setToNo} width="100%" filter={(w) => w.no !== fromNo} placeholder={`받는 곳 (이름·번호) · 우리 작업장 ${wpList.length} + EDI 입고처 ${ediIdx ? ediIdx.ext.length : 0}`} />
         {kindLabel && <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
           <span style={{ fontSize: 11.5, color: kindLabel.color, background: kindLabel.bg, padding: "2px 9px", borderRadius: 10 }}>{kindLabel.text}</span>
           <span style={{ fontSize: 11.5, color: C.hint }}>EDI 반영 탭에서 출고처 "{ediClean(fromWp.name)}"로 자동입력돼요</span>
@@ -1743,7 +1744,7 @@ function AjSupplyStatus({ mode = "supply" }) {
 
 // ───────── 파렛트 현황 지도: 작업장(센터·시공팀·업체)을 주소 기준으로 지도에 찍고, 제품별 보유·금일 입출고·전일 대비를 보여준다
 // 재고 = EDI 마지막 재고일 재고 + 그 뒤 EDI 이동(오늘까지). 전일 = 어제까지 반영한 재고
-const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
+const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron"; // 밝고 단순한 지도(키·도메인 등록 불필요)
 const KAKAO_JS_KEY = "d712ecc83595cf3e71c966965c007f0c";
 const KIND_COLOR = { 센터: "#1D9E75", 시공팀: "#3B6FD8", 업체: "#D98A1E" };
 let kakaoGeo = null;
@@ -2912,10 +2913,10 @@ function WorkplacePicker({ wps, value, onChange, filter, placeholder = "작업�
   const cur = wps.find((w) => w.no === value);
   const list = useMemo(() => {
     const t = q.trim().toLowerCase();
-    return wps.filter((w) => (!filter || filter(w)) && (!t || (w.no + " " + w.name + " " + (w.kind || "")).toLowerCase().includes(t))).slice(0, 60);
+    return wps.filter((w) => (!filter || filter(w)) && (!t || ((w.ext ? "" : w.no) + " " + w.name + " " + (w.kind || "") + " " + (w.demd_name || "")).toLowerCase().includes(t))).slice(0, 60);
   }, [wps, q, filter]);
   const pick = (w) => { onChange(w.no); setOpen(false); setQ(""); };
-  const label = (w) => `${w.no}. ${w.closed ? "(폐쇄) " : ""}${w.name}`;
+  const label = (w) => (w.ext ? `${w.name}${w.demd_name ? " · " + w.demd_name : ""} (EDI 입고처)` : `${w.no}. ${w.closed ? "(폐쇄) " : ""}${w.name}`);
   return (
     <div style={{ position: "relative", width }}>
       <input
@@ -2938,7 +2939,7 @@ function WorkplacePicker({ wps, value, onChange, filter, placeholder = "작업�
           {list.map((w, i) => (
             <div key={w.no} onMouseDown={(e) => { e.preventDefault(); pick(w); }} onMouseEnter={() => setHi(i)}
               style={{ padding: "7px 10px", fontSize: 13, cursor: "pointer", background: i === hi ? "#eef6f4" : "transparent", display: "flex", justifyContent: "space-between", gap: 8 }}>
-              <span>{label(w)}</span><span style={{ color: C.hint, fontSize: 11 }}>{w.kind}{w.last_synced ? "" : " · 미수집"}</span>
+              <span>{label(w)}</span><span style={{ color: C.hint, fontSize: 11 }}>{w.kind}{w.ext || w.last_synced ? "" : " · 미수집"}</span>
             </div>
           ))}
         </div>
@@ -3402,7 +3403,7 @@ function useEdiIndex() {
           page(() => supabase.from("aj_workplace").select("no,name,kind,pms_center,partner_code,closed").order("no")),
           page(() => supabase.from("aj_workplace_map").select("account,local_no,wp_no").order("account").order("local_no")),
           supabase.from("aj_account").select("code,name,label,items").then((r) => { if (r.error) throw r.error; return r.data || []; }),
-          page(() => supabase.from("aj_dest").select("account,demd_code,demd_numb,post_name,usag_flag,blok_list,self_code").order("account").order("demd_code").order("demd_numb")),
+          page(() => supabase.from("aj_dest").select("account,demd_code,demd_numb,demd_name,post_name,usag_flag,blok_list,self_code").order("account").order("demd_code").order("demd_numb")),
         ]);
         if (alive) setRef({ wps, maps, accs, dests });
       } catch (e) { if (alive) setErr("기준 정보를 불러오지 못했어요. letus_edi8.sql 실행 여부를 확인해주세요. (" + (e.message || e) + ")"); }
@@ -3419,7 +3420,19 @@ function useEdiIndex() {
     ref.dests.forEach((d) => { dest[d.account + "|" + d.demd_code + "|" + d.demd_numb] = d; const k = d.account + "|" + ediClean(d.post_name); (destByName[k] = destByName[k] || []).push(d); });
     const accOf = (item) => ref.accs.filter((a) => (a.items || []).includes(item)).sort((a, b) => /전용/.test(a.label || a.name || "") - /전용/.test(b.label || b.name || ""))[0];
     const wpByNo = {}; ref.wps.forEach((w) => { wpByNo[w.no] = w; });
-    return { wps: ref.wps, wpByNo, wpByCenter, wpByPartner, local, dest, destByName, accOf, accName: (c) => { const a = ref.accs.find((x) => x.code === c); return (a && (a.label || a.name)) || c; } };
+    // EDI 입고처 목록에만 있는 외부 업체(쿠팡 센터 등): 우리 작업장이 아니라 재고는 없지만 출고 받는 곳으로 고를 수 있게.
+    // 번호는 음수로(입고처코드 숫자×1000 + 순번) 고정해서 shipment.to_wp에 저장해도 다시 찾을 수 있다
+    const ownNames = new Set(ref.wps.map((w) => ediClean(w.name)));
+    const ext = []; const extSeen = {};
+    ref.dests.forEach((d) => {
+      const nm = ediClean(d.post_name); if (!nm || ownNames.has(nm) || d.usag_flag !== "Y" || /사용금지/.test(d.self_code || "")) return;
+      if (extSeen[nm]) { extSeen[nm].accounts.push(d.account); return; }
+      const no = -(Number(String(d.demd_code).replace(/D/g, "")) * 1000 + Number(d.demd_numb || 0));
+      const w = { no, name: nm, kind: "외부", ext: true, demd_name: d.demd_name, accounts: [d.account] };
+      extSeen[nm] = w; ext.push(w); wpByNo[no] = w;
+    });
+    ext.sort((a, b) => a.name.localeCompare(b.name, "ko"));
+    return { ext, wps: ref.wps, wpByNo, wpByCenter, wpByPartner, local, dest, destByName, accOf, accName: (c) => { const a = ref.accs.find((x) => x.code === c); return (a && (a.label || a.name)) || c; } };
   }, [ref]);
 
   return { idx, err };
