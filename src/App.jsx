@@ -3462,7 +3462,9 @@ function useEdiIndex() {
     const local = {}; ref.maps.forEach((m) => { if (m.local_no) local[m.account + "|" + m.wp_no] = m.local_no; });
     const dest = {}, destByName = {};
     ref.dests.forEach((d) => { dest[d.account + "|" + d.demd_code + "|" + d.demd_numb] = d; const k = d.account + "|" + ediClean(d.post_name); (destByName[k] = destByName[k] || []).push(d); });
-    const accOf = (item) => ref.accs.filter((a) => (a.items || []).includes(item)).sort((a, b) => /전용/.test(a.label || a.name || "") - /전용/.test(b.label || b.name || ""))[0];
+    // 출고 EDI 입력은 우리 운영 계정 3개로만. 이케아 전용(AJU365851) 같은 조회용 계정이 같은 제품(15A)을 갖고 있어도 고르지 않는다
+    const OPS = ["P156063", "P208335", "P326529"];
+    const accOf = (item) => ref.accs.filter((a) => OPS.includes(a.code) && (a.items || []).includes(item)).sort((a, b) => /전용/.test(a.label || a.name || "") - /전용/.test(b.label || b.name || ""))[0];
     const wpByNo = {}; ref.wps.forEach((w) => { wpByNo[w.no] = w; });
     // EDI 입고처 목록에만 있는 외부 업체(쿠팡 센터 등): 우리 작업장이 아니라 재고는 없지만 출고 받는 곳으로 고를 수 있게.
     // 번호는 음수로(입고처코드 숫자×1000 + 순번) 고정해서 shipment.to_wp에 저장해도 다시 찾을 수 있다

@@ -17,3 +17,4 @@ dist/
 # 로컬 도구 설정 / 임시 파일
 .claude/
 files.zip
+tools/closing/*.json
