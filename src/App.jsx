@@ -115,9 +115,9 @@ const toOf = (s) => isMove(s) ? (s.to_center || "—") : isReturn(s) ? (s.center
 // ─── 역할 & 권한 ─────────────────────────────────────────────
 const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
 const NAV_BY_ROLE = {
-  관리자: ["오늘", "출고", "확인", "재고", "지도", "AJ", "EDI", "현황", "마스터", "단가", "사용자", "설정"],
+  관리자: ["오늘", "출고", "확인", "재고", "지도", "AJ", "EDI", "마감", "현황", "마스터", "단가", "사용자", "설정"],
   운송팀: ["오늘", "출고", "확인", "재고", "지도", "AJ", "EDI", "현황", "마스터", "설정"],
-  정산담당: ["오늘", "재고", "지도", "EDI", "현황", "마스터", "설정"],
+  정산담당: ["오늘", "재고", "지도", "EDI", "마감", "현황", "마스터", "설정"],
   협력업체: ["확인", "출고", "설정"],   // 시공팀: 우리 현장으로 온 것 확인, 우리 현장에서 보내는 것 등록
   AJ: ["AJ", "설정"],   // AJ네트웍스 직원: 요청 처리 + 내 설정
 };
@@ -706,7 +706,7 @@ function Shell({ session, initialConfirm }) {
     { key: "현황", label: "PMS 전표 내역" }, { key: "출고", label: "출고 등록" },
     { key: "반납", label: "반납 등록" },
     { key: "확인", label: "입고확인" }, { key: "회수", label: "회수 관리" },
-    { key: "재고", label: "재고 현황" }, { key: "지도", label: "파렛트 현황 지도" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
+    { key: "재고", label: "재고 현황" }, { key: "지도", label: "파렛트 현황 지도" }, { key: "마감", label: "파렛트 월마감" }, { key: "AJ", label: "AJ 요청" }, { key: "EDI", label: "EDI 재고·정산" },
     { key: "마스터", label: "거래처" }, { key: "단가", label: "파렛트·단가" },
     { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
@@ -800,6 +800,7 @@ function Shell({ session, initialConfirm }) {
             {nav === "확인" && <ReceiptScreen {...{ ships, palletTypes, caps }} />}
             {nav === "회수" && caps.operate && <Recovery {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList, recoverToCenter, recoverToAj }} />}
             {nav === "지도" && caps.inventory && <PalletMap caps={caps} />}
+            {nav === "마감" && caps.billing && <ClosingScreen caps={caps} />}
             {nav === "재고" && caps.inventory && <InventoryScreen {...{ ships, ajReqs, partners: partnersFull, palletTypes, centers: centerList }} />}
             {nav === "AJ" && (caps.aj || caps.ajWorker) && <AjLink {...{ ajReqs, palletTypes, createAjRequest, completeAjRequest, confirmAjSupply, cancelAjRequest, finishAjSupply, skipAjEdi, ships, caps, centers: centerList }} />}
             {nav === "EDI" && caps.inventory && <EdiStock {...{ caps, ships, ajReqs, palletTypes, centers: centerList }} />}
@@ -2076,6 +2077,245 @@ function PalletMap({ caps = {} }) {
         </div>
       </div>
     </>
+  );
+}
+
+// ───────── 파렛트 월마감: 구내용(EDI 매일 재고 · AJ 거래명세서 대조) → 이용료 안분 → 업무연락 표 → 임대료·임차료 전표
+// 계산 규칙은 src/closing.js (2026-08 엑셀과 원 단위 일치 검증)
+const CLOSE_OPS = { P156063: "14C·18F", P208335: "일반유형(11A·15A)", P326529: "23E", P365851: "이케아 15A전용" };
+const GROUP_HINT = { 양지: "양지센터(시공팀·데스커 포함)", 양지2: "양지2센터(일룸 몫)", "3PL": "3PL 고객 — 브랜드 청구 제외", 침대사업부: "일룸 침대사업부", 안성공장: "퍼시스 안성공장(+협력사)", 충주1: "퍼시스 충주1(+협력사)", 충주2: "퍼시스 충주2(+협력사)", 일룸협력사: "일룸 상품 협력사", 시디즈공장: "시디즈 평택·안성 공장", 시디즈기타: "시디즈 음성창고·협력사", 기타: "청구 제외", 제외: "청구 제외", 이케아: "이케아(15A전용) — 임차료만" };
+const ymPeriod = (ym) => { const [y, m] = ym.split("-").map(Number); const p = new Date(y, m - 2, 26), e = new Date(y, m - 1, 25); const f = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); return { from: f(p), to: f(e), days: Math.round((e - p) / 86400000) + 1 }; };
+const nf = (n) => (n || 0).toLocaleString();
+const ERP_KEYS = [["퍼시스", "경인"], ["퍼시스", "지방"], ["퍼시스", "수출"], ["일룸", "경인"], ["일룸", "지방"], ["일룸", "수출"], ["시디즈", "경인"], ["시디즈", "지방"], ["시디즈", "수출"]];
+const INV_KEYS = ["18F,14C", "11A", "23E", "15A", "풀필먼트23E"];
+const TP_KEYS = ["블링크프로젝트", "네오스코리아", "에이스침대중부공장"];
+
+function ClosingScreen({ caps = {} }) {
+  const now = new Date();
+  const defYm = (() => { const d = now.getDate() > 25 ? new Date(now.getFullYear(), now.getMonth(), 1) : new Date(now.getFullYear(), now.getMonth() - 1, 1); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); })();
+  const [ym, setYm] = useState(defYm);
+  const P = ymPeriod(ym);
+  const [tab, setTab] = useState("qty");
+  const [wps, setWps] = useState(null); const [cls, setCls] = useState({}); const [gun, setGun] = useState(null);
+  const [inp, setInp] = useState({}); const [row, setRow] = useState(null); const [err, setErr] = useState(""); const [msg, setMsg] = useState(""); const [tick, setTick] = useState(0);
+  const [eng, setEng] = useState(null); const [q, setQ] = useState(""); const [onlyNeed, setOnlyNeed] = useState(false);
+  useEffect(() => { import("./closing.js").then(setEng); }, []);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setErr(""); setGun(null);
+      const page = async (fn) => { const all = []; for (let p = 0; p < 20; p++) { const { data, error } = await fn().range(p * 1000, p * 1000 + 999); if (error) throw error; all.push(...(data || [])); if (!data || data.length < 1000) break; } return all; };
+      try {
+        const [w, c, g, m] = await Promise.all([
+          page(() => supabase.from("aj_workplace").select("no,name,kind,closed").order("no")),
+          page(() => supabase.from("closing_class").select("*").order("wp_no")),
+          supabase.rpc("closing_gunae", { p_from: P.from, p_to: P.to }).range(0, 9999),
+          supabase.from("closing_month").select("*").eq("ym", ym).maybeSingle(),
+        ]);
+        if (g.error) throw g.error;
+        if (!alive) return;
+        const cm = {}; c.forEach((x) => { cm[x.account + "|" + x.wp_no] = x.grp; });
+        setWps(w); setCls(cm); setGun(g.data || []); setRow(m.data || null); setInp((m.data && m.data.inputs) || {});
+      } catch (e) { if (alive) setErr((e.message || String(e)) + " — letus_edi20.sql 실행 필요"); }
+    })();
+    return () => { alive = false; };
+  }, [ym, tick]);
+  const wpName = useMemo(() => { const m = {}; (wps || []).forEach((w) => { m[w.no] = w; }); return m; }, [wps]);
+  const locked = row && row.status === "확정";
+  const setI = (path, v) => setInp((o) => { const n = JSON.parse(JSON.stringify(o || {})); let t = n; for (let i = 0; i < path.length - 1; i++) t = t[path[i]] = t[path[i]] || {}; t[path[path.length - 1]] = v; return n; });
+  const save = async (extra = {}) => {
+    const { error } = await supabase.from("closing_month").upsert({ ym, inputs: inp, updated_at: new Date().toISOString(), ...extra });
+    if (error) { alert(error.message); return false; }
+    setMsg("저장했어요"); setTimeout(() => setMsg(""), 2000); return true;
+  };
+  // 계정·작업장별 구내용 → 분류
+  const defGroup = (acc, item) => acc === "P208335" ? (item === "11A" ? "11A" : "15A") : acc === "P326529" ? "23E" : acc === "P365851" ? "이케아" : null;
+  const units = useMemo(() => {
+    if (!gun) return [];
+    const m = {};
+    gun.forEach((r) => {
+      const k = r.account + "|" + r.workplace_no + (r.account === "P208335" ? "|" + r.item : "");
+      const u = m[k] = m[k] || { key: k, account: r.account, wp_no: r.workplace_no, item: r.account === "P208335" ? r.item : "", gunae: 0, pos: 0, days: 0 };
+      u.gunae += Number(r.gunae); u.pos += Number(r.gunae_pos); u.days = Math.max(u.days, r.days);
+    });
+    return Object.values(m).map((u) => {
+      const w = wpName[u.wp_no]; const name = w ? ediClean(w.name) : "#" + u.wp_no;
+      const grp = cls[u.account + "|" + u.wp_no] || defGroup(u.account, u.item) || "";
+      const aj = inp.ajGunae && inp.ajGunae[name] !== undefined && u.account === "P156063" ? Number(inp.ajGunae[name]) : null;
+      return { ...u, name, kind: w ? w.kind : "", grp, aj, use: aj !== null ? aj : u.gunae };
+    }).filter((u) => u.gunae || u.aj).sort((a, b) => b.use - a.use);
+  }, [gun, cls, wpName, inp.ajGunae]);
+  const needCls = units.filter((u) => !u.grp);
+  const result = useMemo(() => {
+    if (!eng || !units.length) return null;
+    const e = inp.erp || {};
+    const ok = ERP_KEYS.every(([b, k]) => Number((e[b] || {})[k]) > 0) && Number(inp.sidizStockAmt) > 0;
+    if (!ok) return { missing: true };
+    const rows = units.filter((u) => u.grp && !["기타", "제외", "이케아", "3PL"].includes(u.grp)).map((u) => ({ name: u.name, group: u.grp === "양지2" ? "양지2" : u.grp, gunae: u.use }));
+    const num = (o) => Object.fromEntries(Object.entries(o || {}).map(([k, v]) => [k, Number(v) || 0]));
+    const erp = { 퍼시스: num(e.퍼시스), 일룸: num(e.일룸), 시디즈: num(e.시디즈) };
+    const r = eng.computeClosing({ rows, days: P.days, erp, sidizStockAmt: Number(inp.sidizStockAmt), out11A: num(inp.out11A) });
+    const ymLabel = `${ym.slice(2, 4)}년 ${Number(ym.slice(5))}월`;
+    const rent = eng.rentVoucher(r.bills, ymLabel);
+    const invs = num(inp.invoices), tps = num(inp.thirdParty);
+    const lease = Object.values(invs).some((v) => v > 0) ? eng.leaseVoucher(invs, tps, ymLabel) : null;
+    return { r, rent, lease, ymLabel };
+  }, [eng, units, inp, P.days, ym]);
+  // AJ 거래명세서 엑셀(작업장별 시트) 올리기 → 시트마다 [합계] 줄의 재고 합 = 구내용, 3PL 공급가액
+  const onAjFile = async (f) => {
+    try {
+      const wb = XLSX.read(await f.arrayBuffer());
+      const out = {}, supply = {};
+      wb.SheetNames.forEach((sn) => {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true });
+        const name = ediClean(String((rows[2] || [])[1] || sn).trim());
+        const tot = rows.find((r) => String(r[1] || "").includes("[합계]"));
+        if (tot) out[name] = Number(String(tot[8] || 0).replace(/,/g, "")) || 0;
+        const sp = rows.find((r) => String(r[1] || "").trim() === "공급가액");
+        if (sp) supply[name] = Number(String(sp[2] || 0).replace(/,/g, "")) || 0;
+      });
+      setI(["ajGunae"], out);
+      const tp = {}; TP_KEYS.forEach((k) => { const hit = Object.keys(supply).find((n) => n.startsWith(k)); if (hit) tp[k] = supply[hit]; });
+      if (Object.keys(tp).length) setI(["thirdParty"], { ...(inp.thirdParty || {}), ...tp });
+      setMsg(`AJ 거래명세서 ${Object.keys(out).length}개 작업장을 읽었어요`); setTimeout(() => setMsg(""), 3000);
+    } catch (e) { alert("엑셀을 읽지 못했어요: " + e.message); }
+  };
+  const setClass = async (u, grp) => {
+    const { error } = await supabase.from("closing_class").upsert({ account: u.account, wp_no: u.wp_no, grp, updated_at: new Date().toISOString() });
+    if (error) { alert(error.message); return; }
+    setCls((c) => ({ ...c, [u.account + "|" + u.wp_no]: grp }));
+  };
+  const copyTsv = (rows) => { const t = rows.map((r) => r.join("\t")).join("\n"); navigator.clipboard.writeText(t).then(() => { setMsg("복사했어요 — 엑셀·EP에 붙여 넣으세요"); setTimeout(() => setMsg(""), 2500); }); };
+  const box = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 14 };
+  const inpS = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, width: 150, textAlign: "right" };
+  const groups = eng ? eng.CLOSING_GROUPS.concat(["제외", "이케아"]) : [];
+
+  if (err) return (<><Head title="파렛트 월마감" /><div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 8 }}>{err}</div></>);
+  const tabs = [["qty", "① 수량 대조"], ["cls", `② 작업장 분류${needCls.length ? " · 필요 " + needCls.length : ""}`], ["in", "③ ERP·세금계산서"], ["out", "④ 이용료·전표"]];
+  const totEdi = units.filter((u) => u.account === "P156063").reduce((a, u) => a + u.gunae, 0), totAj = units.filter((u) => u.account === "P156063" && u.aj !== null).reduce((a, u) => a + u.aj, 0);
+  const R = result && !result.missing ? result.r : null;
+  const tableRows = R ? R.table : [];
+  return (
+    <>
+      <Head title="파렛트 월마감" sub={`${P.from} ~ ${P.to} (${P.days}일) · EDI 매일 재고로 구내용 계산 → AJ 거래명세서 대조 → 이용료 안분 → 전표`} />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <span style={{ fontSize: 13, color: C.sub }}>마감월</span>
+        <input type="month" value={ym} onChange={(e) => e.target.value && setYm(e.target.value)} style={{ fontSize: 13, padding: "6px 9px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+        <span style={{ fontSize: 12, padding: "3px 10px", borderRadius: 12, background: locked ? C.greenBg : C.amberBg, color: locked ? C.green : C.amber }}>{locked ? "확정 " + fmtDT(row.confirmed_at) : "작성중"}</span>
+        <button onClick={() => setTick((t) => t + 1)} style={btnGhost}>새로고침</button>
+        {msg && <span style={{ fontSize: 12.5, color: C.tealDk }}>{msg}</span>}
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {tabs.map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ ...btnGhost, padding: "8px 16px", fontSize: 13.5, fontWeight: tab === k ? 600 : 400, background: tab === k ? C.teal : "#fff", color: tab === k ? "#fff" : C.text }}>{l}</button>)}
+      </div>
+      {!gun ? <Splash text="구내용 계산 중…" /> : tab === "qty" ? (
+        <div style={box}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+            <b>AJ 거래명세서 대조</b>
+            <label style={{ ...btnTealSm, display: "inline-block" }}>AJ 거래명세서 엑셀 올리기<input type="file" accept=".xlsx,.xls" hidden disabled={locked} onChange={(e) => e.target.files[0] && onAjFile(e.target.files[0])} /></label>
+            <span style={{ fontSize: 12.5, color: C.sub }}>「바로스 X월26일 - X월25일 거래명세서」(작업장별 시트). 올리면 작업장별로 EDI와 비교하고, 계산에는 AJ 숫자를 써요.</span>
+          </div>
+          <div style={{ fontSize: 13, marginBottom: 8 }}>14C·18F 구내용 EDI <b>{nf(totEdi)}</b>{inp.ajGunae ? <> · AJ <b>{nf(Object.values(inp.ajGunae).reduce((a, v) => a + v, 0))}</b> (EDI에 있는 곳 {nf(totAj)})</> : " · AJ 거래명세서를 올리면 비교해요"}</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장" style={{ ...inpS, textAlign: "left", width: 160 }} /><label style={{ fontSize: 12.5 }}><input type="checkbox" checked={onlyNeed} onChange={(e) => setOnlyNeed(e.target.checked)} /> 차이 있는 곳만</label></div>
+          <div style={{ overflowX: "auto", maxHeight: 520 }}><table style={{ ...tbl, minWidth: 720 }}>
+            <thead><tr><Th>작업장</Th><Th>계정</Th><Th>분류</Th><Th r>EDI 구내용</Th><Th r>마이너스=0</Th><Th r>AJ</Th><Th r>차이</Th><Th r>월평균</Th></tr></thead>
+            <tbody>{units.filter((u) => (!q || u.name.includes(q)) && (!onlyNeed || (u.aj !== null && u.aj !== u.gunae))).slice(0, 600).map((u) => {
+              const d = u.aj !== null ? u.gunae - u.aj : null;
+              return <tr key={u.key} style={{ borderTop: `1px solid ${C.border}` }}><Td>{u.name}{u.item ? " · " + u.item : ""}</Td><Td><span style={{ fontSize: 11.5, color: C.hint }}>{CLOSE_OPS[u.account] || u.account}</span></Td><Td><span style={{ fontSize: 12, color: u.grp ? C.sub : C.red }}>{u.grp || "분류 필요"}</span></Td><Td r>{nf(u.gunae)}</Td><Td r c={C.hint}>{u.pos !== u.gunae ? nf(u.pos) : ""}</Td><Td r>{u.aj !== null ? nf(u.aj) : "—"}</Td><Td r c={d ? C.red : C.green}>{d === null ? "" : d ? (d > 0 ? "+" : "") + nf(d) : "✓"}</Td><Td r b>{nf(Math.ceil(u.use / P.days))}</Td></tr>;
+            })}</tbody>
+          </table></div>
+          <Note>EDI 구내용 = 기간 매일 재고의 합. "마이너스=0"은 마이너스 재고 날을 0으로 본 값이에요(AJ는 마이너스 재고를 그대로 청구하지 않는 것으로 보여 비교용). 월평균 = 구내용 ÷ {P.days}일 올림.</Note>
+        </div>
+      ) : tab === "cls" ? (
+        <div style={box}>
+          <b>작업장 청구 분류</b> <span style={{ fontSize: 12.5, color: C.sub }}>한 번 정하면 다음 달에도 그대로 써요. 새 작업장만 정하면 돼요.</span>
+          <div style={{ display: "flex", gap: 8, margin: "10px 0" }}><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장" style={{ ...inpS, textAlign: "left", width: 160 }} /><label style={{ fontSize: 12.5 }}><input type="checkbox" checked={onlyNeed} onChange={(e) => setOnlyNeed(e.target.checked)} /> 분류 필요만</label></div>
+          <div style={{ overflowX: "auto", maxHeight: 560 }}><table style={{ ...tbl, minWidth: 620 }}>
+            <thead><tr><Th>작업장</Th><Th>구분</Th><Th>계정</Th><Th r>구내용</Th><Th>청구 분류</Th></tr></thead>
+            <tbody>{units.filter((u) => (!q || u.name.includes(q)) && (!onlyNeed || !u.grp)).slice(0, 700).map((u) => (
+              <tr key={u.key} style={{ borderTop: `1px solid ${C.border}` }}><Td>{u.name}</Td><Td><span style={{ fontSize: 12, color: C.hint }}>{u.kind}</span></Td><Td><span style={{ fontSize: 11.5, color: C.hint }}>{CLOSE_OPS[u.account] || u.account}</span></Td><Td r>{nf(u.use)}</Td>
+                <Td><select value={u.grp} disabled={locked || !caps.billing} onChange={(e) => setClass(u, e.target.value)} style={{ fontSize: 12.5, padding: "4px 6px", borderRadius: 6, border: `1px solid ${u.grp ? C.border : C.red}` }}><option value="">분류 필요</option>{groups.map((g) => <option key={g} value={g}>{g}{GROUP_HINT[g] ? " — " + GROUP_HINT[g] : LOCAL_HINT(g)}</option>)}</select></Td></tr>
+            ))}</tbody>
+          </table></div>
+        </div>
+      ) : tab === "in" ? (
+        <>
+          <div style={box}>
+            <b>ERP 제품구분별 수주/판매실적</b> <span style={{ fontSize: 12.5, color: C.sub }}>회사별 Total 줄 금액(관계사 제외·시공가·매출실적, {P.from} ~ {P.to})</span>
+            <div style={{ display: "grid", gridTemplateColumns: "80px repeat(3, 170px)", gap: 8, marginTop: 10, alignItems: "center" }}>
+              <span /><span style={{ fontSize: 12.5, color: C.sub }}>내수금액(경인)</span><span style={{ fontSize: 12.5, color: C.sub }}>내수금액(지방)</span><span style={{ fontSize: 12.5, color: C.sub }}>수출금액</span>
+              {["퍼시스", "일룸", "시디즈"].map((b) => <Fragment key={b}><b style={{ fontSize: 13 }}>{b}</b>{["경인", "지방", "수출"].map((k) => <input key={k} disabled={locked} value={((inp.erp || {})[b] || {})[k] || ""} onChange={(e) => setI(["erp", b, k], e.target.value.replace(/[^\d]/g, ""))} style={inpS} />)}</Fragment>)}
+            </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13 }}>시디즈 음성창고 재고금액(월기준)</span><input disabled={locked} value={inp.sidizStockAmt || ""} onChange={(e) => setI(["sidizStockAmt"], e.target.value.replace(/[^\d]/g, ""))} style={inpS} />
+              <span style={{ fontSize: 12, color: C.hint }}>÷ 881,485 = 양지센터 시디즈 몫 {inp.sidizStockAmt ? nf(Math.ceil(inp.sidizStockAmt / 881485)) + "장" : ""}</span>
+            </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13 }}>11A 출고수량 일룸</span><input disabled={locked} value={(inp.out11A || {}).일룸 || ""} onChange={(e) => setI(["out11A", "일룸"], e.target.value.replace(/[^\d]/g, ""))} style={{ ...inpS, width: 90 }} />
+              <span style={{ fontSize: 13 }}>시디즈</span><input disabled={locked} value={(inp.out11A || {}).시디즈 || ""} onChange={(e) => setI(["out11A", "시디즈"], e.target.value.replace(/[^\d]/g, ""))} style={{ ...inpS, width: 90 }} />
+            </div>
+          </div>
+          <div style={box}>
+            <b>AJ 세금계산서 공급가액</b> <span style={{ fontSize: 12.5, color: C.sub }}>임차료 전표용</span>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>{INV_KEYS.map((k) => <label key={k} style={{ fontSize: 12.5, display: "grid", gap: 3 }}>{k}<input disabled={locked} value={(inp.invoices || {})[k] || ""} onChange={(e) => setI(["invoices", k], e.target.value.replace(/[^\d]/g, ""))} style={inpS} /></label>)}</div>
+            <div style={{ fontSize: 12.5, color: C.sub, margin: "12px 0 6px" }}>18F·14C 계산서 안의 3PL 고객 몫(풀필먼트로) — AJ 거래명세서를 올리면 자동으로 채워요</div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>{TP_KEYS.map((k) => <label key={k} style={{ fontSize: 12.5, display: "grid", gap: 3 }}>{k}<input disabled={locked} value={(inp.thirdParty || {})[k] || ""} onChange={(e) => setI(["thirdParty", k], e.target.value.replace(/[^\d]/g, ""))} style={inpS} /></label>)}</div>
+          </div>
+          {!locked && <button onClick={() => save()} style={btnTeal}>입력값 저장</button>}
+        </>
+      ) : (
+        !result ? <Splash text="계산 중…" /> : result.missing ? <div style={box}>③에서 ERP 금액 9개와 시디즈 재고금액을 넣으면 계산돼요.{needCls.length ? ` 분류가 필요한 작업장 ${needCls.length}곳은 청구에서 빠져 있어요.` : ""}</div> : (
+          <>
+            {needCls.length > 0 && <div style={{ ...box, background: C.amberBg, color: C.amber, fontSize: 13 }}>분류가 정해지지 않은 작업장 {needCls.length}곳(구내용 {nf(needCls.reduce((a, u) => a + u.use, 0))})이 청구에서 빠져 있어요. ②에서 정해 주세요.</div>}
+            <div style={box}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+                <b>{result.ymLabel} 파렛트 이용료</b><span style={{ fontSize: 12.5, color: C.sub }}>{P.from} ~ {P.to} ({P.days}일) · 2,400원/EA</span>
+                <button style={btnGhost} onClick={() => copyTsv([["구분", "", "내수 일평균", "내수 임대사용료", "해외 일평균", "해외 임대사용료"], ...tableRows.map((t) => [t.brand, t.place, t.dom, t.dom * 2400, t.exp, t.exp * 2400])])}>표 복사(업무연락용)</button>
+              </div>
+              <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 560 }}>
+                <thead><tr><Th>브랜드</Th><Th>구분</Th><Th r>내수 일평균</Th><Th r>내수 임대사용료</Th><Th r>해외 일평균</Th><Th r>해외 임대사용료</Th></tr></thead>
+                <tbody>{["퍼시스", "일룸", "시디즈"].map((b) => <Fragment key={b}>
+                  {tableRows.filter((t) => t.brand === b).map((t, i) => <tr key={b + t.place} style={{ borderTop: `1px solid ${C.border}` }}><Td b={i === 0}>{i === 0 ? b : ""}</Td><Td>{t.place}</Td><Td r>{nf(t.dom)}</Td><Td r>{nf(t.dom * 2400)}</Td><Td r>{nf(t.exp)}</Td><Td r>{nf(t.exp * 2400)}</Td></tr>)}
+                  <tr style={{ background: "#f7f9f8" }}><Td /><Td b>소계</Td><Td r b>{nf(R.bills[b].domQty)}</Td><Td r b>{nf(R.bills[b].domQty * 2400)}</Td><Td r b>{nf(R.bills[b].expQty)}</Td><Td r b>{nf(R.bills[b].expQty * 2400)}</Td></tr>
+                </Fragment>)}
+                  <tr style={{ borderTop: `2px solid ${C.border}` }}><Td b>11A</Td><Td>일룸 / 시디즈 (13,200원)</Td><Td r>{R.a11.일룸} / {R.a11.시디즈}</Td><Td r>{nf((R.a11.일룸 + R.a11.시디즈) * 13200)}</Td><Td /><Td /></tr>
+                  <tr><Td b>15A</Td><Td>시디즈 쿠팡 (13,200원)</Td><Td r>{R.q15A}</Td><Td r>{nf(R.q15A * 13200)}</Td><Td /><Td /></tr>
+                  <tr><Td b>23E</Td><Td>일룸 매트리스 (7,000원)</Td><Td r>{R.q23E}</Td><Td r>{nf(R.q23E * 7000)}</Td><Td /><Td /></tr>
+                </tbody>
+              </table></div>
+            </div>
+            <VoucherBox title="임대료 전표 (브랜드 청구)" lines={result.rent} copyTsv={copyTsv} />
+            {result.lease ? <VoucherBox title="임차료 전표 (AJ)" lines={result.lease.lines} copyTsv={copyTsv} /> : <div style={box}>③에 AJ 세금계산서 금액을 넣으면 임차료 전표가 나와요.</div>}
+            <div style={box}>
+              <b>수량 확인 요청 메일 (초안)</b>
+              <pre style={{ whiteSpace: "pre-wrap", fontSize: 13, background: "#f7f9f8", padding: 12, borderRadius: 8, marginTop: 8 }}>{`제목: [레터스] ${result.ymLabel} 파렛트 이용 내역 확인 요청 (${P.from} ~ ${P.to})\n\n안녕하세요, 레터스 운송사업팀입니다.\n${result.ymLabel} 파렛트 이용 내역(일평균 사용량·임대사용료)을 첨부와 같이 보내드립니다.\n수량이 다른 곳이 있으면 회신 부탁드립니다. 확인 후 이용료 업무연락과 전표를 진행하겠습니다.\n\n합계: 내수 ${nf(R.table.reduce((a, t) => a + t.dom, 0))}장 / 해외 ${nf(R.table.reduce((a, t) => a + t.exp, 0))}장 · ${nf(R.table.reduce((a, t) => a + (t.dom + t.exp) * 2400, 0))}원 (2,400원/EA)`}</pre>
+              <div style={{ fontSize: 12, color: C.hint, marginTop: 6 }}>메일 발송과 EP 업무연락·전표 상신은 직접 해 주세요(EP는 사내 정책상 자동 입력하지 않아요).</div>
+            </div>
+            {caps.billing && <div style={{ display: "flex", gap: 8 }}>
+              {!locked ? <button style={btnGreen} onClick={async () => { if (!window.confirm(`${result.ymLabel} 마감을 확정할까요? 입력값과 결과가 저장되고 고칠 수 없게 잠겨요.`)) return; if (await save({ status: "확정", confirmed_at: new Date().toISOString(), result: { table: R.table, bills: R.bills, a11: R.a11, q15A: R.q15A, q23E: R.q23E, rent: result.rent, lease: result.lease } })) setTick((t) => t + 1); }}>마감 확정</button>
+                : <button style={btnGhost} onClick={async () => { if (!window.confirm("확정을 풀까요?")) return; if (await save({ status: "작성중", confirmed_at: null })) setTick((t) => t + 1); }}>확정 풀기</button>}
+            </div>}
+          </>
+        )
+      )}
+    </>
+  );
+}
+const LOCAL_HINT = (g) => (["강원", "대전", "대구", "부산", "울산", "전남", "창원", "광주", "전북", "제주"].includes(g) ? ` — ${g}센터(시공팀 포함, 지방 매출 비율)` : "");
+function VoucherBox({ title, lines, copyTsv }) {
+  const d = lines.reduce((a, x) => a + x.debit, 0), c = lines.reduce((a, x) => a + x.credit, 0);
+  const pr = (x) => (x.partner ? `${x.partner.code} / ${x.partner.name} / ${x.partner.biz}` : x.cc || "");
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+        <b>{title}</b><span style={{ fontSize: 12.5, color: d === c ? C.green : C.red }}>차변 {d.toLocaleString()} · 대변 {c.toLocaleString()} {d === c ? "✓" : "불일치"}</span>
+        <button style={btnGhost} onClick={() => copyTsv([["계정과목", "적요", "거래처/코스트센터", "공급가(부가세)", "차변", "대변"], ...lines.map((x) => [x.acct, x.memo, pr(x), x.supply || "", x.debit || "", x.credit || ""])])}>복사</button>
+      </div>
+      <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 640 }}>
+        <thead><tr><Th>계정과목</Th><Th>적요</Th><Th>거래처 / 코스트센터</Th><Th r>차변</Th><Th r>대변</Th></tr></thead>
+        <tbody>{lines.map((x, i) => <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td>{x.acct}</Td><Td>{x.memo}{x.supply ? <div style={{ fontSize: 11.5, color: C.hint }}>공급가 {x.supply.toLocaleString()}</div> : null}</Td><Td><span style={{ fontSize: 12, color: C.sub }}>{pr(x)}</span></Td><Td r>{x.debit ? x.debit.toLocaleString() : ""}</Td><Td r>{x.credit ? x.credit.toLocaleString() : ""}</Td></tr>)}</tbody>
+      </table></div>
+    </div>
   );
 }
 
