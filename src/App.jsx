@@ -363,6 +363,7 @@ function Shell({ session, initialConfirm }) {
       // 비활성 계정이면 차단 (active 컬럼 없으면 undefined → 통과)
       if (me?.data && me.data.active === false) { setBlocked(true); setLoading(false); return; }
       if (me?.data && me.data.status === "대기") { setBlocked("pending"); setLoading(false); return; }
+      if (session.user.user_metadata?.must_change_pw) { setBlocked("pw"); setLoading(false); return; }
       setCenters((ct.data || []).map((c) => c.name));
       setMyCenterCodes(me?.data?.center_codes || null);
       setMe(me?.data || {});
@@ -774,6 +775,7 @@ function Shell({ session, initialConfirm }) {
 
   const partnersFull = partners.map((p) => ({ ...p, contracted: contracted[p.code] || [] }));
 
+  if (blocked === "pw") return <FirstPassword onDone={() => { setBlocked(false); setLoading(true); loadAll(); }} />;
   if (blocked) return (
     <div style={{ minHeight: "100vh", background: C.page, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "system-ui, sans-serif", padding: 16 }}>
       <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 28, maxWidth: 360, textAlign: "center" }}>
@@ -854,7 +856,7 @@ function Shell({ session, initialConfirm }) {
             {nav === "EDI" && caps.inventory && <EdiStock {...{ caps, ships, ajReqs, palletTypes, centers: centerList }} />}
             {nav === "단가" && caps.users && <PalletPricing caps={caps} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner, centers, addCenter, toggleCenter }} />}
-            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, setUserField, adminResetPassword, meId: session.user.id }} />}
+            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, setUserField, adminResetPassword, loadUsers, meId: session.user.id }} />}
             {nav === "설정" && <Settings session={session} role={role} partners={partnersFull} />}
           </>
         )}
@@ -5466,7 +5468,115 @@ function PartnerPicker({ value, partners, onChange }) {
     </div>
   );
 }
-function Users({ users, partners, centers = [], setUserRole, setUserPartner, setUserActive, setUserCenters, setUserField, adminResetPassword, meId }) {
+// 일괄 등록으로 만든 계정: 첫 로그인 때 임시 비밀번호를 바꾸게 한다
+function FirstPassword({ onDone }) {
+  const [a, setA] = useState(""); const [b, setB] = useState(""); const [busy, setBusy] = useState(false); const [msg, setMsg] = useState("");
+  const save = async () => {
+    if (a.length < 8) { setMsg("8자 이상으로 정해 주세요."); return; }
+    if (a !== b) { setMsg("두 번 입력한 비밀번호가 달라요."); return; }
+    setBusy(true);
+    const { error } = await supabase.auth.updateUser({ password: a, data: { must_change_pw: false } });
+    setBusy(false);
+    if (error) { setMsg("변경 실패: " + error.message); return; }
+    onDone();
+  };
+  const inp = { width: "100%", boxSizing: "border-box", fontSize: 14, padding: "10px 12px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 8 };
+  return (
+    <div style={{ minHeight: "100vh", background: C.page, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "system-ui, sans-serif", padding: 16 }}>
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 28, maxWidth: 360, width: "100%" }}>
+        <div style={{ fontSize: 28, marginBottom: 6, textAlign: "center" }}>🔑</div>
+        <h2 style={{ margin: "0 0 6px", fontSize: 17, textAlign: "center" }}>비밀번호를 새로 정해 주세요</h2>
+        <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 14px", textAlign: "center" }}>임시 비밀번호로 처음 로그인했어요. 본인만 아는 비밀번호로 바꾸면 바로 시작돼요.</p>
+        <input type="password" value={a} onChange={(e) => setA(e.target.value)} placeholder="새 비밀번호 (8자 이상)" style={inp} />
+        <input type="password" value={b} onChange={(e) => setB(e.target.value)} placeholder="한 번 더" style={inp} onKeyDown={(e) => e.key === "Enter" && save()} />
+        {msg && <div style={{ fontSize: 12.5, color: C.red, marginBottom: 8 }}>{msg}</div>}
+        <button disabled={busy} onClick={save} style={{ ...btnTeal, justifyContent: "center", width: "100%" }}>{busy ? "저장 중…" : "저장하고 시작"}</button>
+        <button onClick={() => supabase.auth.signOut()} style={{ ...btnGhost, width: "100%", marginTop: 8 }}>로그아웃</button>
+      </div>
+    </div>
+  );
+}
+
+// 계정 일괄 등록: 엑셀(EP아이디·이름·역할·담당센터·소속팀·휴대폰) → 미리보기 → Edge Function 'admin-bulk-users'
+const BULK_ROLE_IN = { 관리자: "관리자", 운송팀: "운송팀", 센터작업자: "센터작업자", "센터 작업자": "센터작업자", 정산담당: "정산담당", 시공팀: "협력업체", 협력업체: "협력업체", 업체: "업체", AJ: "AJ" };
+function BulkUsers({ partners = [], centers = [], onDone }) {
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState(null);
+  const template = () => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+      { "EP아이디": "hong123", 이름: "홍길동", 역할: "운송팀", 담당센터: "양지물류센터", 소속팀: "", 휴대폰: "" },
+      { "EP아이디": "kim456", 이름: "김센터", 역할: "센터작업자", 담당센터: "양지물류센터,양지2센터", 소속팀: "", 휴대폰: "" },
+      { "EP아이디": "010-1234-5678", 이름: "박시공", 역할: "시공팀", 담당센터: "", 소속팀: "김대진팀", 휴대폰: "010-1234-5678" },
+    ]), "계정");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([{ 설명: "EP아이디 → 로그인 메일 = EP아이디@fursys.com (메일 주소를 그대로 써도 됨)" }, { 설명: "역할: 관리자 / 운송팀 / 센터작업자 / 정산담당 / 시공팀 / AJ" }, { 설명: "담당센터: 쉼표로 여러 개 (운송팀·센터작업자)" }, { 설명: "소속팀: 거래처 이름 또는 코드 (시공팀)" }]), "설명");
+    XLSX.writeFile(wb, "LETUS_계정_일괄등록_양식.xlsx");
+  };
+  const onFile = async (f) => {
+    const wb = XLSX.read(await f.arrayBuffer());
+    const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
+    setRes(null);
+    setRows(data.map((d) => {
+      const empId = String(d["EP아이디"] || d["아이디"] || d["메일"] || "").trim();
+      const role = BULK_ROLE_IN[String(d["역할"] || "").trim()] || "";
+      const cs = String(d["담당센터"] || "").split(/[,，]/).map((x) => x.trim()).filter(Boolean);
+      const pt = String(d["소속팀"] || "").trim();
+      const partner = pt ? partners.find((p) => p.code === pt || p.name === pt) : null;
+      const errs = [];
+      if (!empId) errs.push("아이디 없음");
+      if (!role) errs.push("역할 확인");
+      const badC = cs.filter((c) => !centers.includes(c)); if (badC.length) errs.push("없는 센터: " + badC.join(","));
+      if (role === "센터작업자" && !cs.length) errs.push("담당센터 필요");
+      if (role === "협력업체" && !partner) errs.push(pt ? "팀(거래처) 못 찾음: " + pt : "소속팀 필요");
+      return { empId, email: empId.includes("@") ? empId : empId + "@fursys.com", name: String(d["이름"] || "").trim(), role, centers: cs, partnerCode: partner ? partner.code : "", partnerName: partner ? partner.name : pt, phone: String(d["휴대폰"] || "").trim(), errs };
+    }).filter((r) => r.empId || r.name));
+  };
+  const ok = rows.filter((r) => !r.errs.length);
+  const submit = async () => {
+    if (!window.confirm(`${ok.length}명 계정을 만들까요? (이미 있는 메일은 정보만 갱신)`)) return;
+    setBusy(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("admin-bulk-users", { body: { rows: ok.map(({ errs, partnerName, ...r }) => r) } });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      setRes(data.results || []);
+      onDone && onDone();
+    } catch (e) { alert("일괄 등록 실패: " + (e.message || e) + "\n\n(Edge Function 'admin-bulk-users' 배포 여부를 확인하세요)"); }
+    setBusy(false);
+  };
+  const downloadPw = () => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(res.map((r) => ({ 로그인메일: r.email, 이름: r.name || "", 역할: roleLabel(r.role || ""), 결과: r.ok ? (r.created ? "새로 만듦" : "정보 갱신") : "실패", 임시비밀번호: r.password || "", 오류: r.error || "" }))), "결과");
+    XLSX.writeFile(wb, "LETUS_계정_등록결과_임시비밀번호.xlsx");
+  };
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+        <b style={{ fontSize: 13 }}>계정 일괄 등록</b>
+        <button style={btnGhost} onClick={template}>양식 내려받기</button>
+        <label style={{ ...btnTealSm, display: "inline-block" }}>엑셀 올리기<input type="file" accept=".xlsx,.xls,.csv" hidden onChange={(e) => e.target.files[0] && onFile(e.target.files[0])} /></label>
+        <span style={{ fontSize: 12, color: C.hint }}>로그인 = EP아이디@fursys.com · 바로 승인 상태 · 임시 비밀번호는 첫 로그인 때 바꿔요</span>
+      </div>
+      {rows.length > 0 && !res && <>
+        <div style={{ maxHeight: 300, overflow: "auto" }}><table style={{ ...tbl, fontSize: 12 }}><thead><tr><Th>로그인 메일</Th><Th>이름</Th><Th>역할</Th><Th>담당 센터 / 소속 팀</Th><Th>확인</Th></tr></thead>
+          <tbody>{rows.map((r, i) => <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td>{r.email}</Td><Td>{r.name}</Td><Td>{roleLabel(r.role) || "?"}</Td><Td>{r.role === "협력업체" ? r.partnerName : r.centers.join(", ")}</Td><Td>{r.errs.length ? <span style={{ color: C.red }}>{r.errs.join(" · ")}</span> : <span style={{ color: C.green }}>✓</span>}</Td></tr>)}</tbody></table></div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+          <button style={btnTealSm} disabled={!ok.length || busy} onClick={submit}>{busy ? "등록 중…" : `${ok.length}명 등록`}</button>
+          {rows.length > ok.length && <span style={{ fontSize: 12, color: C.red }}>확인이 필요한 {rows.length - ok.length}명은 빼고 등록해요</span>}
+        </div>
+      </>}
+      {res && <div>
+        <div style={{ fontSize: 13, marginBottom: 6 }}>완료: 새로 만듦 {res.filter((r) => r.ok && r.created).length} · 갱신 {res.filter((r) => r.ok && !r.created).length} · 실패 <span style={{ color: C.red }}>{res.filter((r) => !r.ok).length}</span></div>
+        <button style={btnTealSm} onClick={downloadPw}>결과·임시 비밀번호 엑셀 받기</button>
+        <span style={{ fontSize: 12, color: C.amber, marginLeft: 8 }}>임시 비밀번호는 이 화면을 닫으면 다시 볼 수 없어요. 꼭 받아 두세요.</span>
+      </div>}
+    </div>
+  );
+}
+
+function Users({ users, partners, centers = [], setUserRole, setUserPartner, setUserActive, setUserCenters, setUserField, adminResetPassword, loadUsers, meId }) {
+  const [bulk, setBulk] = useState(false);
   const [q, setQ] = useState("");
   const [roleF, setRoleF] = useState("");
   const [open, setOpen] = useState(null);
@@ -5494,6 +5604,8 @@ function Users({ users, partners, centers = [], setUserRole, setUserPartner, set
         <button style={chip(!roleF)} onClick={() => setRoleF("")}>전체 {users.length}</button>
         {ROLES.map((r) => <button key={r} style={chip(roleF === r)} onClick={() => setRoleF(roleF === r ? "" : r)}>{roleLabel(r)} {count(r)}</button>)}
       </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}><button style={bulk ? btnTealSm : btnGhost} onClick={() => setBulk(!bulk)}>엑셀로 일괄 등록</button></div>
+      {bulk && <BulkUsers partners={partners} centers={centers} onDone={loadUsers} />}
       <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="이름·이메일·EP 아이디·연락처로 검색…" style={{ width: "100%", maxWidth: 340, boxSizing: "border-box", fontSize: 13, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }} />
       <div style={{ display: "grid", gap: 8 }}>
         {sorted.map((u) => {
