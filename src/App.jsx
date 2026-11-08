@@ -2228,7 +2228,15 @@ function ClosingScreen({ caps = {} }) {
     if (error) { alert(error.message); return; }
     setCls((c) => ({ ...c, [u.account + "|" + u.wp_no]: grp }));
   };
-  const copyTsv = (rows) => { const t = rows.map((r) => r.join("\t")).join("\n"); navigator.clipboard.writeText(t).then(() => { setMsg("복사했어요 — 엑셀·EP에 붙여 넣으세요"); setTimeout(() => setMsg(""), 2500); }); };
+  // 표를 HTML(EP·메일에 표로 붙음)과 탭 구분 글자(엑셀) 둘 다로 복사
+  const copyTsv = async (rows) => {
+    const t = rows.map((r) => r.join("\t")).join("\n");
+    const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const cell = (v, head) => '<td style="border:1px solid #999;padding:3px 6px;' + (head ? "font-weight:bold;background:#f2f2f2;" : "") + (typeof v === "number" ? "text-align:right;" : "") + '">' + (typeof v === "number" ? v.toLocaleString() : esc(v)) + "</td>";
+    const html = '<table style="border-collapse:collapse;font-size:9pt">' + rows.map((r, k) => "<tr>" + r.map((v) => cell(v, k === 0)).join("") + "</tr>").join("") + "</table>";
+    try { await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([t], { type: "text/plain" }) })]); } catch (e) { await navigator.clipboard.writeText(t); }
+    setMsg("복사했어요 — EP·메일엔 표로, 엑셀엔 칸별로 붙어요"); setTimeout(() => setMsg(""), 2500);
+  };
   const box = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 14 };
   const inpS = { fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8, width: 150, textAlign: "right" };
   const groups = eng ? eng.CLOSING_GROUPS.concat(["제외", "이케아"]) : [];
@@ -2322,23 +2330,7 @@ function ClosingScreen({ caps = {} }) {
         !result ? <Splash text="계산 중…" /> : result.missing ? <div style={box}>③에서 ERP 금액 9개와 시디즈 재고금액을 넣으면 계산돼요.{needCls.length ? ` 분류가 필요한 작업장 ${needCls.length}곳은 청구에서 빠져 있어요.` : ""}</div> : (
           <>
             {needCls.length > 0 && <div style={{ ...box, background: C.amberBg, color: C.amber, fontSize: 13 }}>분류가 정해지지 않은 작업장 {needCls.length}곳(구내용 {nf(needCls.reduce((a, u) => a + u.use, 0))})이 청구에서 빠져 있어요. ②에서 정해 주세요.</div>}
-            <div style={box}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-                <b>{result.ymLabel} 파렛트 이용료</b><span style={{ fontSize: 12.5, color: C.sub }}>{P.from} ~ {P.to} ({P.days}일) · 2,400원/EA</span>
-                <button style={btnGhost} onClick={() => copyTsv([["구분", "", "내수 일평균", "내수 임대사용료", "해외 일평균", "해외 임대사용료"], ...tableRows.map((t) => [t.brand, t.place, t.dom, t.dom * 2400, t.exp, t.exp * 2400])])}>표 복사(업무연락용)</button>
-              </div>
-              <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 560 }}>
-                <thead><tr><Th>브랜드</Th><Th>구분</Th><Th r>내수 일평균</Th><Th r>내수 임대사용료</Th><Th r>해외 일평균</Th><Th r>해외 임대사용료</Th></tr></thead>
-                <tbody>{["퍼시스", "일룸", "시디즈"].map((b) => <Fragment key={b}>
-                  {tableRows.filter((t) => t.brand === b).map((t, i) => <tr key={b + t.place} style={{ borderTop: `1px solid ${C.border}` }}><Td b={i === 0}>{i === 0 ? b : ""}</Td><Td>{t.place}</Td><Td r>{nf(t.dom)}</Td><Td r>{nf(t.dom * 2400)}</Td><Td r>{nf(t.exp)}</Td><Td r>{nf(t.exp * 2400)}</Td></tr>)}
-                  <tr style={{ background: "#f7f9f8" }}><Td /><Td b>소계</Td><Td r b>{nf(R.bills[b].domQty)}</Td><Td r b>{nf(R.bills[b].domQty * 2400)}</Td><Td r b>{nf(R.bills[b].expQty)}</Td><Td r b>{nf(R.bills[b].expQty * 2400)}</Td></tr>
-                </Fragment>)}
-                  <tr style={{ borderTop: `2px solid ${C.border}` }}><Td b>11A</Td><Td>일룸 / 시디즈 (13,200원)</Td><Td r>{R.a11.일룸} / {R.a11.시디즈}</Td><Td r>{nf((R.a11.일룸 + R.a11.시디즈) * 13200)}</Td><Td /><Td /></tr>
-                  <tr><Td b>15A</Td><Td>시디즈 쿠팡 (13,200원)</Td><Td r>{R.q15A}</Td><Td r>{nf(R.q15A * 13200)}</Td><Td /><Td /></tr>
-                  <tr><Td b>23E</Td><Td>일룸 매트리스 (7,000원)</Td><Td r>{R.q23E}</Td><Td r>{nf(R.q23E * 7000)}</Td><Td /><Td /></tr>
-                </tbody>
-              </table></div>
-            </div>
+            <UsageReport R={R} P={P} ymLabel={result.ymLabel} setMsg={setMsg} />
             <VoucherBox title="임대료 전표 (브랜드 청구)" lines={result.rent} copyTsv={copyTsv} />
             {result.lease ? <VoucherBox title="임차료 전표 (AJ)" lines={result.lease.lines} copyTsv={copyTsv} /> : <div style={box}>③에 AJ 세금계산서 금액을 넣으면 임차료 전표가 나와요.</div>}
             <div style={box}>
@@ -2357,6 +2349,58 @@ function ClosingScreen({ caps = {} }) {
   );
 }
 const LOCAL_HINT = (g) => (["강원", "대전", "대구", "부산", "울산", "전남", "창원", "광주", "전북", "제주"].includes(g) ? ` — ${g}센터(시공팀 포함, 지방 매출 비율)` : "");
+// 업무연락용 이용료 표: 엑셀 ★출력★과 같은 모양(브랜드·구분 병합, 내수/해외, 비고에 외주업체별 월평균). EP 편집기에 표 그대로 붙도록 HTML로 복사
+const USAGE_NOTE_GROUP = { "퍼시스|안성공장": ["안성공장"], "퍼시스|충주1": ["충주1"], "퍼시스|충주2": ["충주2"], "퍼시스|양지센터": ["양지"], "일룸|양지센터": ["일룸협력사"], "일룸|침대사업부": ["침대사업부"], "시디즈|평택공장·안성공장": ["시디즈기타"] };
+const PLACE_LABEL = { 충주1: "충주1공장", 충주2: "충주2공장" };
+function usageNotes(R, brand, place) {
+  const gs = USAGE_NOTE_GROUP[brand + "|" + place]; if (!gs) return [];
+  // 시공팀(…팀)·센터·사업장 자체는 빼고 외주업체만, 엑셀처럼 이름과 월평균
+  return R.lines.filter((l) => gs.includes(l.group) && !/팀$|센터|사업장$|창고$|^AJ |^CJ/.test(l.name)).map((l) => [l.name, l.avg]);
+}
+function buildUsageHtml(R, P, ymLabel) {
+  const td = (v, o = {}) => `<td style="border:1px solid #999;padding:3px 6px;font-size:9pt;${o.r ? "text-align:right;" : o.c ? "text-align:center;" : ""}${o.b ? "font-weight:bold;" : ""}${o.bg ? "background:#f2f2f2;" : ""}"${o.rs ? ` rowspan="${o.rs}"` : ""}${o.cs ? ` colspan="${o.cs}"` : ""}>${v}</td>`;
+  const n = (x) => (x || 0).toLocaleString();
+  const noteHtml = (pairs) => !pairs.length ? "" : `<table style="border-collapse:collapse;width:100%"><tr><td colspan="4" style="font-size:8.5pt;padding:1px 4px">외주업체 포함</td></tr>${Array.from({ length: Math.ceil(pairs.length / 2) }, (_, i) => `<tr>${[pairs[i * 2], pairs[i * 2 + 1]].map((p) => p ? `<td style="border:1px solid #ccc;font-size:8.5pt;padding:1px 4px">${p[0]}</td><td style="border:1px solid #ccc;font-size:8.5pt;padding:1px 4px;text-align:right">${p[1]}</td>` : '<td style="border:1px solid #ccc"></td><td style="border:1px solid #ccc"></td>').join("")}</tr>`).join("")}</table>`;
+  let h = `<table style="border-collapse:collapse;font-family:'맑은 고딕',sans-serif"><tr><td colspan="6" style="font-size:9pt;padding:3px 0">${P.from.replace(/-/g, ".")} ~ ${P.to.replace(/-/g, ".")} (${P.days}일)</td><td style="font-size:9pt;text-align:right">(금액: 2,400원/EA)</td></tr>`;
+  h += `<tr>${td("구분", { c: 1, b: 1, bg: 1, cs: 2, rs: 2 })}${td("내수", { c: 1, b: 1, bg: 1, cs: 2 })}${td("해외", { c: 1, b: 1, bg: 1, cs: 2 })}${td("비고<br>(각 센터별 시공팀 포함)", { c: 1, b: 1, bg: 1, rs: 2 })}</tr>`;
+  h += `<tr>${["일평균<br>사용량(EA)", "임대<br>사용료(원)", "일평균<br>사용량(EA)", "임대<br>사용료(원)"].map((x) => td(x, { c: 1, b: 1, bg: 1 })).join("")}</tr>`;
+  let tot = { d: 0, e: 0 };
+  for (const b of ["퍼시스", "일룸", "시디즈"]) {
+    const rows = R.table.filter((t) => t.brand === b);
+    rows.forEach((t, i) => {
+      h += `<tr>${i === 0 ? td(b, { c: 1, b: 1, rs: rows.length + 1 }) : ""}${td(PLACE_LABEL[t.place] || t.place)}${td(n(t.dom), { r: 1 })}${td(n(t.dom * 2400), { r: 1 })}${td(n(t.exp), { r: 1 })}${td(n(t.exp * 2400), { r: 1 })}${td(noteHtml(usageNotes(R, b, t.place)))}</tr>`;
+    });
+    const d = R.bills[b].domQty, e = R.bills[b].expQty; tot.d += d; tot.e += e;
+    h += `<tr>${td("소계", { b: 1, bg: 1 })}${td(n(d), { r: 1, b: 1, bg: 1 })}${td(n(d * 2400), { r: 1, b: 1, bg: 1 })}${td(n(e), { r: 1, b: 1, bg: 1 })}${td(n(e * 2400), { r: 1, b: 1, bg: 1 })}${td("", { bg: 1 })}</tr>`;
+  }
+  h += `<tr>${td("합계", { b: 1, cs: 2, c: 1 })}${td(n(tot.d), { r: 1, b: 1 })}${td(n(tot.d * 2400), { r: 1, b: 1 })}${td(n(tot.e), { r: 1, b: 1 })}${td(n(tot.e * 2400), { r: 1, b: 1 })}${td("")}</tr>`;
+  h += `<tr>${td("수량 총계", { b: 1, cs: 2, c: 1 })}${td(n(tot.d + tot.e), { c: 1, b: 1, cs: 4 })}${td("")}</tr><tr>${td("금액 총계", { b: 1, cs: 2, c: 1 })}${td(n((tot.d + tot.e) * 2400), { c: 1, b: 1, cs: 4 })}${td("")}</tr></table><br>`;
+  // 11A·15A (13,200원) / 23E (7,000원)
+  h += `<table style="border-collapse:collapse;font-family:'맑은 고딕',sans-serif"><tr><td colspan="5" style="font-size:9pt;text-align:right">(금액: 13,200원/EA)</td></tr><tr>${td("구분", { c: 1, b: 1, bg: 1, cs: 2 })}${td("일평균<br>사용량(EA)", { c: 1, b: 1, bg: 1 })}${td("임대<br>사용료(원)", { c: 1, b: 1, bg: 1 })}${td("비고", { c: 1, b: 1, bg: 1 })}</tr>`;
+  h += `<tr>${td("11A", { c: 1, b: 1, rs: 2 })}${td("일룸")}${td(n(R.a11.일룸), { r: 1 })}${td(n(R.a11.일룸 * 13200), { r: 1 })}${td("일룸 온라인", {})}</tr><tr>${td("시디즈")}${td(n(R.a11.시디즈), { r: 1 })}${td(n(R.a11.시디즈 * 13200), { r: 1 })}${td("시디즈 온라인")}</tr>`;
+  h += `<tr>${td("15A", { c: 1, b: 1 })}${td("시디즈 쿠팡")}${td(n(R.q15A), { r: 1 })}${td(n(R.q15A * 13200), { r: 1 })}${td("시디즈 온라인")}</tr></table><br>`;
+  h += `<table style="border-collapse:collapse;font-family:'맑은 고딕',sans-serif"><tr><td colspan="5" style="font-size:9pt;text-align:right">(금액: 7,000원/EA)</td></tr><tr>${td("구분", { c: 1, b: 1, bg: 1, cs: 2 })}${td("일평균<br>사용량(EA)", { c: 1, b: 1, bg: 1 })}${td("임대<br>사용료(원)", { c: 1, b: 1, bg: 1 })}${td("비고", { c: 1, b: 1, bg: 1 })}</tr><tr>${td("23E", { c: 1, b: 1 })}${td("일룸 메트리스생산팀")}${td(n(R.q23E), { r: 1 })}${td(n(R.q23E * 7000), { r: 1 })}${td(`${ymLabel} 파렛트 임대료(일룸_내수)에 포함 청구`)}</tr></table>`;
+  return h;
+}
+function UsageReport({ R, P, ymLabel, setMsg }) {
+  const html = useMemo(() => buildUsageHtml(R, P, ymLabel), [R, P, ymLabel]);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([html.replace(/<[^>]+>/g, " ")], { type: "text/plain" }) })]);
+      setMsg("표를 복사했어요 — EP 업무연락 본문에 붙여 넣으면 표 그대로 들어가요"); setTimeout(() => setMsg(""), 3000);
+    } catch (e) { alert("복사가 막혔어요: " + e.message); }
+  };
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        <b>{ymLabel} 파렛트 이용료 (업무연락 본문)</b>
+        <button style={btnTealSm} onClick={copy}>표 복사 → EP에 붙여넣기</button>
+        <span style={{ fontSize: 12, color: C.hint }}>엑셀 업무연락과 같은 모양 · 비고에 외주업체별 일평균 사용량</span>
+      </div>
+      <div style={{ overflowX: "auto", background: "#fff", padding: 8, border: `1px solid ${C.border}`, borderRadius: 8 }} dangerouslySetInnerHTML={{ __html: html }} />
+    </div>
+  );
+}
 function VoucherBox({ title, lines, copyTsv }) {
   const d = lines.reduce((a, x) => a + x.debit, 0), c = lines.reduce((a, x) => a + x.credit, 0);
   const pr = (x) => (x.partner ? `${x.partner.code} / ${x.partner.name} / ${x.partner.biz}` : x.cc || "");
