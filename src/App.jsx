@@ -113,28 +113,69 @@ const fromOf = (s) => isMove(s) ? (s.center || "—") : isReturn(s) ? s.to_partn
 const toOf = (s) => isMove(s) ? (s.to_center || "—") : isReturn(s) ? (s.center || "렌탈사") : s.to_partner_name;
 
 // ─── 역할 & 권한 ─────────────────────────────────────────────
-const ROLES = ["관리자", "운송팀", "정산담당", "협력업체", "AJ"];
-const NAV_BY_ROLE = {
-  관리자: ["오늘", "출고", "확인", "재고", "지도", "AJ", "EDI", "마감", "현황", "마스터", "단가", "사용자", "설정"],
-  운송팀: ["오늘", "출고", "확인", "재고", "지도", "AJ", "EDI", "현황", "마스터", "설정"],
-  정산담당: ["오늘", "재고", "지도", "EDI", "마감", "현황", "마스터", "설정"],
-  협력업체: ["확인", "출고", "설정"],   // 시공팀: 우리 현장으로 온 것 확인, 우리 현장에서 보내는 것 등록
-  AJ: ["AJ", "설정"],   // AJ네트웍스 직원: 요청 처리 + 내 설정
+// DB 역할 값. '협력업체'는 화면에서 '시공팀'으로 보여준다(DB·권한 정책 호환 때문에 값은 유지)
+const ROLES = ["관리자", "운송팀", "센터작업자", "정산담당", "협력업체", "업체", "AJ"];
+const ROLE_LABEL = { 협력업체: "시공팀", 센터작업자: "센터 작업자", 업체: "업체(준비중)" };
+const roleLabel = (r) => ROLE_LABEL[r] || r;
+const ROLE_DESC = {
+  관리자: "모든 화면·권한, 사용자 관리",
+  운송팀: "사무실: 출고·입고·AJ 요청·EDI·거래처",
+  센터작업자: "현장: 배정 센터의 출고 등록·입고 확인·재고",
+  정산담당: "재고·EDI·월마감·단가",
+  협력업체: "내 팀으로 온 파렛트 확인, 반납 등록",
+  업체: "향후: 내 작업장 재고·흐름표·입고 확인",
+  AJ: "AJ네트웍스 직원: 공급·회수 요청 처리",
 };
-// 역할별 능력치 (화면 가리기 + 버튼 잠금에 사용 / DB는 RLS가 별도로 막음)
-const capsOf = (role) => ({
-  outbound: ["관리자", "운송팀"].includes(role),   // 출고 등록(방향 선택 가능)
-  operate: ["관리자", "운송팀"].includes(role),     // 회수·반납 등 내부 조치
-  confirmOwn: role === "협력업체",                   // 본인 건 입고확인만
-  returnReg: role === "협력업체",                    // 반납 출고 등록(거래처→우리)
-  master: ["관리자", "운송팀"].includes(role),       // 거래처 등록·엑셀
-  priceEdit: ["관리자", "정산담당"].includes(role),  // 단가 편집
-  billing: ["관리자", "정산담당"].includes(role),    // 정산 확정
-  aj: ["관리자", "운송팀"].includes(role),           // AJ 요청 생성·관리(우리쪽)
-  ajWorker: role === "AJ",                            // AJ네트웍스 직원: 요청 완료 처리
-  inventory: ["관리자", "운송팀", "정산담당"].includes(role), // 재고 현황 조회
-  users: role === "관리자",                          // 사용자 관리
-});
+// 계정별로 켜고 끄는 권한(업무 단위). DB의 role_perm_default / my_perm 과 같은 기본값
+const PERMS = [
+  ["outbound", "출고 등록"], ["receive", "입고 확인"], ["ajRequest", "AJ 공급·회수 요청"], ["inventory", "재고·지도 조회"],
+  ["edi", "EDI 재고·반영"], ["master", "거래처 관리"], ["closing", "월마감"], ["price", "파렛트·단가"],
+];
+const PERM_DEFAULT = {
+  관리자: PERMS.map(([k]) => k),
+  운송팀: ["outbound", "receive", "ajRequest", "inventory", "edi", "master"],
+  센터작업자: ["outbound", "receive", "inventory"],
+  정산담당: ["inventory", "edi", "closing", "price"],
+};
+const PERM_EDITABLE = ["운송팀", "센터작업자", "정산담당"]; // 관리자는 잠금 방지로 항상 전체, 시공팀·AJ는 역할로 고정
+const permOf = (role, perms, k) => role === "관리자" ? true : perms && perms[k] !== undefined && perms[k] !== null ? !!perms[k] : (PERM_DEFAULT[role] || []).includes(k);
+// 메뉴: 역할 기본 + 권한으로 더하고 뺀다
+const navOf = (role, perms) => {
+  if (role === "협력업체" || role === "업체") return ["확인", "출고", "설정"];
+  if (role === "AJ") return ["AJ", "설정"];
+  const p = (k) => permOf(role, perms, k);
+  const out = ["오늘"];
+  if (p("outbound")) out.push("출고");
+  if (p("receive")) out.push("확인");
+  if (p("inventory")) out.push("재고", "지도");
+  if (p("closing")) out.push("마감");
+  if (p("ajRequest")) out.push("AJ");
+  if (p("edi")) out.push("EDI");
+  if (p("inventory") || p("outbound")) out.push("현황");
+  if (p("master")) out.push("마스터");
+  if (p("price")) out.push("단가");
+  if (role === "관리자") out.push("사용자");
+  out.push("설정");
+  return out;
+};
+// 능력치 (화면 가리기 + 버튼 잠금에 사용 / DB는 RLS가 같은 기준으로 막음)
+const capsOf = (role, perms) => {
+  const p = (k) => permOf(role, perms, k);
+  return {
+    outbound: p("outbound"),                        // 출고 등록(방향 선택 가능)
+    operate: p("outbound") || p("receive"),          // 회수·반납 등 내부 조치
+    confirmOwn: role === "협력업체" || role === "업체", // 본인 건 입고확인만
+    returnReg: role === "협력업체",                  // 반납 출고 등록(거래처→우리)
+    master: p("master"),                             // 거래처 등록·엑셀
+    priceEdit: p("price"),                           // 단가 편집
+    billing: p("closing"),                           // 정산 확정
+    aj: p("ajRequest"),                              // AJ 요청 생성·관리(우리쪽)
+    ajWorker: role === "AJ",                         // AJ네트웍스 직원: 요청 완료 처리
+    inventory: p("inventory"),                       // 재고 현황 조회
+    edi: p("edi"),
+    users: role === "관리자",                        // 사용자 관리
+  };
+};
 
 // ─── 인증 화면 ───────────────────────────────────────────────
 function Auth() {
@@ -315,12 +356,13 @@ function Shell({ session, initialConfirm }) {
         supabase.from("partner_pallet").select("*"),
         supabase.from("shipment").select("*").order("depart_at", { ascending: false }),
         supabase.from("user_roles").select("role").eq("user_id", session.user.id).maybeSingle(),
-        supabase.from("profiles").select("active, center_codes, name, phone, partner_code").eq("id", session.user.id).maybeSingle(),
+        supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle(),
         supabase.from("aj_request").select("*").order("requested_at", { ascending: false }),
         supabase.from("app_center").select("name, active").eq("active", true).order("name"),
       ]);
       // 비활성 계정이면 차단 (active 컬럼 없으면 undefined → 통과)
       if (me?.data && me.data.active === false) { setBlocked(true); setLoading(false); return; }
+      if (me?.data && me.data.status === "대기") { setBlocked("pending"); setLoading(false); return; }
       setCenters((ct.data || []).map((c) => c.name));
       setMyCenterCodes(me?.data?.center_codes || null);
       setMe(me?.data || {});
@@ -347,18 +389,24 @@ function Shell({ session, initialConfirm }) {
   // 사용자 관리(관리자 전용): 가입자 목록 + 역할/소속거래처/계정상태
   const loadUsers = useCallback(async () => {
     const [pf, ur] = await Promise.all([
-      supabase.from("profiles").select("id, name, email, company, partner_code, active, center_codes"),
+      supabase.from("profiles").select("*"),
       supabase.from("user_roles").select("user_id, role"),
     ]);
     const rm = {}; (ur.data || []).forEach((r) => { rm[r.user_id] = r.role; });
     setUsers((pf.data || []).map((p) => ({ ...p, active: p.active !== false, role: rm[p.id] || "협력업체" })));
   }, []);
+  // 프로필 칸 하나 바꾸기(권한·승인 상태·EP 아이디 등) — 관리자만(DB 트리거가 강제)
+  const setUserField = async (userId, patch) => {
+    const { error } = await supabase.from("profiles").update(patch).eq("id", userId);
+    if (error) { alert("저장 실패: " + error.message + (/column/.test(error.message) ? " — letus_perm.sql 실행 필요" : "")); return; }
+    await loadUsers();
+  };
 
   const setUserRole = async (userId, newRole) => {
     try {
       const { error } = await supabase.from("user_roles").upsert({ user_id: userId, role: newRole }, { onConflict: "user_id" });
       if (error) throw error;
-      if (newRole !== "협력업체") await supabase.from("profiles").update({ partner_code: null }).eq("id", userId);
+      if (!["협력업체", "업체"].includes(newRole)) await supabase.from("profiles").update({ partner_code: null, perms: {} }).eq("id", userId); else await supabase.from("profiles").update({ perms: {} }).eq("id", userId);
       await loadUsers();
     } catch (e) { alert("역할 변경 실패: " + (e.message || e)); }
   };
@@ -710,12 +758,12 @@ function Shell({ session, initialConfirm }) {
     { key: "마스터", label: "거래처" }, { key: "단가", label: "파렛트·단가" },
     { key: "사용자", label: "사용자 관리" }, { key: "설정", label: "내 설정" },
   ];
-  const allowed = NAV_BY_ROLE[role] || ["현황"];
+  const allowed = role ? navOf(role, me.perms) : ["설정"];
   const items = ALL_ITEMS.filter((it) => allowed.includes(it.key));
-  const caps = capsOf(role);
+  const caps = capsOf(role, me.perms);
   // 센터 목록(없으면 기본 3개) / 내가 출고·이동 가능한 센터(관리자=전체, 미배정=전체)
   const centerList = centers.length ? centers : CENTERS;
-  const myCenters = role === "관리자" ? centerList : (myCenterCodes && myCenterCodes.length ? centerList.filter((c) => myCenterCodes.includes(c)) : centerList);
+  const myCenters = role === "관리자" ? centerList : (myCenterCodes && myCenterCodes.length ? centerList.filter((c) => myCenterCodes.includes(c)) : role === "센터작업자" ? [] : centerList);
 
   // 현재 메뉴가 권한 밖이면 첫 허용 메뉴로 되돌림
   useEffect(() => {
@@ -729,9 +777,9 @@ function Shell({ session, initialConfirm }) {
   if (blocked) return (
     <div style={{ minHeight: "100vh", background: C.page, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "system-ui, sans-serif", padding: 16 }}>
       <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 28, maxWidth: 360, textAlign: "center" }}>
-        <div style={{ fontSize: 30, marginBottom: 8 }}>🔒</div>
-        <h2 style={{ margin: "0 0 8px", fontSize: 17 }}>비활성화된 계정입니다</h2>
-        <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 18px" }}>이 계정은 관리자에 의해 접근이 차단되었어요. 사용이 필요하면 관리자에게 문의하세요.</p>
+        <div style={{ fontSize: 30, marginBottom: 8 }}>{blocked === "pending" ? "⏳" : "🔒"}</div>
+        <h2 style={{ margin: "0 0 8px", fontSize: 17 }}>{blocked === "pending" ? "승인 대기 중이에요" : "비활성화된 계정입니다"}</h2>
+        <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 18px" }}>{blocked === "pending" ? "가입이 접수됐어요. 관리자가 역할과 소속(센터·팀)을 정해 승인하면 바로 쓸 수 있어요." : "이 계정은 관리자에 의해 접근이 차단되었어요. 사용이 필요하면 관리자에게 문의하세요."}</p>
         <button onClick={() => supabase.auth.signOut()} style={{ ...btnTeal, justifyContent: "center", width: "100%" }}>로그아웃</button>
       </div>
     </div>
@@ -753,7 +801,7 @@ function Shell({ session, initialConfirm }) {
         <div style={{ marginTop: 18, padding: "0 8px" }}>
           <button onClick={() => setNav("설정")} style={{ display: "block", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: 8 }}>
             <div style={{ color: "#6b7494", fontSize: 11 }}>{session.user.email}</div>
-            <div style={{ color: C.teal, fontSize: 11 }}>{role} · 내 설정 ›</div>
+            <div style={{ color: C.teal, fontSize: 11 }}>{roleLabel(role)} · 내 설정 ›</div>
           </button>
           <button onClick={() => supabase.auth.signOut()} style={{ fontSize: 11, color: C.side, background: "transparent", border: "1px solid #3a4258", borderRadius: 6, padding: "5px 9px", cursor: "pointer" }}>로그아웃</button>
         </div>
@@ -806,7 +854,7 @@ function Shell({ session, initialConfirm }) {
             {nav === "EDI" && caps.inventory && <EdiStock {...{ caps, ships, ajReqs, palletTypes, centers: centerList }} />}
             {nav === "단가" && caps.users && <PalletPricing caps={caps} />}
             {nav === "마스터" && <Master {...{ palletTypes, prices, partners: partnersFull, addPartner, bulkAddPartners, caps, setPrice, ships, ajReqs, deletePartner, centers, addCenter, toggleCenter }} />}
-            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId: session.user.id }} />}
+            {nav === "사용자" && caps.users && <Users {...{ users, partners: partnersFull, centers: centerList, setUserRole, setUserPartner, setUserActive, setUserCenters, setUserField, adminResetPassword, meId: session.user.id }} />}
             {nav === "설정" && <Settings session={session} role={role} partners={partnersFull} />}
           </>
         )}
@@ -5303,7 +5351,7 @@ function Master({ palletTypes, prices, partners, addPartner, bulkAddPartners, ca
 const ROLE_BADGE = {
   관리자: { bg: C.redBg, fg: C.red }, 운송팀: { bg: C.tealBg, fg: C.tealDk },
   정산담당: { bg: C.blueBg, fg: C.blue }, 협력업체: { bg: "#eef0f3", fg: C.sub },
-  AJ: { bg: C.amberBg, fg: C.amber },
+  AJ: { bg: C.amberBg, fg: C.amber }, 센터작업자: { bg: "#e7f0ff", fg: "#2f5fb3" }, 업체: { bg: "#f3ecfb", fg: "#6b3fa0" },
 };
 
 // 내 설정 — 계정 정보 + 비밀번호 변경
@@ -5418,73 +5466,116 @@ function PartnerPicker({ value, partners, onChange }) {
     </div>
   );
 }
-function Users({ users, partners, centers = [], setUserRole, setUserPartner, setUserActive, setUserCenters, adminResetPassword, meId }) {
+function Users({ users, partners, centers = [], setUserRole, setUserPartner, setUserActive, setUserCenters, setUserField, adminResetPassword, meId }) {
   const [q, setQ] = useState("");
-  const isPending = (u) => u.role === "협력업체" && !u.partner_code && u.active;
-  const pendingCount = users.filter(isPending).length;
-  const list = users.filter((u) => !q || (u.name || "").includes(q) || (u.email || "").includes(q) || (u.company || "").includes(q) || (u.role || "").includes(q));
-  // 승인 대기(미지정 협력업체)를 맨 위로 정렬
-  const sorted = [...list].sort((a, b) => (isPending(b) ? 1 : 0) - (isPending(a) ? 1 : 0));
+  const [roleF, setRoleF] = useState("");
+  const [open, setOpen] = useState(null);
+  const isPending = (u) => u.status === "대기" || (u.role === "협력업체" && !u.partner_code && u.active && u.status !== "승인");
+  const pending = users.filter(isPending);
+  const list = users.filter((u) => (!roleF || (roleF === "대기" ? isPending(u) : u.role === roleF)) && (!q || [u.name, u.email, u.company, u.emp_id, u.phone, roleLabel(u.role)].some((x) => (x || "").includes(q))));
+  const sorted = [...list].sort((a, b) => (isPending(b) ? 1 : 0) - (isPending(a) ? 1 : 0) || ROLES.indexOf(a.role) - ROLES.indexOf(b.role) || (a.name || "").localeCompare(b.name || ""));
+  const count = (r) => users.filter((u) => u.role === r).length;
+  const chip = (on) => ({ fontSize: 11.5, padding: "4px 10px", borderRadius: 14, cursor: "pointer", border: on ? "none" : `1px solid ${C.border}`, background: on ? C.teal : "#fff", color: on ? "#fff" : C.sub });
+  const approve = async (u) => {
+    if (u.role === "협력업체" && !u.partner_code) { alert("시공팀은 소속 팀(거래처)을 먼저 정해 주세요."); setOpen(u.id); return; }
+    if (u.role === "센터작업자" && !(u.center_codes || []).length) { alert("센터 작업자는 담당 센터를 먼저 정해 주세요."); setOpen(u.id); return; }
+    await setUserField(u.id, { status: "승인", active: true });
+  };
   return (
     <>
-      <Head title="사용자 관리" sub="가입자별 역할·소속 거래처·계정 상태를 관리해요 · 관리자 전용" />
-      {pendingCount > 0 && (
-        <div style={{ background: C.amberBg, color: C.amber, fontSize: 13, padding: "9px 14px", borderRadius: 8, marginBottom: 14 }}>
-          ⚠ 소속 거래처 미지정 협력업체 <b>{pendingCount}명</b> — 거래처를 연결해야 데이터를 볼 수 있어요(승인 대기).
+      <Head title="사용자 관리" sub="역할로 기본 권한을 정하고, 사람마다 권한을 켜고 끌 수 있어요 · DB(RLS)도 같은 기준으로 막아요" />
+      {pending.length > 0 && (
+        <div style={{ background: C.amberBg, color: C.amber, fontSize: 13, padding: "9px 14px", borderRadius: 8, marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          ⏳ 승인 대기 <b>{pending.length}명</b> — 역할·소속을 정하고 승인하면 바로 쓸 수 있어요.
+          <button style={chip(roleF === "대기")} onClick={() => setRoleF(roleF === "대기" ? "" : "대기")}>대기만 보기</button>
         </div>
       )}
-      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="이름·이메일·회사·역할로 검색…" style={{ width: "100%", maxWidth: 340, boxSizing: "border-box", fontSize: 13, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 14 }} />
-      <div style={{ overflowX: "auto" }}>
-        <table style={tbl}>
-          <thead><tr><Th>사용자</Th><Th>역할</Th><Th>담당 센터 / 소속 거래처</Th><Th>계정</Th></tr></thead>
-          <tbody>
-            {sorted.map((u) => {
-              const me = u.id === meId; const rb = ROLE_BADGE[u.role] || ROLE_BADGE.협력업체; const pending = isPending(u);
-              return (
-                <tr key={u.id} style={{ borderTop: `1px solid ${C.border}`, background: pending ? C.amberBg + "55" : u.active ? "transparent" : "#fafafa", opacity: u.active ? 1 : 0.6 }}>
-                  <Td>
-                    <div style={{ fontWeight: 600, fontSize: 12 }}>{u.company || u.name || "(이름없음)"} {me && <span style={{ fontSize: 10, color: C.teal }}>(나)</span>}</div>
-                    <div style={{ fontSize: 11, color: C.hint }}>{u.email || u.id.slice(0, 8)}</div>
-                  </Td>
-                  <Td>
-                    <select value={u.role} disabled={me} onChange={(e) => setUserRole(u.id, e.target.value)}
-                      style={{ fontSize: 12, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, background: me ? C.page : `${rb.bg}`, color: rb.fg }}>
-                      {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-                    </select>
-                    {me && <div style={{ fontSize: 10, color: C.hint, marginTop: 2 }}>본인 변경 불가</div>}
-                  </Td>
-                  <Td>
-                    {u.role === "협력업체" ? (
-                      <PartnerPicker value={u.partner_code || ""} partners={partners} onChange={(code) => setUserPartner(u.id, code)} />
-                    ) : u.role === "관리자" ? (
-                      <span style={{ fontSize: 12, color: C.hint }}>전체 센터</span>
-                    ) : u.role === "운송팀" ? (
-                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", maxWidth: 260 }}>
-                        {centers.map((c) => { const on = (u.center_codes || []).includes(c); return (
-                          <button key={c} onClick={() => setUserCenters(u.id, on ? (u.center_codes || []).filter((x) => x !== c) : [...(u.center_codes || []), c])} style={{ fontSize: 11, padding: "3px 9px", borderRadius: 14, cursor: "pointer", border: on ? "none" : `1px solid ${C.border}`, background: on ? C.teal : "#fff", color: on ? "#fff" : C.sub }}>{c}</button>
-                        ); })}
-                        {(!u.center_codes || u.center_codes.length === 0) && <span style={{ fontSize: 10, color: C.hint, alignSelf: "center" }}>미배정=전체</span>}
-                      </div>
-                    ) : <span style={{ fontSize: 12, color: C.hint }}>—</span>}
-                  </Td>
-                  <Td>
-                    {me ? <span style={{ fontSize: 11, color: C.hint }}>—</span> : (
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        <button onClick={() => setUserActive(u.id, !u.active)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${u.active ? C.border : C.red}`, background: u.active ? "#fff" : C.redBg, color: u.active ? C.sub : C.red }}>
-                          {u.active ? "활성 · 비활성화" : "비활성 · 활성화"}
-                        </button>
-                        <button onClick={() => adminResetPassword(u)} style={{ fontSize: 11, padding: "4px 10px", borderRadius: 7, cursor: "pointer", border: `1px solid ${C.border}`, background: "#fff", color: C.sub }}>비번 초기화</button>
-                      </div>
-                    )}
-                  </Td>
-                </tr>
-              );
-            })}
-            {sorted.length === 0 && <tr><td colSpan={4} style={{ padding: "20px 6px", fontSize: 12, color: C.hint, textAlign: "center" }}>가입한 사용자가 없어요.</td></tr>}
-          </tbody>
-        </table>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        <button style={chip(!roleF)} onClick={() => setRoleF("")}>전체 {users.length}</button>
+        {ROLES.map((r) => <button key={r} style={chip(roleF === r)} onClick={() => setRoleF(roleF === r ? "" : r)}>{roleLabel(r)} {count(r)}</button>)}
       </div>
-      <Note>협력업체는 <b>소속 거래처를 지정해야</b> 그 거래처로 온 출고 건만 보여요(미지정=차단). <b>비활성화</b>한 계정은 로그인해도 접근이 막혀요. 모든 권한은 DB(RLS)에서도 강제됩니다.</Note>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="이름·이메일·EP 아이디·연락처로 검색…" style={{ width: "100%", maxWidth: 340, boxSizing: "border-box", fontSize: 13, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 8, marginBottom: 12 }} />
+      <div style={{ display: "grid", gap: 8 }}>
+        {sorted.map((u) => {
+          const me = u.id === meId; const rb = ROLE_BADGE[u.role] || ROLE_BADGE.협력업체; const pend = isPending(u); const isOpen = open === u.id;
+          const perms = u.perms || {};
+          const custom = PERM_EDITABLE.includes(u.role) ? PERMS.filter(([k]) => perms[k] !== undefined && perms[k] !== null && !!perms[k] !== (PERM_DEFAULT[u.role] || []).includes(k)).length : 0;
+          const partner = partners.find((p) => p.code === u.partner_code);
+          return (
+            <div key={u.id} style={{ background: pend ? C.amberBg + "66" : C.card, border: `1px solid ${pend ? C.amber : C.border}`, borderRadius: 10, opacity: u.active ? 1 : 0.55 }}>
+              <div onClick={() => setOpen(isOpen ? null : u.id)} style={{ display: "flex", gap: 10, alignItems: "center", padding: "10px 12px", cursor: "pointer", flexWrap: "wrap" }}>
+                <span style={{ fontSize: 11.5, padding: "3px 9px", borderRadius: 10, background: rb.bg, color: rb.fg, fontWeight: 600, minWidth: 64, textAlign: "center" }}>{roleLabel(u.role)}</span>
+                <div style={{ minWidth: 160, flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{u.name || u.company || "(이름없음)"} {me && <span style={{ fontSize: 10.5, color: C.teal }}>(나)</span>}</div>
+                  <div style={{ fontSize: 11.5, color: C.hint }}>{[u.emp_id && "EP " + u.emp_id, u.email, u.phone].filter(Boolean).join(" · ") || u.id.slice(0, 8)}</div>
+                </div>
+                <span style={{ fontSize: 12, color: C.sub }}>{u.role === "협력업체" || u.role === "업체" ? (partner ? partner.name : <span style={{ color: C.amber }}>소속 미지정</span>) : u.role === "관리자" ? "전체 센터" : (u.center_codes || []).length ? u.center_codes.join(", ") : u.role === "센터작업자" ? <span style={{ color: C.amber }}>센터 미배정</span> : "전체 센터"}</span>
+                {custom > 0 && <span style={{ fontSize: 11, color: C.blue, background: C.blueBg, padding: "2px 8px", borderRadius: 10 }}>권한 개별 {custom}</span>}
+                {pend ? <button style={{ ...btnTealSm }} onClick={(e) => { e.stopPropagation(); approve(u); }}>승인</button> : !u.active ? <span style={{ fontSize: 11.5, color: C.red }}>비활성</span> : null}
+                <span style={{ color: C.hint }}>{isOpen ? "▾" : "▸"}</span>
+              </div>
+              {isOpen && (
+                <div style={{ borderTop: `1px solid ${C.border}`, padding: 12, display: "grid", gap: 12 }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                    <b style={{ fontSize: 12.5, width: 70 }}>역할</b>
+                    <select value={u.role} disabled={me} onChange={(e) => setUserRole(u.id, e.target.value)} style={{ fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}` }}>
+                      {ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)} — {ROLE_DESC[r]}</option>)}
+                    </select>
+                    {me && <span style={{ fontSize: 11, color: C.hint }}>본인 역할은 바꿀 수 없어요</span>}
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                    <b style={{ fontSize: 12.5, width: 70 }}>{u.role === "협력업체" ? "휴대폰" : "EP 아이디"}</b>
+                    <input defaultValue={u.emp_id || ""} onBlur={(e) => e.target.value !== (u.emp_id || "") && setUserField(u.id, { emp_id: e.target.value.trim() || null })} placeholder={u.role === "협력업체" ? "010-0000-0000" : "EP 아이디"} style={{ fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, width: 160 }} />
+                    <b style={{ fontSize: 12.5 }}>이름</b>
+                    <input defaultValue={u.name || ""} onBlur={(e) => e.target.value !== (u.name || "") && setUserField(u.id, { name: e.target.value.trim() || null })} style={{ fontSize: 12.5, padding: "5px 8px", borderRadius: 7, border: `1px solid ${C.border}`, width: 120 }} />
+                  </div>
+                  {(u.role === "협력업체" || u.role === "업체") && (
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                      <b style={{ fontSize: 12.5, width: 70 }}>{u.role === "협력업체" ? "소속 팀" : "소속 업체"}</b>
+                      <PartnerPicker value={u.partner_code || ""} partners={partners} onChange={(code) => setUserPartner(u.id, code)} />
+                      <span style={{ fontSize: 11.5, color: C.hint }}>한 팀에 여러 명을 붙일 수 있어요. 재고는 팀 기준, 처리 기록은 사람 기준</span>
+                    </div>
+                  )}
+                  {["운송팀", "센터작업자"].includes(u.role) && (
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                      <b style={{ fontSize: 12.5, width: 70 }}>담당 센터</b>
+                      {centers.map((c) => { const on = (u.center_codes || []).includes(c); return <button key={c} style={chip(on)} onClick={() => setUserCenters(u.id, on ? (u.center_codes || []).filter((x) => x !== c) : [...(u.center_codes || []), c])}>{c}</button>; })}
+                      <span style={{ fontSize: 11.5, color: C.hint }}>{u.role === "센터작업자" ? "배정한 센터 건만 등록·확인할 수 있어요" : "미배정 = 전체"}</span>
+                    </div>
+                  )}
+                  {PERM_EDITABLE.includes(u.role) && (
+                    <div>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 6 }}>
+                        <b style={{ fontSize: 12.5, width: 70 }}>권한</b>
+                        <span style={{ fontSize: 11.5, color: C.hint }}>누르면 켜고 꺼요 · 파란 테두리 = 역할 기본값과 다름</span>
+                        {custom > 0 && <button style={{ ...btnGhost, padding: "3px 10px", fontSize: 11.5 }} onClick={() => setUserField(u.id, { perms: {} })}>역할 기본값으로</button>}
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", paddingLeft: 80 }}>
+                        {PERMS.map(([k, l]) => {
+                          const on = permOf(u.role, perms, k); const def = (PERM_DEFAULT[u.role] || []).includes(k);
+                          return <button key={k} onClick={() => { const n = { ...perms }; if (!on === def) delete n[k]; else n[k] = !on; setUserField(u.id, { perms: n }); }}
+                            style={{ fontSize: 12, padding: "5px 11px", borderRadius: 8, cursor: "pointer", border: on !== def ? `2px solid ${C.blue}` : `1px solid ${on ? C.teal : C.border}`, background: on ? C.tealBg || "#e6f6f2" : "#fff", color: on ? C.tealDk || C.teal : C.hint }}>{on ? "✓ " : ""}{l}</button>;
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  {u.role === "관리자" && <div style={{ fontSize: 12, color: C.hint }}>관리자는 모든 권한을 가져요(잠김 방지로 끌 수 없음).</div>}
+                  {!me && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", borderTop: `1px dashed ${C.border}`, paddingTop: 10 }}>
+                      {pend && <button style={btnTealSm} onClick={() => approve(u)}>승인</button>}
+                      {!pend && <button style={{ ...btnGhost, padding: "4px 10px", fontSize: 12 }} onClick={() => window.confirm("승인을 취소하고 대기로 돌릴까요?") && setUserField(u.id, { status: "대기" })}>대기로 돌리기</button>}
+                      <button onClick={() => setUserActive(u.id, !u.active)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 12, color: u.active ? C.sub : C.red }}>{u.active ? "비활성화(퇴사·중지)" : "다시 활성화"}</button>
+                      <button onClick={() => adminResetPassword(u)} style={{ ...btnGhost, padding: "4px 10px", fontSize: 12 }}>비밀번호 초기화</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {sorted.length === 0 && <div style={{ padding: 20, fontSize: 12.5, color: C.hint, textAlign: "center" }}>해당하는 사용자가 없어요.</div>}
+      </div>
+      <Note>새로 가입한 사람은 <b>승인 대기</b>로 들어와 아무것도 볼 수 없어요. 관리자가 역할·소속을 정해 승인해야 써요. <b>비활성화</b>하면 로그인해도 막혀요(기록은 남음). 모든 권한은 DB(RLS)에서도 같은 기준으로 강제돼요.</Note>
     </>
   );
 }
