@@ -2089,6 +2089,71 @@ const nf = (n) => (n || 0).toLocaleString();
 const ERP_KEYS = [["퍼시스", "경인"], ["퍼시스", "지방"], ["퍼시스", "수출"], ["일룸", "경인"], ["일룸", "지방"], ["일룸", "수출"], ["시디즈", "경인"], ["시디즈", "지방"], ["시디즈", "수출"]];
 const INV_KEYS = ["18F,14C", "11A", "23E", "15A", "풀필먼트23E"];
 const TP_KEYS = ["블링크프로젝트", "네오스코리아", "에이스침대중부공장"];
+const CLOSE_STEPS = [["upload", "자료 업로드"], ["qty", "수량 대조"], ["mail", "업체 메일 발송"], ["claim", "이의 접수·조정"], ["voucher", "전표 입력"], ["confirm", "마감 확정"]];
+
+// 수량 대조 상세: 작업장 하나의 EDI 일별 재고와 미확인·거부 이동으로 AJ와의 차이 원인을 나눠 본다(추정)
+function QtyDrill({ u, P, locked, onAdjust }) {
+  const [d, setD] = useState(null);
+  const [delta, setDelta] = useState(""); const [reason, setReason] = useState("");
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const items = u.account === "P156063" ? ["14C", "18F"] : u.item ? [u.item] : null;
+      let qs = supabase.from("aj_stock_daily").select("stoc_date,item,this_stoc").eq("workplace_no", u.wp_no).gte("stoc_date", P.from).lte("stoc_date", P.to).order("stoc_date").limit(3000);
+      if (items) qs = qs.in("item", items);
+      const nm = u.raw || u.name;
+      const [s, mi, mo] = await Promise.all([
+        qs,
+        supabase.from("aj_move").select("move_date,move_code,item,from_name,to_name,qty,move_type,conf").eq("to_name", nm).gte("move_date", P.from).lte("move_date", P.to).neq("conf", "승인").limit(2000),
+        supabase.from("aj_move").select("move_date,move_code,item,from_name,to_name,qty,move_type,conf").eq("from_name", nm).gte("move_date", P.from).lte("move_date", P.to).neq("conf", "승인").limit(2000),
+      ]);
+      if (!alive) return;
+      const day = {}; (s.data || []).forEach((r) => { const o = day[r.stoc_date] = day[r.stoc_date] || { date: r.stoc_date, t: 0 }; o[r.item] = (o[r.item] || 0) + r.this_stoc; o.t += r.this_stoc; });
+      const pick = (l, dir) => (l || []).filter((m) => !items || items.includes(m.item)).map((m) => ({ ...m, dir, w: Math.round((new Date(P.to) - new Date(m.move_date)) / 86400000) + 1 }));
+      setD({ days: Object.values(day), moves: [...pick(mi.data, 1), ...pick(mo.data, -1)].sort((a, b) => a.move_date.localeCompare(b.move_date)) });
+    })();
+    return () => { alive = false; };
+  }, [u.key, P.from, P.to]); // eslint-disable-line
+  if (!d) return <div style={{ padding: 12, fontSize: 12.5, color: C.sub }}>불러오는 중…</div>;
+  const negPart = u.gunae - u.pos; // 마이너스 날 합(0 이하)
+  const est = d.moves.reduce((a, m) => a + m.dir * m.qty * m.w, 0); // 미확인 이동이 EDI 구내용에 준 영향(추정)
+  const diff = u.aj !== null ? u.gunae - u.aj : null;
+  const rest = diff === null ? null : diff - negPart - est;
+  const firstNeg = d.days.find((x) => x.t < 0);
+  const Row = ({ l, v, hint, strong }) => <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "3px 0", borderBottom: `1px dashed ${C.border}`, fontSize: 12.5 }}><span>{l}{hint ? <span style={{ color: C.hint }}> · {hint}</span> : null}</span><b style={{ color: strong ? (v ? C.red : C.green) : C.text }}>{v === null ? "—" : (v > 0 ? "+" : "") + nf(v)}</b></div>;
+  return (
+    <div style={{ background: "#f7f9fb", padding: 12, display: "grid", gridTemplateColumns: "minmax(260px,1fr) minmax(300px,1.4fr)", gap: 14 }}>
+      <div>
+        <b style={{ fontSize: 13 }}>차이 원인 나눠 보기 (추정)</b>
+        <div style={{ marginTop: 6 }}>
+          <Row l="EDI − AJ 차이" v={diff} />
+          <Row l="① 마이너스 재고 날" v={negPart} hint={firstNeg ? `처음 ${firstNeg.date.slice(5)}` : "없음"} />
+          <Row l="② 미확인·거부 이동" v={est} hint={`${d.moves.length}건 × 남은 일수`} />
+          <Row l="③ 설명 안 됨" v={rest} hint="AJ 확인 필요" strong />
+          {u.adj ? <Row l="반영된 수량조정" v={u.adj} /> : null}
+        </div>
+        <div style={{ fontSize: 11.5, color: C.hint, marginTop: 6, lineHeight: 1.6 }}>①은 AJ가 마이너스를 0으로 본다고 가정한 값이에요. ②는 아직 승인되지 않은 이동을 AJ가 반영하지 않았다고 가정해, 수량 × 이동일부터 마감일까지 일수로 계산했어요.</div>
+        {!locked && onAdjust && (
+          <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <b style={{ fontSize: 12.5 }}>수량조정</b>
+            <input value={delta} onChange={(e) => setDelta(e.target.value.replace(/[^\d-]/g, ""))} placeholder="구내용 ±" style={{ width: 90, fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6, textAlign: "right" }} />
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="사유 (업체 이의·AJ 확인 등)" style={{ flex: 1, minWidth: 140, fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
+            <button style={btnTealSm} disabled={!Number(delta) || !reason.trim()} onClick={() => { onAdjust({ account: u.account, name: u.name, delta: Number(delta), reason: reason.trim() }); setDelta(""); setReason(""); }}>추가</button>
+            <span style={{ fontSize: 11.5, color: C.hint, width: "100%" }}>구내용 단위예요(월평균 1장 = 구내용 {P.days}). EDI 원본은 바꾸지 않고 이 달 마감 계산에만 더해요.</span>
+          </div>
+        )}
+      </div>
+      <div>
+        {d.moves.length > 0 && <>
+          <b style={{ fontSize: 13 }}>승인 안 된 이동 {d.moves.length}건</b>
+          <div style={{ maxHeight: 150, overflow: "auto", margin: "6px 0 10px" }}><table style={{ ...tbl, fontSize: 12 }}><tbody>{d.moves.map((m, i) => <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td>{m.move_date.slice(5)}</Td><Td>{m.item}</Td><Td>{m.dir > 0 ? "← " + m.from_name : "→ " + m.to_name}</Td><Td r>{(m.dir > 0 ? "+" : "−") + nf(m.qty)}</Td><Td><span style={{ color: m.conf === "승인거부" ? C.red : C.amber }}>{m.conf || "미확인"}</span></Td></tr>)}</tbody></table></div>
+        </>}
+        <b style={{ fontSize: 13 }}>EDI 일별 재고</b>
+        <div style={{ maxHeight: 200, overflow: "auto", marginTop: 6 }}><table style={{ ...tbl, fontSize: 12 }}><thead><tr><Th>일자</Th><Th r>14C</Th><Th r>18F</Th><Th r>합계</Th></tr></thead><tbody>{d.days.map((x) => <tr key={x.date} style={{ borderTop: `1px solid ${C.border}` }}><Td>{x.date.slice(5)}</Td><Td r>{x["14C"] !== undefined ? nf(x["14C"]) : ""}</Td><Td r>{x["18F"] !== undefined ? nf(x["18F"]) : ""}</Td><Td r b c={x.t < 0 ? C.red : undefined}>{nf(x.t)}</Td></tr>)}</tbody></table></div>
+      </div>
+    </div>
+  );
+}
 
 function ClosingScreen({ caps = {} }) {
   const now = new Date();
@@ -2142,9 +2207,30 @@ function ClosingScreen({ caps = {} }) {
       const w = wpName[u.wp_no]; const name = w ? ediClean(w.name) : "#" + u.wp_no;
       const grp = cls[u.account + "|" + u.wp_no] || defGroup(u.account, u.item) || "";
       const aj = inp.ajGunae && inp.ajGunae[name] !== undefined && u.account === "P156063" ? Number(inp.ajGunae[name]) : null;
-      return { ...u, name, kind: w ? w.kind : "", grp, aj, use: aj !== null ? aj : u.gunae };
+      // 이의제기 수량조정(구내용 단위, ±). EDI 원본은 그대로 두고 마감 계산에만 더한다
+      const adj = (inp.adjust || []).filter((a) => a.account === u.account && a.name === name).reduce((s, a) => s + (Number(a.delta) || 0), 0);
+      return { ...u, name, raw: w ? w.name : "", kind: w ? w.kind : "", grp, aj, adj, use: (aj !== null ? aj : u.gunae) + adj };
     }).filter((u) => u.gunae || u.aj).sort((a, b) => b.use - a.use);
-  }, [gun, cls, wpName, inp.ajGunae]);
+  }, [gun, cls, wpName, inp.ajGunae, inp.adjust]);
+  const [openKey, setOpenKey] = useState(null);
+  const addAdjust = async (a) => {
+    const n = { ...(inp || {}), adjust: [...(inp.adjust || []), { ...a, at: new Date().toISOString() }] };
+    setInp(n);
+    const { error } = await supabase.from("closing_month").upsert({ ym, inputs: n, updated_at: new Date().toISOString() });
+    if (error) alert(error.message); else { setMsg("수량조정을 저장했어요"); setTimeout(() => setMsg(""), 2500); }
+  };
+  const delAdjust = async (i) => {
+    if (!window.confirm("이 수량조정을 지울까요?")) return;
+    const n = { ...(inp || {}), adjust: (inp.adjust || []).filter((_, k) => k !== i) };
+    setInp(n);
+    const { error } = await supabase.from("closing_month").upsert({ ym, inputs: n, updated_at: new Date().toISOString() });
+    if (error) alert(error.message);
+  };
+  const toggleStep = async (k) => {
+    const n = { ...(inp || {}), steps: { ...(inp.steps || {}), [k]: (inp.steps || {})[k] ? null : new Date().toISOString() } };
+    setInp(n);
+    await supabase.from("closing_month").upsert({ ym, inputs: n, updated_at: new Date().toISOString() });
+  };
   const needCls = units.filter((u) => !u.grp);
   const result = useMemo(() => {
     if (!eng || !units.length) return null;
@@ -2258,6 +2344,13 @@ function ClosingScreen({ caps = {} }) {
         <button onClick={() => setTick((t) => t + 1)} style={btnGhost}>새로고침</button>
         {msg && <span style={{ fontSize: 12.5, color: C.tealDk }}>{msg}</span>}
       </div>
+      <div style={{ ...box, padding: "10px 14px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        <b style={{ fontSize: 13, marginRight: 4 }}>진행</b>
+        {CLOSE_STEPS.map(([k, l], i) => { const on = (inp.steps || {})[k] || (k === "confirm" && locked); return (
+          <Fragment key={k}>{i > 0 && <span style={{ color: C.hint }}>›</span>}
+            <button disabled={locked || k === "confirm"} onClick={() => toggleStep(k)} title={on && on !== true ? fmtDT(on) : "누르면 완료 표시"} style={{ ...btnGhost, padding: "4px 10px", fontSize: 12.5, background: on ? C.greenBg : "#fff", color: on ? C.green : C.sub, borderColor: on ? C.green : C.border }}>{on ? "✓ " : ""}{l}</button>
+          </Fragment>); })}
+      </div>
       <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
         {tabs.map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ ...btnGhost, padding: "8px 16px", fontSize: 13.5, fontWeight: tab === k ? 600 : 400, background: tab === k ? C.teal : "#fff", color: tab === k ? "#fff" : C.text }}>{l}</button>)}
       </div>
@@ -2283,12 +2376,17 @@ function ClosingScreen({ caps = {} }) {
           <div style={{ fontSize: 13, marginBottom: 8 }}>14C·18F 구내용 EDI <b>{nf(totEdi)}</b>{inp.ajGunae ? <> · AJ <b>{nf(Object.values(inp.ajGunae).reduce((a, v) => a + v, 0))}</b> (EDI에 있는 곳 {nf(totAj)})</> : " · AJ 거래명세서를 올리면 비교해요"}</div>
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장" style={{ ...inpS, textAlign: "left", width: 160 }} /><label style={{ fontSize: 12.5 }}><input type="checkbox" checked={onlyNeed} onChange={(e) => setOnlyNeed(e.target.checked)} /> 차이 있는 곳만</label></div>
           <div style={{ overflowX: "auto", maxHeight: 520 }}><table style={{ ...tbl, minWidth: 720 }}>
-            <thead><tr><Th>작업장</Th><Th>계정</Th><Th>분류</Th><Th r>EDI 구내용</Th><Th r>마이너스=0</Th><Th r>AJ</Th><Th r>차이</Th><Th r>월평균</Th></tr></thead>
+            <thead><tr><Th>작업장</Th><Th>계정</Th><Th>분류</Th><Th r>EDI 구내용</Th><Th r>마이너스=0</Th><Th r>AJ</Th><Th r>차이</Th><Th r>조정</Th><Th r>월평균</Th></tr></thead>
             <tbody>{units.filter((u) => (!q || u.name.includes(q)) && (!onlyNeed || (u.aj !== null && u.aj !== u.gunae))).slice(0, 600).map((u) => {
               const d = u.aj !== null ? u.gunae - u.aj : null;
-              return <tr key={u.key} style={{ borderTop: `1px solid ${C.border}` }}><Td>{u.name}{u.item ? " · " + u.item : ""}</Td><Td><span style={{ fontSize: 11.5, color: C.hint }}>{CLOSE_OPS[u.account] || u.account}</span></Td><Td><span style={{ fontSize: 12, color: u.grp ? C.sub : C.red }}>{u.grp || "분류 필요"}</span></Td><Td r>{nf(u.gunae)}</Td><Td r c={C.hint}>{u.pos !== u.gunae ? nf(u.pos) : ""}</Td><Td r>{u.aj !== null ? nf(u.aj) : "—"}</Td><Td r c={d ? C.red : C.green}>{d === null ? "" : d ? (d > 0 ? "+" : "") + nf(d) : "✓"}</Td><Td r b>{nf(Math.ceil(u.use / P.days))}</Td></tr>;
+              return <Fragment key={u.key}><tr onClick={() => setOpenKey(openKey === u.key ? null : u.key)} style={{ borderTop: `1px solid ${C.border}`, cursor: "pointer", background: openKey === u.key ? "#eef6f4" : undefined }}><Td>{openKey === u.key ? "▾ " : "▸ "}{u.name}{u.item ? " · " + u.item : ""}</Td><Td><span style={{ fontSize: 11.5, color: C.hint }}>{CLOSE_OPS[u.account] || u.account}</span></Td><Td><span style={{ fontSize: 12, color: u.grp ? C.sub : C.red }}>{u.grp || "분류 필요"}</span></Td><Td r>{nf(u.gunae)}</Td><Td r c={C.hint}>{u.pos !== u.gunae ? nf(u.pos) : ""}</Td><Td r>{u.aj !== null ? nf(u.aj) : "—"}</Td><Td r c={d ? C.red : C.green}>{d === null ? "" : d ? (d > 0 ? "+" : "") + nf(d) : "✓"}</Td><Td r c={C.blue}>{u.adj ? (u.adj > 0 ? "+" : "") + nf(u.adj) : ""}</Td><Td r b>{nf(Math.ceil(u.use / P.days))}</Td></tr>
+                {openKey === u.key && <tr><td colSpan={9} style={{ padding: 0 }}><QtyDrill u={u} P={P} locked={locked || !caps.billing} onAdjust={addAdjust} /></td></tr>}</Fragment>;
             })}</tbody>
           </table></div>
+          {(inp.adjust || []).length > 0 && <div style={{ marginTop: 12 }}>
+            <b style={{ fontSize: 13 }}>이 달 수량조정 {inp.adjust.length}건</b> <span style={{ fontSize: 12, color: C.hint }}>합계 구내용 {nf(inp.adjust.reduce((a, x) => a + (Number(x.delta) || 0), 0))}</span>
+            <table style={{ ...tbl, marginTop: 6 }}><thead><tr><Th>작업장</Th><Th r>구내용 ±</Th><Th>사유</Th><Th>등록</Th><Th /></tr></thead><tbody>{inp.adjust.map((a, i) => <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td>{a.name}</Td><Td r b>{(a.delta > 0 ? "+" : "") + nf(a.delta)}</Td><Td>{a.reason}</Td><Td><span style={{ fontSize: 11.5, color: C.hint }}>{fmtDT(a.at)}</span></Td><Td>{!locked && caps.billing && <button style={{ ...btnGhost, padding: "2px 8px", fontSize: 11.5 }} onClick={() => delAdjust(i)}>삭제</button>}</Td></tr>)}</tbody></table>
+          </div>}
           <Note>EDI 구내용 = 기간 매일 재고의 합. "마이너스=0"은 마이너스 재고 날을 0으로 본 값이에요(AJ는 마이너스 재고를 그대로 청구하지 않는 것으로 보여 비교용). 월평균 = 구내용 ÷ {P.days}일 올림.</Note>
         </div>
       ) : tab === "cls" ? (
@@ -2452,17 +2550,18 @@ function TodayBoard({ ships = [], caps = {}, setNav }) {
     let alive = true;
     (async () => {
       const since = localD(new Date(Date.now() - 30 * 86400000).toISOString());
-      const [rc, fx, rej, accs, logs] = await Promise.all([
+      const [rc, fx, rej, accs, logs, pend] = await Promise.all([
         supabase.rpc("receipt_incoming", { p_days: 3 }).range(0, 4999),
         supabase.from("edi_fix").select("id,status", { count: "exact", head: false }).in("status", ["요청", "승인"]).limit(500),
         supabase.from("aj_move").select("account,move_code,move_date,item,from_name,to_name,qty,note").eq("conf", "승인거부").gte("move_date", since).order("move_date", { ascending: false }).limit(50),
         supabase.from("aj_account").select("code,label,name,last_seen"),
         supabase.from("aj_sync_log").select("account,ran_at,status").order("ran_at", { ascending: false }).limit(200),
+        supabase.from("aj_move").select("move_date", { count: "exact", head: true }).in("conf", ["대기", "미확인"]).gte("move_date", periodOf(billingMonthOf(new Date())).from),
       ]);
       if (!alive) return;
       const inc = (rc.data || []).filter((r) => !r.r_status);
       const lastSync = {}; (logs.data || []).forEach((l) => { if (!lastSync[l.account]) lastSync[l.account] = l.ran_at; });
-      setD({ inc, fixReq: (fx.data || []).filter((r) => r.status === "요청").length, fixOk: (fx.data || []).filter((r) => r.status === "승인").length, rej: rej.data || [], accs: accs.data || [], lastSync });
+      setD({ inc, fixReq: (fx.data || []).filter((r) => r.status === "요청").length, fixOk: (fx.data || []).filter((r) => r.status === "승인").length, rej: rej.data || [], accs: accs.data || [], lastSync, pend: pend.count || 0 });
     })();
     return () => { alive = false; };
   }, []);
@@ -2493,6 +2592,7 @@ function TodayBoard({ ships = [], caps = {}, setNav }) {
         <Card title="EDI 승인거부 (30일)" value={d.rej.length} tone={d.rej.length ? "danger" : "success"} sub={d.rej.length ? "받는 쪽이 거부한 출고 · EDI 상이내역 회신 필요" : "거부된 출고가 없어요"}>
           {d.rej.slice(0, 3).map((r) => <div key={r.move_code + r.item} style={{ fontSize: 12, color: C.red }}>{r.move_date.slice(5)} {r.from_name} → {r.to_name} {r.item} {r.qty}</div>)}
         </Card>
+        <Card title="마감 전 미승인 이동 (이번 정산기간)" value={d.pend} tone={d.pend ? (new Date().getDate() >= 20 && new Date().getDate() <= 25 ? "danger" : "warn") : "success"} sub={d.pend ? "25일 마감 전 받는 쪽 승인 필요 · 미승인은 AJ 구내용과 차이 원인" : "모두 승인됐어요"} go={() => setNav("EDI")} />
         <Card title="AJ 공급 희망일 지남" value={late.length} tone={late.length ? "danger" : "success"} sub={late.length ? late.slice(0, 2).map((r) => `${r.post_name} ${r.item} ${r.left}장 남음`).join(" · ") : before16 ? "오늘 16시 전에 등록하면 내일 납품 요청 가능" : "16시가 지나서 내일 납품 요청은 마감됐어요"} go={() => setNav("AJ")} />
         <Card title="EDI 동기화" value={d.accs.filter((a) => d.lastSync[a.code] && Date.now() - new Date(d.lastSync[a.code]).getTime() < 36 * 3600 * 1000).length + " / " + d.accs.length} unit="계정" tone={d.accs.every((a) => d.lastSync[a.code] && Date.now() - new Date(d.lastSync[a.code]).getTime() < 36 * 3600 * 1000) ? "success" : "warn"}
           sub={d.accs.map((a) => `${a.label || a.name || a.code} ${d.lastSync[a.code] ? fmtDT(d.lastSync[a.code]) : "없음"}`).join(" · ")} />
@@ -4518,10 +4618,28 @@ function EdiStockView({ caps = {} }) {
       else setWps(data || []);
     });
   }, []);
-  const per = useMemo(() => periodOf(month), [month]);
+  // 기간: 정산월(26일~25일) 또는 직접 지정
+  const [mode, setMode] = useState("month");
+  const [rFrom, setRFrom] = useState(() => periodOf(nowMonth).from);
+  const [rTo, setRTo] = useState(() => isoD(new Date(Date.now() - 86400000)));
+  const per = useMemo(() => {
+    if (mode === "month") return periodOf(month);
+    const f = rFrom <= rTo ? rFrom : rTo, t = rFrom <= rTo ? rTo : rFrom;
+    return { from: f, to: t, days: Math.round((new Date(t) - new Date(f)) / 86400000) + 1 };
+  }, [mode, month, rFrom, rTo]);
+  // 전체 보기(wpNo 0): 작업장×계정×제품 구내용
+  const [all, setAll] = useState(null);
+  const [allQ, setAllQ] = useState("");
+  useEffect(() => {
+    if (wpNo !== 0) return;
+    let alive = true; setAll(null);
+    supabase.rpc("closing_gunae", { p_from: per.from, p_to: per.to }).range(0, 9999).then(({ data, error }) => { if (!alive) return; if (error) setMsg(error.message); else setAll(data || []); });
+    return () => { alive = false; };
+  }, [wpNo, per.from, per.to]);
   const months = useMemo(() => { const out = []; let [y, m] = nowMonth.split("-").map(Number); for (let i = 0; i < 8; i++) { out.push(`${y}-${String(m).padStart(2, "0")}`); m--; if (m === 0) { m = 12; y--; } } return out; }, [nowMonth]);
 
   useEffect(() => {
+    if (wpNo === 0) { setRows([]); return; }
     let alive = true;
     setBusy(true);
     supabase.from("aj_stock_daily").select("stoc_date,item,last_stoc,rental_in,move_in,move_out,return_out,this_stoc,raw")
@@ -4578,6 +4696,75 @@ function EdiStockView({ caps = {} }) {
   })();
   const numC = (v) => ({ color: v < 0 ? C.red : C.text, fontWeight: v < 0 ? 600 : 400 });
 
+  // 전체 보기 집계: 작업장별 제품 구내용·월평균
+  const allRows = useMemo(() => {
+    if (!all) return [];
+    const m = {};
+    all.forEach((r) => {
+      const w = wps.find((x) => x.no === r.workplace_no);
+      const o = m[r.workplace_no] = m[r.workplace_no] || { no: r.workplace_no, name: w ? ediClean(w.name) : "#" + r.workplace_no, items: {}, tot: 0, neg: 0 };
+      o.items[r.item] = (o.items[r.item] || 0) + Number(r.gunae); o.tot += Number(r.gunae); o.neg += Number(r.gunae) - Number(r.gunae_pos);
+    });
+    return Object.values(m).filter((o) => o.tot || o.neg).sort((a, b) => b.tot - a.tot);
+  }, [all, wps]);
+  const allItems = useMemo(() => [...new Set((all || []).map((r) => r.item))].sort(), [all]);
+  const allShown = allRows.filter((o) => !allQ || o.name.includes(allQ) || String(o.no) === allQ);
+
+  // PDF: 새 창에 AJ 거래명세서와 비슷한 흐름표를 만들고 인쇄(→ PDF로 저장)
+  const printFlow = () => {
+    const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const n = (v) => (v || 0).toLocaleString();
+    const T = (head, body) => `<table><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body.map((r) => `<tr>${r.map((c, i) => `<td${i ? ' class="r"' : ""}>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    let title, body;
+    if (wpNo === 0) {
+      title = "전체 작업장 파렛트 사용 현황";
+      body = T(["작업장", ...allItems.map((i) => i + " 구내용"), "합계 구내용", "월평균(올림)"], allShown.map((o) => [esc(o.name), ...allItems.map((i) => o.items[i] ? n(o.items[i]) : ""), n(o.tot), n(Math.ceil(o.tot / per.days))]))
+        + `<p class="s">합계 구내용 ${n(allShown.reduce((a, o) => a + o.tot, 0))} · ${allShown.length}개 작업장</p>`;
+    } else {
+      title = `${esc(wp ? ediClean(wp.name) : "#" + wpNo)} 파렛트 재고 흐름`;
+      body = T(["제품", "기간 구내용(일별 재고 합)", "월평균(올림)", "마이너스 일수"], calc.map((c) => [c.item, n(c.sum), n(c.avg), c.neg || ""]))
+        + items.map((k) => `<h3>${k}</h3>` + T(["일자", "전일", "렌탈입고", "이동입고", "이동출고", "반납/회수", "금일재고"], (byItem[k] || []).map((r) => [r.stoc_date, n(r.last_stoc), r.rental_in || "", r.move_in || "", r.move_out || "", r.return_out || "", `<b>${n(r.this_stoc)}</b>`]))).join("");
+    }
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font-family:'맑은 고딕',sans-serif;font-size:10pt;margin:18px;color:#111}h2{margin:0 0 4px}h3{margin:14px 0 4px;font-size:11pt}table{border-collapse:collapse;width:100%;margin-top:6px}th,td{border:1px solid #999;padding:3px 6px}th{background:#f0f0f0}.r{text-align:right}.s{color:#555;font-size:9pt}@media print{h3{page-break-after:avoid}tr{page-break-inside:avoid}}</style></head><body>
+<h2>${title}</h2><div class="s">기간 ${per.from} ~ ${per.to} (${per.days}일) · 출처: AJ EDI 일별 재고(LETUS PMS 연동) · 조회 ${new Date().toLocaleString()}</div>
+<div class="s">구내용 = 기간 중 매일 재고의 합, 월평균 = 구내용 ÷ ${per.days}일 올림. 마이너스 재고는 그대로 표시했어요.</div>${body}
+<script>window.onload=()=>setTimeout(()=>window.print(),300)</script></body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) { alert("팝업이 막혔어요. 이 사이트 팝업을 허용해 주세요."); return; }
+    w.document.write(html); w.document.close();
+  };
+
+  if (wpNo === 0) return (
+    <>
+      <Head title="EDI 재고·정산" sub="전체 작업장 · 기간 구내용(매일 재고의 합)과 월평균" />
+      {msg && <div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{msg}</div>}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+        <WorkplacePicker wps={wps} value={null} onChange={setWpNo} filter={(w) => w.last_synced || w.sync_enabled} placeholder="작업장 상세로 가기" />
+        <button style={{ ...btnGhost, padding: "6px 12px", fontSize: 12.5, background: C.teal, color: "#fff" }}>전체 작업장</button>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+        {[["month", "정산월"], ["range", "기간 직접"]].map(([k, l]) => <button key={k} onClick={() => setMode(k)} style={{ ...btnGhost, padding: "6px 12px", fontSize: 12.5, background: mode === k ? C.teal : "transparent", color: mode === k ? "#fff" : C.text }}>{l}</button>)}
+        {mode === "month" ? <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }}>{months.map((m) => <option key={m} value={m}>{m}</option>)}</select>
+          : <><input type="date" value={rFrom} onChange={(e) => e.target.value && setRFrom(e.target.value)} style={{ fontSize: 13, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8 }} /><span>~</span><input type="date" value={rTo} onChange={(e) => e.target.value && setRTo(e.target.value)} style={{ fontSize: 13, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8 }} /></>}
+        <span style={{ fontSize: 12, color: C.hint }}>{per.from} ~ {per.to} ({per.days}일)</span>
+        <input value={allQ} onChange={(e) => setAllQ(e.target.value)} placeholder="작업장 거르기" style={{ fontSize: 13, padding: "6px 9px", border: `1px solid ${C.border}`, borderRadius: 8, width: 140 }} />
+        <button onClick={() => printFlow()} style={{ ...btnGhost, padding: "6px 12px", fontSize: 12.5, marginLeft: "auto" }}>PDF로 저장 (인쇄)</button>
+      </div>
+      {!all ? <Splash text="전체 작업장 집계 중…" /> : (<>
+        <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+          <Metric label="작업장" value={allShown.length} unit="곳" tone="plain" />
+          {allItems.map((i) => <Metric key={i} label={i + " 월평균"} value={Math.ceil(allShown.reduce((a, o) => a + (o.items[i] || 0), 0) / per.days).toLocaleString()} tone="info" />)}
+          <Metric label="마이너스 재고 작업장" value={allShown.filter((o) => o.neg < 0).length} unit="곳" tone={allShown.some((o) => o.neg < 0) ? "warn" : "success"} />
+        </div>
+        <div style={{ overflowX: "auto", maxHeight: 620 }}><table style={{ ...tbl, minWidth: 560 }}>
+          <thead><tr><Th>작업장</Th>{allItems.map((i) => <Th key={i} r>{i}</Th>)}<Th r>구내용 합계</Th><Th r>월평균</Th><Th r>마이너스 몫</Th></tr></thead>
+          <tbody>{allShown.slice(0, 800).map((o) => <tr key={o.no} onClick={() => setWpNo(o.no)} style={{ borderTop: `1px solid ${C.border}`, cursor: "pointer" }}><Td>{o.name}</Td>{allItems.map((i) => <Td key={i} r>{o.items[i] ? <span style={numC(o.items[i])}>{o.items[i].toLocaleString()}</span> : ""}</Td>)}<Td r b>{o.tot.toLocaleString()}</Td><Td r>{Math.ceil(o.tot / per.days).toLocaleString()}</Td><Td r>{o.neg ? <span style={numC(o.neg)}>{o.neg.toLocaleString()}</span> : ""}</Td></tr>)}</tbody>
+        </table></div>
+        <Note>구내용 = 기간 중 매일 재고의 합(모든 계정 합산), 월평균 = 구내용 ÷ {per.days}일 올림. 작업장을 누르면 일별 흐름으로 들어가요.</Note>
+      </>)}
+    </>
+  );
+
   return (
     <>
       <Head title="EDI 재고·정산" sub="AJ EDI 일별 재고 기반 · 매일 전일자까지 자동 반영" />
@@ -4590,11 +4777,22 @@ function EdiStockView({ caps = {} }) {
             {wp.sync_enabled ? "✓ 자동 동기화 대상" : "동기화 대상으로 지정"}
           </button>
         )}
-        <span style={{ fontSize: 13, color: C.sub, marginLeft: 6 }}>정산월</span>
-        <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }}>
-          {months.map((m) => <option key={m} value={m}>{m}</option>)}
-        </select>
+        <button onClick={() => setWpNo(0)} style={{ ...btnGhost, padding: "6px 12px", fontSize: 12.5, background: wpNo === 0 ? C.teal : "transparent", color: wpNo === 0 ? "#fff" : C.text }}>전체 작업장</button>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+        {[["month", "정산월"], ["range", "기간 직접"]].map(([k, l]) => <button key={k} onClick={() => setMode(k)} style={{ ...btnGhost, padding: "6px 12px", fontSize: 12.5, background: mode === k ? C.teal : "transparent", color: mode === k ? "#fff" : C.text }}>{l}</button>)}
+        {mode === "month" ? (
+          <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ fontSize: 13, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 8 }}>
+            {months.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        ) : (<>
+          <input type="date" value={rFrom} onChange={(e) => e.target.value && setRFrom(e.target.value)} style={{ fontSize: 13, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+          <span>~</span>
+          <input type="date" value={rTo} onChange={(e) => e.target.value && setRTo(e.target.value)} style={{ fontSize: 13, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8 }} />
+          {[["이번 달 1일~", () => { const t = new Date(); setRFrom(isoD(new Date(Date.UTC(t.getFullYear(), t.getMonth(), 1)))); setRTo(isoD(new Date(Date.now() - 86400000))); }], ["최근 7일", () => { setRFrom(isoD(new Date(Date.now() - 7 * 86400000))); setRTo(isoD(new Date(Date.now() - 86400000))); }]].map(([l, f]) => <button key={l} onClick={f} style={{ ...btnGhost, padding: "4px 10px", fontSize: 12 }}>{l}</button>)}
+        </>)}
         <span style={{ fontSize: 12, color: C.hint }}>{per.from} ~ {per.to} ({per.days}일)</span>
+        <button onClick={() => printFlow()} style={{ ...btnGhost, padding: "6px 12px", fontSize: 12.5, marginLeft: "auto" }}>PDF로 저장 (인쇄)</button>
       </div>
 
       <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
