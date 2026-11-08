@@ -13,7 +13,9 @@ async function pdfText(file) {
   const pdfjs = await import("pdfjs-dist");
   const worker = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
   pdfjs.GlobalWorkerOptions.workerSrc = worker;
-  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  // AJ PDF는 한글 글꼴(CMap)을 써서 cMap 없이 읽으면 글자가 비어 나온다
+  const base = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/";
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer(), cMapUrl: base + "cmaps/", cMapPacked: true, standardFontDataUrl: base + "standard_fonts/" }).promise;
   const page = await doc.getPage(1); // 첫 장(청구 요약)만 보면 된다
   const tc = await page.getTextContent();
   return tc.items.map((i) => i.str).join(" ").replace(/\s+/g, " ");
