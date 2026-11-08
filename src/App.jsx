@@ -2407,7 +2407,7 @@ function UsageReport({ R, P, ymLabel, setMsg }) {
 function erpEntryPrompt(title, lines, date) {
   const d = lines.reduce((a, x) => a + x.debit, 0);
   const rows = lines.map((x, i) => `${i + 1}. ${x.code} ${x.acct} | ${x.debit ? "차변 " + x.debit.toLocaleString() : "대변 " + x.credit.toLocaleString()} | 코스트센터 ${x.ccCode || "-"} | 적요 ${x.memo} | 관리항목 ${x.mgmt || "-"}`);
-  return [`ERP(erp4.fursys.com) 어카운트 전표등록에 ${title}를 입력해줘. 전표일자 ${date}.`, `줄을 모두 넣고 차변·대변 합계(${d.toLocaleString()})가 맞는지 확인한 뒤 멈춰. 전표저장·상신은 하지 마.`, "", ...rows].join("\n");
+  return ["[LETUS-PMS-ERP-V1]", `ERP(erp4.fursys.com) 어카운트 전표등록에 ${title}를 입력해줘. 전표일자 ${date}.`, `줄을 모두 넣고 차변·대변 합계(${d.toLocaleString()})가 맞는지 확인한 뒤 멈춰. 전표저장·상신은 하지 마.`, "", ...rows].join("\n");
 }
 function VoucherBox({ title, lines, copyTsv, date, setMsg }) {
   const [showErp, setShowErp] = useState(false);
@@ -2419,11 +2419,11 @@ function VoucherBox({ title, lines, copyTsv, date, setMsg }) {
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
         <b>{title}</b><span style={{ fontSize: 12.5, color: d === c ? C.green : C.red }}>차변 {d.toLocaleString()} · 대변 {c.toLocaleString()} {d === c ? "✓" : "불일치"}</span>
         <button style={btnGhost} onClick={() => copyTsv([["계정코드", "계정과목", "코스트센터", "적요", "거래처", "차변", "대변", "관리항목(ERP 입력값)"], ...lines.map((x) => [x.code || "", x.acct, x.cc ? (x.ccCode || "") + " " + x.cc : "", x.memo, x.partner ? x.partner.code + " " + x.partner.name : "", x.debit || "", x.credit || "", x.mgmt || ""])])}>복사</button>
-        <button style={btnTealSm} disabled={d !== c} title={d !== c ? "차변·대변이 맞아야 입력할 수 있어요" : ""} onClick={() => setShowErp((v) => !v)}>어카운트 입력</button>
+        <button style={btnTealSm} disabled={d !== c} title={d !== c ? "차변·대변이 맞아야 입력할 수 있어요" : ""} onClick={async () => { try { await navigator.clipboard.writeText(erpEntryPrompt(title, lines, date)); } catch (e) { setShowErp(true); return; } window.location.href = "letus-erp://start"; setShowErp(true); }}>어카운트 입력</button>
       </div>
       {showErp ? (
         <div style={{ background: C.blueBg, borderRadius: 10, padding: 12, marginBottom: 10, fontSize: 13 }}>
-          <b>어카운트 입력 방법</b>
+          <b>Claude Code가 켜지며 입력을 시작해요</b> <span style={{ color: C.hint }}>— 안 켜지면 아래처럼 직접</span>
           <ol style={{ margin: "6px 0 8px", paddingLeft: 20, lineHeight: 1.7 }}>
             <li><b>요청문 복사</b>를 누릅니다</li>
             <li><b>ERP 열기</b> → 로그인 → 재무회계관리 › 전표관리 › 전표등록 화면을 엽니다</li>
