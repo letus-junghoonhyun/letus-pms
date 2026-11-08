@@ -1,0 +1,292 @@
+<title>PMS 운영 테스트 점검표</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+/* 레이아웃: 상단 진행 요약 → 묶음별 점검 행(상태 버튼 3개 + 메모) → 이슈 기록 */
+:root{
+  --bg:#f3f5f4; --card:#ffffff; --fg:#17201e; --sub:#5a6966; --line:#dde3e1;
+  --accent:#0f7a6c; --accent-bg:#e2f2ef;
+  --pass:#1f7a3f; --pass-bg:#e3f3e8; --fail:#b3261e; --fail-bg:#fbe7e5; --na:#6b6f76; --na-bg:#eceef0; --warn:#9a5b00; --warn-bg:#fdf0dc;
+  --f-body:"IBM Plex Sans KR",system-ui,-apple-system,"Malgun Gothic",sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#111816; --card:#18211f; --fg:#e4ecea; --sub:#94a5a1; --line:#2a3633;
+  --accent:#4fc4b2; --accent-bg:#173430;
+  --pass:#6fd18f; --pass-bg:#183424; --fail:#ff8a80; --fail-bg:#3a1b19; --na:#a3a8b0; --na-bg:#262b30; --warn:#f0b65a; --warn-bg:#3a2b12; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#111816; --card:#18211f; --fg:#e4ecea; --sub:#94a5a1; --line:#2a3633;
+  --accent:#4fc4b2; --accent-bg:#173430;
+  --pass:#6fd18f; --pass-bg:#183424; --fail:#ff8a80; --fail-bg:#3a1b19; --na:#a3a8b0; --na-bg:#262b30; --warn:#f0b65a; --warn-bg:#3a2b12; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:14px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto;padding-block:20px 60px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:18px}
+h1{font-size:22px;margin:0;text-wrap:balance}
+h2{font-size:16px;margin:0}
+.lead{color:var(--sub);margin:4px 0 0;max-width:68ch}
+.rules{display:grid;gap:4px;margin:10px 0 0;padding:12px 14px;background:var(--warn-bg);color:var(--warn);border-radius:10px;font-size:13px}
+.summary{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.bar{flex:1 1 260px;height:10px;border-radius:6px;background:var(--line);overflow:hidden;display:flex}
+.bar i{display:block;height:100%}
+.stat{font-variant-numeric:tabular-nums;font-size:13px;color:var(--sub)}
+.stat b{color:var(--fg)}
+.filters{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font:inherit;font-size:12.5px;padding:5px 12px;border-radius:16px;border:1px solid var(--line);background:var(--card);color:var(--sub);cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.sec{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.sec-h{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 14px;border-bottom:1px solid var(--line)}
+.sec-h .num{font-family:var(--f-mono);font-size:12px;color:var(--accent);background:var(--accent-bg);padding:2px 8px;border-radius:6px}
+.sec-h .who{font-size:12px;color:var(--sub)}
+.sec-h .prog{margin-left:auto;font-size:12.5px;color:var(--sub);font-variant-numeric:tabular-nums}
+.item{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:4px 12px;padding:11px 14px;border-top:1px solid var(--line);align-items:start}
+.item:first-of-type{border-top:0}
+.item .id{font-family:var(--f-mono);font-size:12px;color:var(--sub);padding-top:2px}
+.item .txt{min-width:0}
+.item .sc{font-weight:500}
+.item .ex{font-size:12.5px;color:var(--sub)}
+.item .meta{grid-column:2/4;font-size:12px;color:var(--sub);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.item.pass{background:color-mix(in srgb,var(--pass-bg) 45%,transparent)}
+.item.fail{background:color-mix(in srgb,var(--fail-bg) 60%,transparent)}
+.st{display:flex;gap:4px}
+.st button{font:inherit;font-size:12px;min-width:44px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--sub);cursor:pointer}
+.st button[data-v="pass"][aria-pressed="true"]{background:var(--pass);border-color:var(--pass);color:#fff}
+.st button[data-v="fail"][aria-pressed="true"]{background:var(--fail);border-color:var(--fail);color:#fff}
+.st button[data-v="na"][aria-pressed="true"]{background:var(--na);border-color:var(--na);color:#fff}
+.st button:disabled{opacity:.5;cursor:default}
+.note{font:inherit;font-size:12.5px;flex:1 1 220px;min-width:0;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.iss{display:grid;gap:10px;padding:14px}
+.iss form{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
+.iss input,.iss select,.iss textarea{font:inherit;font-size:13px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);min-width:0}
+.iss textarea{grid-column:1/-1;min-height:54px;resize:vertical}
+.btn{font:inherit;font-size:13px;padding:8px 14px;border-radius:8px;border:0;background:var(--accent);color:#fff;cursor:pointer;justify-self:start}
+.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--sub);padding:4px 10px;font-size:12px}
+.ilist{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:640px}
+th,td{text-align:left;padding:7px 8px;border-top:1px solid var(--line);vertical-align:top}
+th{color:var(--sub);font-weight:500;border-top:0}
+td.done{color:var(--pass)}
+.empty{color:var(--sub);font-size:13px;padding:6px 0}
+.banner{font-size:12.5px;padding:8px 12px;border-radius:8px;background:var(--na-bg);color:var(--na)}
+.hidden-by-filter{display:none}
+@media (max-width:620px){.item{grid-template-columns:40px minmax(0,1fr)}.st{grid-column:2}.item .meta{grid-column:2}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>LETUS PMS 운영 테스트 점검표</h1>
+    <p class="lead">전체 배포 전, 실제 업무 흐름대로 돌려 보며 EDI 재고와 PMS 재고가 같게 유지되는지 확인합니다. 체크한 결과와 이슈는 이 페이지를 여는 모두에게 같이 보입니다.</p>
+    <div class="rules">
+      <span>· 테스트 건도 실제 EDI에 반영돼요. 1~2장짜리 실제 이동으로만 하고, 필요하면 반대 건으로 되돌리세요.</span>
+      <span>· 출고·반납·이동(2·3·4)은 다음날 EDI 동기화 후 6번 대조로 숫자를 확인합니다.</span>
+      <span>· 실패는 아래 이슈 기록에 남겨 주세요(항목 번호·기대·실제).</span>
+    </div>
+  </header>
+
+  <div id="status" class="banner">점검 기록을 불러오는 중이에요…</div>
+
+  <section class="summary" aria-label="진행 요약">
+    <div class="bar" id="bar" aria-hidden="true"></div>
+    <span class="stat" id="stat"></span>
+  </section>
+  <div class="filters" role="group" aria-label="보기">
+    <button class="chip" data-f="all" aria-pressed="true">전체</button>
+    <button class="chip" data-f="todo" aria-pressed="false">남은 것</button>
+    <button class="chip" data-f="fail" aria-pressed="false">실패만</button>
+  </div>
+
+  <div id="secs" style="display:grid;gap:14px"></div>
+
+  <section class="sec" aria-labelledby="iss-h">
+    <div class="sec-h"><span class="num">이슈</span><h2 id="iss-h">이슈 기록</h2><span class="prog" id="iss-count"></span></div>
+    <div class="iss">
+      <form id="iss-form">
+        <select id="iss-item" aria-label="항목 번호"></select>
+        <input id="iss-what" placeholder="무엇이 (예: 시공팀 입고확인 버튼)" aria-label="무엇이" required>
+        <input id="iss-exp" placeholder="기대 결과" aria-label="기대 결과">
+        <input id="iss-act" placeholder="실제 결과" aria-label="실제 결과" required>
+        <textarea id="iss-memo" placeholder="재현 방법·캡처 위치·메모" aria-label="메모"></textarea>
+        <button class="btn" type="submit" id="iss-add">이슈 추가</button>
+      </form>
+      <div class="ilist"><table><thead><tr><th>항목</th><th>무엇이</th><th>기대</th><th>실제</th><th>메모</th><th>등록</th><th>조치</th></tr></thead><tbody id="iss-body"></tbody></table></div>
+      <div class="empty" id="iss-empty">아직 등록된 이슈가 없어요. 실패한 항목이 있으면 위 칸에 적고 「이슈 추가」를 누르세요.</div>
+    </div>
+  </section>
+</div>
+
+<script>
+const SECTIONS = [
+  ["0","준비","관리자·운송팀",[
+    ["0-1","테스트 계정 4개 준비: 관리자 · 운송팀 1 · 센터 작업자 1(양지물류센터 배정) · 시공팀 1(실제 팀 소속)","사용자 관리에 4개 계정, 모두 승인 상태"],
+    ["0-2","각 계정 로그인 (PC·휴대폰 각각)","모두 로그인되고 첫 화면이 열림"],
+    ["0-3","시작 전 기준 재고 기록: 양지물류센터·테스트 시공팀 14C/18F","EDI 재고·정산 화면 숫자를 메모 칸에 적어 둠"],
+    ["0-4","오늘 할 일 › EDI 동기화 카드 확인","4개 계정 모두 36시간 이내(초록)"]]],
+  ["1","계정·권한","관리자 + 테스트 계정",[
+    ["1-1","새 메일로 회원가입","\"승인 대기 중이에요\" 화면만 보이고 데이터는 안 보임"],
+    ["1-2","관리자가 역할·센터를 정하고 승인","새로고침 후 바로 사용 가능"],
+    ["1-3","센터 작업자로 로그인","메뉴: 오늘 할 일·출고·입고확인·재고·지도·전표 내역·설정만 (AJ·EDI·마감·거래처·단가 없음)"],
+    ["1-4","센터 작업자: 배정 안 된 센터를 출발지로 출고 시도","센터 목록에 안 나오고 저장되지 않음"],
+    ["1-5","관리자가 센터 작업자에게 \"AJ 공급·회수 요청\" 켜기","그 계정 메뉴에 AJ 요청이 생기고 요청 등록 가능"],
+    ["1-6","같은 권한 끄기","메뉴가 사라지고, 등록을 시도해도 DB에서 거부"],
+    ["1-7","시공팀으로 로그인","메뉴: 입고확인·출고(반납)·설정만, 다른 팀 건은 안 보임"],
+    ["1-8","관리자가 계정 비활성화","그 계정은 로그인해도 \"비활성화된 계정\" 화면"],
+    ["1-9","비밀번호 초기화 → 임시 비밀번호로 로그인","로그인 가능"],
+    ["1-10","일반 계정이 내 설정에서 이름·연락처 변경","저장됨. 역할·권한은 바꿀 수 없음"]]],
+  ["2","출고 → 입고확인 (센터 → 시공팀)","운송팀·센터·시공팀",[
+    ["2-1","센터 작업자: 양지물류센터 → 테스트 시공팀, 14C 1장 출고 등록(사진·차량번호 포함)","전표번호 발급, PMS 전표 내역에 \"출고완료\""],
+    ["2-2","오늘 할 일 › EDI에 안 올린 출고","방금 건이 1건으로 잡힘"],
+    ["2-3","운송팀: EDI 반영(업로드)으로 EDI에 올림","EDI 이동 등록, PMS 상태 \"EDI 반영\""],
+    ["2-4","시공팀: 입고확인에서 방금 건 확인","상태 \"입고확인\", 확인 시각·확인자 기록"],
+    ["2-5","시공팀이 수량을 다르게 확인(상이)","상이 건으로 표시되고 운송팀 화면에 처리 대기"],
+    ["2-6","다음날 동기화 후 EDI 재고·정산 확인","양지 −1, 시공팀 +1, PMS 재고와 같은 숫자"],
+    ["2-7","출고 등록 취소(잘못 등록 가정)","재고 원복, 전표 내역에 취소 표시"]]],
+  ["3","반납 (시공팀 → 센터)","시공팀·센터",[
+    ["3-1","시공팀: 14C 1장 양지물류센터로 반납 등록","반납 전표 발급"],
+    ["3-2","센터 작업자: 입고확인에서 반납 건 확인","센터 재고 +1"],
+    ["3-3","반납을 \"AJ 회수\"로 등록","AJ 회수 요청 생성, 우리 센터 재고는 그대로"],
+    ["3-4","동기화 후 EDI와 PMS 재고 비교","일치"]]],
+  ["4","센터 간 이동","센터",[
+    ["4-1","양지물류센터 → 양지2센터 1장 이동 등록","출발 센터 −1 (출고완료)"],
+    ["4-2","도착 센터에서 입고확인","도착 센터 +1"],
+    ["4-3","출발 센터 재고보다 많이 이동 시도","재고 한도로 막힘"]]],
+  ["5","AJ 공급·회수","운송팀·AJ·센터",[
+    ["5-1","운송팀: AJ 공급 요청 (16시 전)","요청 생성, AJ 계정 화면에 보임"],
+    ["5-2","AJ 계정: 발송 처리","상태 \"발송\""],
+    ["5-3","센터: 입고확인","센터 재고 +, 공급 현황 \"다 들어옴\""],
+    ["5-4","일부만 도착","\"나눠 들어오는 중\"과 남은 수량 표시"],
+    ["5-5","희망일 지남","오늘 할 일 › AJ 공급 희망일 지남에 표시"],
+    ["5-6","AJ 회수 요청 → AJ 완료 처리","회수 현황 반영"]]],
+  ["6","EDI 연동·재고","운송팀",[
+    ["6-1","오늘 할 일 › EDI 동기화","4개 계정 모두 최근 동기화"],
+    ["6-2","EDI 재고·정산 › 작업장 하나, 정산월","일별 재고·구내용 표시"],
+    ["6-3","기간 직접 지정 (예: 이번 달 1일~어제)","기간이 바뀌고 숫자 다시 계산"],
+    ["6-4","전체 작업장","작업장별 품목 구내용·월평균 표, 누르면 상세로"],
+    ["6-5","PDF로 저장 (인쇄)","흐름표가 새 창에 뜨고 PDF로 저장 가능"],
+    ["6-6","파렛트 현황 지도","작업장 표시·검색·마이너스 재고 필터 동작"],
+    ["6-7","재고 현황과 EDI 재고 비교","같은 작업장 같은 숫자"]]],
+  ["7","월마감 (10월분 다시 돌려 보기)","정산담당",[
+    ["7-1","마감월 2026-10, 자료 한꺼번에 올리기 (AJ 엑셀·PDF 5종·ERP 3종·재고현황·11A)","파일마다 ✓ 인식, 경고 없음"],
+    ["7-2","① 수량 대조 › 양지물류센터 펼치기","차이 원인(마이너스·미승인·설명 안 됨) 표시"],
+    ["7-3","수량조정 +30 / 사유 입력 → 추가 → 삭제","조정 목록·월평균 반영 후 원복"],
+    ["7-4","수량대조 엑셀 내려받기","수량대조·기준 시트"],
+    ["7-5","② 작업장 분류","분류 필요 0곳"],
+    ["7-6","④ 이용료 표 복사 → EP 업무연락 본문에 붙여넣기","표 모양 그대로, 업체별 수량 포함"],
+    ["7-7","임대료·임차료 전표 차대변","임대료 166,892,660 / 임차료 104,424,028 일치"],
+    ["7-8","어카운트 입력 버튼 → Claude Code → ERP 전표 입력","합계 확인 후 멈춤 (저장 안 함)"],
+    ["7-9","진행 단계 버튼 눌러 완료 표시","시각 기록"]]],
+  ["8","휴대폰·현장","센터·시공팀",[
+    ["8-1","휴대폰으로 로그인·메뉴(☰)","화면 깨짐 없음"],
+    ["8-2","QR 스캔으로 전표 열기","해당 전표로 이동"],
+    ["8-3","출고 등록 사진 촬영·첨부","업로드되고 전표에 표시"],
+    ["8-4","서명 (출고·입고)","저장·표시"]]],
+  ["9","마무리 대조 (필수)","운송팀",[
+    ["9-1","양지물류센터 14C: 시작 EDI / 끝 EDI / 끝 PMS","끝 EDI = 끝 PMS (메모 칸에 숫자)"],
+    ["9-2","양지2센터 14C: 시작 EDI / 끝 EDI / 끝 PMS","끝 EDI = 끝 PMS"],
+    ["9-3","테스트 시공팀 14C: 시작 EDI / 끝 EDI / 끝 PMS","끝 EDI = 끝 PMS"],
+    ["9-4","실제 이동이 아닌 테스트 건을 반대 건으로 되돌렸는지","되돌림 완료"],
+    ["9-5","미승인으로 남은 테스트 건","없음"]]],
+];
+const ALL = SECTIONS.flatMap((s) => s[3].map((it) => it[0]));
+const LABEL = { pass: "통과", fail: "실패", na: "해당없음" };
+let db = null, user = null, canWrite = true, filter = "all";
+const checks = {}; let issues = []; const names = {};
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const when = (t) => { if (!t) return ""; const d = new Date(t); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+const who = (id) => (id && names[id]) || (id ? "팀원" : "");
+
+function render() {
+  const n = ALL.length; const c = { pass: 0, fail: 0, na: 0 };
+  ALL.forEach((id) => { const s = checks[id]?.status; if (c[s] !== undefined) c[s]++; });
+  const done = c.pass + c.fail + c.na;
+  $("bar").innerHTML = `<i style="width:${c.pass / n * 100}%;background:var(--pass)"></i><i style="width:${c.fail / n * 100}%;background:var(--fail)"></i><i style="width:${c.na / n * 100}%;background:var(--na)"></i>`;
+  $("stat").innerHTML = `<b>${done}</b> / ${n} 완료 · 통과 <b>${c.pass}</b> · 실패 <b style="color:var(--fail)">${c.fail}</b> · 해당없음 ${c.na}`;
+  $("secs").innerHTML = SECTIONS.map(([num, title, ppl, items]) => {
+    const d = items.filter((it) => checks[it[0]]?.status).length;
+    const rows = items.map(([id, sc, ex]) => {
+      const ck = checks[id] || {}; const s = ck.status || "";
+      const hide = (filter === "todo" && s) || (filter === "fail" && s !== "fail");
+      return `<div class="item ${s}${hide ? " hidden-by-filter" : ""}" data-id="${id}">
+        <span class="id">${id}</span>
+        <div class="txt"><div class="sc">${esc(sc)}</div><div class="ex">기대: ${esc(ex)}</div></div>
+        <div class="st" role="group" aria-label="${id} 결과">${["pass", "fail", "na"].map((v) => `<button data-v="${v}" aria-pressed="${s === v}" ${canWrite ? "" : "disabled"}>${LABEL[v]}</button>`).join("")}</div>
+        <div class="meta"><input class="note" id="note-${id}" value="${esc(ck.note)}" placeholder="메모 (숫자·특이사항)" ${canWrite ? "" : "disabled"} aria-label="${id} 메모">${s ? `<span>${LABEL[s]} · ${esc(who(ck.by))} ${when(ck.at)}</span>` : ""}</div>
+      </div>`;
+    }).join("");
+    return `<section class="sec"><div class="sec-h"><span class="num">${num}</span><h2>${esc(title)}</h2><span class="who">${esc(ppl)}</span><span class="prog">${d} / ${items.length}</span></div>${rows}</section>`;
+  }).join("");
+  // 이슈
+  $("iss-item").innerHTML = `<option value="">항목 번호</option>` + ALL.map((id) => `<option>${id}</option>`).join("");
+  $("iss-count").textContent = issues.length ? `${issues.filter((i) => !i.done).length}건 남음 / 전체 ${issues.length}` : "";
+  $("iss-empty").hidden = issues.length > 0;
+  $("iss-body").innerHTML = issues.map((i) => `<tr><td>${esc(i.item)}</td><td>${esc(i.what)}</td><td>${esc(i.expected)}</td><td>${esc(i.actual)}</td><td>${esc(i.memo)}</td><td>${esc(who(i.by))}<br>${when(i.at)}</td><td class="${i.done ? "done" : ""}">${i.done ? "✓ 조치됨" : ""} ${canWrite ? `<button class="btn ghost" data-iss="${i.id}">${i.done ? "다시 열기" : "조치 완료"}</button>` : ""}</td></tr>`).join("");
+}
+
+async function resolveNames(ids) {
+  const need = [...new Set(ids.filter((x) => x && !names[x]))];
+  if (!need.length || !user?.profiles) return;
+  try { const ps = await user.profiles(need); need.forEach((id) => { if (ps[id]?.name) names[id] = ps[id].name; }); render(); } catch (e) {}
+}
+
+async function setStatus(id, v) {
+  if (!db) return;
+  const cur = checks[id]?.status;
+  const status = cur === v ? null : v;
+  const me = user ? await user.id() : null;
+  checks[id] = { ...(checks[id] || {}), status, by: me, at: new Date().toISOString() };
+  render();
+  try { await db.collection("checks").doc(id).set({ status, note: checks[id].note || "", by: me, at: checks[id].at }); }
+  catch (e) { $("status").hidden = false; $("status").textContent = "저장하지 못했어요. 편집 권한이 있는지 확인해 주세요."; }
+}
+const noteTimers = {};
+function setNote(id, val) {
+  if (!db) return;
+  clearTimeout(noteTimers[id]);
+  noteTimers[id] = setTimeout(async () => {
+    const me = user ? await user.id() : null;
+    checks[id] = { ...(checks[id] || {}), note: val };
+    try { await db.collection("checks").doc(id).set({ status: checks[id].status || null, note: val, by: checks[id].by || me, at: checks[id].at || new Date().toISOString() }); } catch (e) {}
+  }, 700);
+}
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest(".st button"); if (b) { setStatus(b.closest(".item").dataset.id, b.dataset.v); return; }
+  const f = e.target.closest(".chip"); if (f) { filter = f.dataset.f; document.querySelectorAll(".chip").forEach((c) => c.setAttribute("aria-pressed", c === f)); render(); return; }
+  const ib = e.target.closest("[data-iss]"); if (ib && db) { const it = issues.find((x) => x.id === ib.dataset.iss); if (it) db.collection("issues").doc(it.id).update({ done: !it.done }).catch(() => {}); }
+});
+document.addEventListener("input", (e) => { if (e.target.classList.contains("note")) setNote(e.target.closest(".item").dataset.id, e.target.value); });
+$("iss-form").addEventListener("submit", async (e) => {
+  e.preventDefault(); if (!db) return;
+  const me = user ? await user.id() : null;
+  const row = { item: $("iss-item").value, what: $("iss-what").value.trim(), expected: $("iss-exp").value.trim(), actual: $("iss-act").value.trim(), memo: $("iss-memo").value.trim(), by: me, at: new Date().toISOString(), done: false };
+  if (!row.what || !row.actual) return;
+  $("iss-add").disabled = true;
+  try { await db.collection("issues").add(row); ["iss-what", "iss-exp", "iss-act", "iss-memo"].forEach((k) => $(k).value = ""); $("iss-item").value = ""; }
+  catch (err) { $("status").hidden = false; $("status").textContent = "이슈를 저장하지 못했어요. 편집 권한이 있는지 확인해 주세요."; }
+  $("iss-add").disabled = false;
+});
+
+render();
+(async () => {
+  const timer = setTimeout(() => { $("status").textContent = "점검 기록을 불러오지 못했어요. 이 화면에서 체크한 내용은 저장되지 않아요."; }, 10000);
+  try {
+    user = await window.claude?.use?.("user");
+    db = await window.claude?.use?.("db");
+    if (!db) { clearTimeout(timer); canWrite = false; $("status").textContent = "로그인한 팀원만 체크할 수 있어요. 지금은 읽기 전용으로 보여요."; render(); return; }
+    if (user?.can) { const w = await user.can("data.write"); if (w === false) canWrite = false; }
+    let first = 2;
+    const ready = () => { if (--first <= 0) { clearTimeout(timer); $("status").hidden = !(!canWrite); if (!canWrite) $("status").textContent = "보기 권한만 있어요. 체크는 편집 권한이 있는 팀원이 할 수 있어요."; } };
+    db.collection("checks").onSnapshot((snap) => {
+      snap.docs.forEach((d) => { checks[d.id] = d.data() || {}; });
+      snap.docChanges().forEach((ch) => { if (ch.type === "removed") delete checks[ch.doc.id]; });
+      const active = document.activeElement; const keep = active && active.classList.contains("note") ? [active.id, active.value, active.selectionStart] : null;
+      render(); ready(); resolveNames(Object.values(checks).map((c) => c.by));
+      if (keep) { const el = $(keep[0]); if (el) { el.value = keep[1]; el.focus(); try { el.setSelectionRange(keep[2], keep[2]); } catch (e) {} } }
+    }, () => { ready(); });
+    db.collection("issues").orderBy("at", "desc").onSnapshot((snap) => {
+      issues = snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
+      render(); ready(); resolveNames(issues.map((i) => i.by));
+    }, () => { ready(); });
+  } catch (e) { clearTimeout(timer); $("status").textContent = "점검 기록을 불러오지 못했어요."; }
+})();
+</script>
