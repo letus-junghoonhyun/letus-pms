@@ -2355,7 +2355,7 @@ const PLACE_LABEL = { 충주1: "충주1공장", 충주2: "충주2공장" };
 function usageNotes(R, brand, place) {
   const gs = USAGE_NOTE_GROUP[brand + "|" + place]; if (!gs) return [];
   // 시공팀(…팀)·센터·사업장 자체는 빼고 외주업체만, 엑셀처럼 이름과 월평균
-  return R.lines.filter((l) => gs.includes(l.group) && !/팀$|센터|사업장$|창고$|^AJ |^CJ/.test(l.name)).map((l) => [l.name, l.avg]);
+  return R.lines.filter((l) => gs.includes(l.group) && !/팀$|센터|사업장$|창고$|^침대사업부$|^AJ |^CJ/.test(l.name)).map((l) => [l.name, l.avg]);
 }
 function buildUsageHtml(R, P, ymLabel) {
   const td = (v, o = {}) => `<td style="border:1px solid #999;padding:3px 6px;font-size:9pt;${o.r ? "text-align:right;" : o.c ? "text-align:center;" : ""}${o.b ? "font-weight:bold;" : ""}${o.bg ? "background:#f2f2f2;" : ""}"${o.rs ? ` rowspan="${o.rs}"` : ""}${o.cs ? ` colspan="${o.cs}"` : ""}>${v}</td>`;
