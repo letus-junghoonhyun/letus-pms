@@ -5509,7 +5509,7 @@ function Users({ users, partners, centers = [], setUserRole, setUserPartner, set
                   <div style={{ fontWeight: 600, fontSize: 13 }}>{u.name || u.company || "(이름없음)"} {me && <span style={{ fontSize: 10.5, color: C.teal }}>(나)</span>}</div>
                   <div style={{ fontSize: 11.5, color: C.hint }}>{[u.emp_id && "EP " + u.emp_id, u.email, u.phone].filter(Boolean).join(" · ") || u.id.slice(0, 8)}</div>
                 </div>
-                <span style={{ fontSize: 12, color: C.sub }}>{u.role === "협력업체" || u.role === "업체" ? (partner ? partner.name : <span style={{ color: C.amber }}>소속 미지정</span>) : u.role === "관리자" ? "전체 센터" : (u.center_codes || []).length ? u.center_codes.join(", ") : u.role === "센터작업자" ? <span style={{ color: C.amber }}>센터 미배정</span> : "전체 센터"}</span>
+                <span style={{ fontSize: 12, color: C.sub }}>{u.role === "협력업체" || u.role === "업체" ? (partner ? partner.name : <span style={{ color: C.amber }}>소속 미지정</span>) : u.role === "관리자" ? "전체 센터" : ["AJ", "정산담당"].includes(u.role) ? "—" : (u.center_codes || []).length ? u.center_codes.join(", ") : u.role === "센터작업자" ? <span style={{ color: C.amber }}>센터 미배정</span> : "전체 센터"}</span>
                 {custom > 0 && <span style={{ fontSize: 11, color: C.blue, background: C.blueBg, padding: "2px 8px", borderRadius: 10 }}>권한 개별 {custom}</span>}
                 {pend ? <button style={{ ...btnTealSm }} onClick={(e) => { e.stopPropagation(); approve(u); }}>승인</button> : !u.active ? <span style={{ fontSize: 11.5, color: C.red }}>비활성</span> : null}
                 <span style={{ color: C.hint }}>{isOpen ? "▾" : "▸"}</span>
