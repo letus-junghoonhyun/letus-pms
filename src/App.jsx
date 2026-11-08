@@ -2102,11 +2102,9 @@ function QtyDrill({ u, P, locked, onAdjust }) {
       let qs = supabase.from("aj_stock_daily").select("stoc_date,item,this_stoc").eq("workplace_no", u.wp_no).gte("stoc_date", P.from).lte("stoc_date", P.to).order("stoc_date").limit(3000);
       if (items) qs = qs.in("item", items);
       const nm = u.raw || u.name;
-      const [s, mi, mo] = await Promise.all([
-        qs,
-        supabase.from("aj_move").select("move_date,move_code,item,from_name,to_name,qty,move_type,conf").eq("to_name", nm).gte("move_date", P.from).lte("move_date", P.to).neq("conf", "승인").limit(2000),
-        supabase.from("aj_move").select("move_date,move_code,item,from_name,to_name,qty,move_type,conf").eq("from_name", nm).gte("move_date", P.from).lte("move_date", P.to).neq("conf", "승인").limit(2000),
-      ]);
+      // 서버가 한 번에 1000줄까지만 주므로 나눠 받는다
+      const pageAll = async (col) => { const out = []; for (let p = 0; p < 30; p++) { const { data } = await supabase.from("aj_move").select("move_date,move_code,item,from_name,to_name,qty,move_type,conf").eq(col, nm).gte("move_date", P.from).lte("move_date", P.to).neq("conf", "승인").order("move_date").order("move_code").range(p * 1000, p * 1000 + 999); out.push(...(data || [])); if (!data || data.length < 1000) break; } return { data: out }; };
+      const [s, mi, mo] = await Promise.all([qs, pageAll("to_name"), pageAll("from_name")]);
       if (!alive) return;
       const day = {}; (s.data || []).forEach((r) => { const o = day[r.stoc_date] = day[r.stoc_date] || { date: r.stoc_date, t: 0 }; o[r.item] = (o[r.item] || 0) + r.this_stoc; o.t += r.this_stoc; });
       const pick = (l, dir) => (l || []).filter((m) => !items || items.includes(m.item)).map((m) => ({ ...m, dir, w: Math.round((new Date(P.to) - new Date(m.move_date)) / 86400000) + 1 }));
@@ -2119,7 +2117,7 @@ function QtyDrill({ u, P, locked, onAdjust }) {
   const est = d.moves.reduce((a, m) => a + m.dir * m.qty * m.w, 0); // 미확인 이동이 EDI 구내용에 준 영향(추정)
   const diff = u.aj !== null ? u.gunae - u.aj : null;
   const rest = diff === null ? null : diff - negPart - est;
-  const firstNeg = d.days.find((x) => x.t < 0);
+  const firstNeg = d.days.find((x) => x.t < 0 || x["14C"] < 0 || x["18F"] < 0 || (u.item && x[u.item] < 0));
   const Row = ({ l, v, hint, strong }) => <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "3px 0", borderBottom: `1px dashed ${C.border}`, fontSize: 12.5 }}><span>{l}{hint ? <span style={{ color: C.hint }}> · {hint}</span> : null}</span><b style={{ color: strong ? (v ? C.red : C.green) : C.text }}>{v === null ? "—" : (v > 0 ? "+" : "") + nf(v)}</b></div>;
   return (
     <div style={{ background: "#f7f9fb", padding: 12, display: "grid", gridTemplateColumns: "minmax(260px,1fr) minmax(300px,1.4fr)", gap: 14 }}>
