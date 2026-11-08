@@ -118,7 +118,7 @@ END $$;
 CREATE OR REPLACE FUNCTION public.profiles_guard()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF public.my_role() IS DISTINCT FROM '관리자' THEN
+  IF auth.uid() IS NOT NULL AND public.my_role() IS DISTINCT FROM '관리자' THEN  -- 서버(서비스 키)·SQL 편집기는 통과
     NEW.perms := OLD.perms; NEW.status := OLD.status; NEW.active := OLD.active;
     NEW.center_codes := OLD.center_codes; NEW.partner_code := OLD.partner_code;
   END IF;
