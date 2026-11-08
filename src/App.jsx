@@ -2410,6 +2410,8 @@ function erpEntryPrompt(title, lines, date) {
   return [`ERP(erp4.fursys.com) 어카운트 전표등록에 ${title}를 입력해줘. 전표일자 ${date}.`, `줄을 모두 넣고 차변·대변 합계(${d.toLocaleString()})가 맞는지 확인한 뒤 멈춰. 전표저장·상신은 하지 마.`, "", ...rows].join("\n");
 }
 function VoucherBox({ title, lines, copyTsv, date, setMsg }) {
+  const [showErp, setShowErp] = useState(false);
+  const [copied, setCopied] = useState(false);
   const d = lines.reduce((a, x) => a + x.debit, 0), c = lines.reduce((a, x) => a + x.credit, 0);
   const pr = (x) => (x.partner ? `${x.partner.code} / ${x.partner.name} / ${x.partner.biz}` : x.cc || "");
   return (
@@ -2417,8 +2419,23 @@ function VoucherBox({ title, lines, copyTsv, date, setMsg }) {
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
         <b>{title}</b><span style={{ fontSize: 12.5, color: d === c ? C.green : C.red }}>차변 {d.toLocaleString()} · 대변 {c.toLocaleString()} {d === c ? "✓" : "불일치"}</span>
         <button style={btnGhost} onClick={() => copyTsv([["계정코드", "계정과목", "코스트센터", "적요", "거래처", "차변", "대변", "관리항목(ERP 입력값)"], ...lines.map((x) => [x.code || "", x.acct, x.cc ? (x.ccCode || "") + " " + x.cc : "", x.memo, x.partner ? x.partner.code + " " + x.partner.name : "", x.debit || "", x.credit || "", x.mgmt || ""])])}>복사</button>
-        <button style={btnTealSm} disabled={d !== c} title={d !== c ? "차변·대변이 맞아야 입력할 수 있어요" : "입력 요청문 복사 + ERP 열기"} onClick={async () => { try { await navigator.clipboard.writeText(erpEntryPrompt(title, lines, date)); } catch (e) {} window.open("https://erp4.fursys.com/wisen.fursys/erp.html", "_blank"); if (setMsg) { setMsg("입력 요청문을 복사했어요 — ERP 로그인 후 전표등록을 열고 Claude 대화창에 붙여 넣으세요"); setTimeout(() => setMsg(""), 5000); } }}>어카운트 입력</button>
+        <button style={btnTealSm} disabled={d !== c} title={d !== c ? "차변·대변이 맞아야 입력할 수 있어요" : ""} onClick={() => setShowErp((v) => !v)}>어카운트 입력</button>
       </div>
+      {showErp ? (
+        <div style={{ background: C.blueBg, borderRadius: 10, padding: 12, marginBottom: 10, fontSize: 13 }}>
+          <b>어카운트 입력 방법</b>
+          <ol style={{ margin: "6px 0 8px", paddingLeft: 20, lineHeight: 1.7 }}>
+            <li><b>요청문 복사</b>를 누릅니다</li>
+            <li><b>ERP 열기</b> → 로그인 → 재무회계관리 › 전표관리 › 전표등록 화면을 엽니다</li>
+            <li>Claude 대화창에 붙여 넣으면 Claude가 Chrome에서 줄을 입력하고 차대변을 맞춘 뒤 멈춥니다 (저장·상신은 직접)</li>
+          </ol>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button style={btnTealSm} onClick={async () => { try { await navigator.clipboard.writeText(erpEntryPrompt(title, lines, date)); setCopied(true); setTimeout(() => setCopied(false), 3000); } catch (e) { alert("복사가 막혔어요. 아래 글을 직접 선택해 복사하세요"); } }}>{copied ? "복사됨 ✓" : "요청문 복사"}</button>
+            <a href="https://erp4.fursys.com/wisen.fursys/erp.html" target="_blank" rel="noreferrer" style={{ ...btnGhost, textDecoration: "none", display: "inline-block" }}>ERP 열기 ↗</a>
+          </div>
+          <textarea readOnly value={erpEntryPrompt(title, lines, date)} style={{ width: "100%", height: 140, fontSize: 12, fontFamily: "monospace", boxSizing: "border-box" }} onFocus={(e) => e.target.select()} />
+        </div>
+      ) : null}
       <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 640 }}>
         <thead><tr><Th>계정코드 · 계정과목</Th><Th>코스트센터</Th><Th>적요</Th><Th>거래처</Th><Th r>차변</Th><Th r>대변</Th></tr></thead>
         <tbody>{lines.map((x, i) => <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td><b style={{ fontFamily: "monospace" }}>{x.code}</b> {x.acct}</Td><Td>{x.cc ? <span style={{ fontSize: 12.5 }}><b style={{ fontFamily: "monospace", color: x.ccCode === "코드 검색 필요" ? C.amber : C.text }}>{x.ccCode}</b> {x.cc}</span> : ""}</Td><Td>{x.memo}{x.mgmt ? <div style={{ fontSize: 11.5, color: C.hint, marginTop: 2 }}>관리항목: {x.mgmt}</div> : null}</Td><Td><span style={{ fontSize: 12, color: C.sub }}>{x.partner ? x.partner.code + " " + x.partner.name : ""}</span></Td><Td r>{x.debit ? x.debit.toLocaleString() : ""}</Td><Td r>{x.credit ? x.credit.toLocaleString() : ""}</Td></tr>)}</tbody>
