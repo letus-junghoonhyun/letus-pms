@@ -2333,8 +2333,8 @@ function ClosingScreen({ caps = {} }) {
           <>
             {needCls.length > 0 && <div style={{ ...box, background: C.amberBg, color: C.amber, fontSize: 13 }}>분류가 정해지지 않은 작업장 {needCls.length}곳(구내용 {nf(needCls.reduce((a, u) => a + u.use, 0))})이 청구에서 빠져 있어요. ②에서 정해 주세요.</div>}
             <UsageReport R={R} P={P} ymLabel={result.ymLabel} setMsg={setMsg} />
-            <VoucherBox title="임대료 전표 (브랜드 청구)" lines={result.rent} copyTsv={copyTsv} />
-            {result.lease ? <VoucherBox title="임차료 전표 (AJ)" lines={result.lease.lines} copyTsv={copyTsv} /> : <div style={box}>③에 AJ 세금계산서 금액을 넣으면 임차료 전표가 나와요.</div>}
+            <VoucherBox title="임대료 전표 (브랜드 청구)" lines={result.rent} copyTsv={copyTsv} date={eng.monthEnd(ym)} setMsg={setMsg} />
+            {result.lease ? <VoucherBox title="임차료 전표 (AJ)" lines={result.lease.lines} copyTsv={copyTsv} date={eng.monthEnd(ym)} setMsg={setMsg} /> : <div style={box}>③에 AJ 세금계산서 금액을 넣으면 임차료 전표가 나와요.</div>}
             <div style={box}>
               <b>수량 확인 요청 메일 (초안)</b>
               <pre style={{ whiteSpace: "pre-wrap", fontSize: 13, background: "#f7f9f8", padding: 12, borderRadius: 8, marginTop: 8 }}>{`제목: [레터스] ${result.ymLabel} 파렛트 이용 내역 확인 요청 (${P.from} ~ ${P.to})\n\n안녕하세요, 레터스 운송사업팀입니다.\n${result.ymLabel} 파렛트 이용 내역(일평균 사용량·임대사용료)을 첨부와 같이 보내드립니다.\n수량이 다른 곳이 있으면 회신 부탁드립니다. 확인 후 이용료 업무연락과 전표를 진행하겠습니다.\n\n합계: 내수 ${nf(R.table.reduce((a, t) => a + t.dom, 0))}장 / 해외 ${nf(R.table.reduce((a, t) => a + t.exp, 0))}장 · ${nf(R.table.reduce((a, t) => a + (t.dom + t.exp) * 2400, 0))}원 (2,400원/EA)`}</pre>
@@ -2403,7 +2403,13 @@ function UsageReport({ R, P, ymLabel, setMsg }) {
     </div>
   );
 }
-function VoucherBox({ title, lines, copyTsv }) {
+// 어카운트(ERP) 입력: PMS가 ERP를 직접 조작할 수는 없어서, Claude(Claude in Chrome)에게 줄 입력 요청문을 복사하고 ERP를 새 탭으로 연다
+function erpEntryPrompt(title, lines, date) {
+  const d = lines.reduce((a, x) => a + x.debit, 0);
+  const rows = lines.map((x, i) => `${i + 1}. ${x.code} ${x.acct} | ${x.debit ? "차변 " + x.debit.toLocaleString() : "대변 " + x.credit.toLocaleString()} | 코스트센터 ${x.ccCode || "-"} | 적요 ${x.memo} | 관리항목 ${x.mgmt || "-"}`);
+  return [`ERP(erp4.fursys.com) 어카운트 전표등록에 ${title}를 입력해줘. 전표일자 ${date}.`, `줄을 모두 넣고 차변·대변 합계(${d.toLocaleString()})가 맞는지 확인한 뒤 멈춰. 전표저장·상신은 하지 마.`, "", ...rows].join("\n");
+}
+function VoucherBox({ title, lines, copyTsv, date, setMsg }) {
   const d = lines.reduce((a, x) => a + x.debit, 0), c = lines.reduce((a, x) => a + x.credit, 0);
   const pr = (x) => (x.partner ? `${x.partner.code} / ${x.partner.name} / ${x.partner.biz}` : x.cc || "");
   return (
@@ -2411,6 +2417,7 @@ function VoucherBox({ title, lines, copyTsv }) {
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
         <b>{title}</b><span style={{ fontSize: 12.5, color: d === c ? C.green : C.red }}>차변 {d.toLocaleString()} · 대변 {c.toLocaleString()} {d === c ? "✓" : "불일치"}</span>
         <button style={btnGhost} onClick={() => copyTsv([["계정코드", "계정과목", "코스트센터", "적요", "거래처", "차변", "대변", "관리항목(ERP 입력값)"], ...lines.map((x) => [x.code || "", x.acct, x.cc ? (x.ccCode || "") + " " + x.cc : "", x.memo, x.partner ? x.partner.code + " " + x.partner.name : "", x.debit || "", x.credit || "", x.mgmt || ""])])}>복사</button>
+        <button style={btnTealSm} disabled={d !== c} title={d !== c ? "차변·대변이 맞아야 입력할 수 있어요" : "입력 요청문 복사 + ERP 열기"} onClick={async () => { try { await navigator.clipboard.writeText(erpEntryPrompt(title, lines, date)); } catch (e) {} window.open("https://erp4.fursys.com/wisen.fursys/erp.html", "_blank"); if (setMsg) { setMsg("입력 요청문을 복사했어요 — ERP 로그인 후 전표등록을 열고 Claude 대화창에 붙여 넣으세요"); setTimeout(() => setMsg(""), 5000); } }}>어카운트 입력</button>
       </div>
       <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 640 }}>
         <thead><tr><Th>계정코드 · 계정과목</Th><Th>코스트센터</Th><Th>적요</Th><Th>거래처</Th><Th r>차변</Th><Th r>대변</Th></tr></thead>
