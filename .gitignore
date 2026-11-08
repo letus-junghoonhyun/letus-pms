@@ -18,3 +18,4 @@ dist/
 .claude/
 files.zip
 tools/closing/*.json
+docs/파렛트_월마감_분석.md
