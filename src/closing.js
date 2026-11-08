@@ -150,3 +150,24 @@ export function leaseVoucher(invoices, thirdParty, ym, split = CLOSING_DEFAULTS.
   L.push({ acct: "외상매입금", memo: `${ym} 파렛트 임차료`, partner: AJ_PARTNER, debit: 0, credit: total + vatSum });
   return { lines: L, pool, brand, total, vat: vatSum };
 }
+
+// ERP 전표 입력용 코드 (2026-11-08 ERP 화면에서 확인)
+export const ERP_ACCT = { 외상매출금1: "1112010", 용역수입: "410051B", 예수부가세: "2106000", "(용)임차료": "850370B", 선급부가세: "1117000", 외상매입금: "2100510" };
+export const ERP_CC = { 퍼시스PLT: "CB024701", 일룸PLT: "CB024702", 시디즈PLT: "CB024703", 풀필먼트PLT: "CB024704" };
+// 줄마다 계정코드·코스트센터 코드·관리항목(ERP 입력값)을 붙인다. date = 전표일자(해당 월 말일)
+export function erpAnnotate(lines, date) {
+  return lines.map((x) => {
+    const p = x.partner ? x.partner.code : "";
+    const vat = x.acct === "예수부가세" ? x.credit : x.acct === "선급부가세" ? x.debit : 0;
+    const mg = {
+      외상매출금1: `A2 거래처 ${p}`,
+      용역수입: "TG 지출증빙 1(세금계산서) · WB 세부항목 04(임대료)",
+      예수부가세: `B2 4100(레터스) · T1 O(매출) · T5 ${date} · T4 ${vat.toLocaleString()} · A2 ${p} · T2 A(과세-전자) · T3 ${(x.supply || 0).toLocaleString()}`,
+      "(용)임차료": "TG 지출증빙 1(세금계산서)",
+      선급부가세: `T2 A6(과세-국세청미전송) · B2 4100 · T1 I(매입) · T5 ${date} · T4 ${vat.toLocaleString()} · A2 ${p} · T3 ${(x.supply || 0).toLocaleString()}`,
+      외상매입금: `A2 거래처 ${p}`,
+    }[x.acct] || "";
+    return { ...x, code: ERP_ACCT[x.acct] || "", ccCode: x.cc ? ERP_CC[x.cc] || "코드 검색 필요" : "", mgmt: mg, date };
+  });
+}
+export const monthEnd = (ym) => { const [y, m] = ym.split("-").map(Number); const d = new Date(y, m, 0); return `${y}-${String(m).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };

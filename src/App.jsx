@@ -2159,9 +2159,11 @@ function ClosingScreen({ caps = {} }) {
     const o11 = inp.out11A && (Number(inp.out11A.일룸) || Number(inp.out11A.시디즈)) ? num(inp.out11A) : edi11A || { 일룸: 0, 시디즈: 0 };
     const r = eng.computeClosing({ rows, days: P.days, erp, sidizStockAmt: Number(inp.sidizStockAmt), out11A: o11 });
     const ymLabel = `${ym.slice(2, 4)}년 ${Number(ym.slice(5))}월`;
-    const rent = eng.rentVoucher(r.bills, ymLabel);
+    const vDate = eng.monthEnd(ym);
+    const rent = eng.erpAnnotate(eng.rentVoucher(r.bills, ymLabel), vDate);
     const invs = num(inp.invoices), tps = num(inp.thirdParty);
-    const lease = Object.values(invs).some((v) => v > 0) ? eng.leaseVoucher(invs, tps, ymLabel) : null;
+    const lease0 = Object.values(invs).some((v) => v > 0) ? eng.leaseVoucher(invs, tps, ymLabel) : null;
+    const lease = lease0 ? { ...lease0, lines: eng.erpAnnotate(lease0.lines, vDate) } : null;
     return { r, rent, lease, ymLabel };
   }, [eng, units, inp, P.days, ym, edi11A]);
   // AJ 거래명세서 엑셀(작업장별 시트) 올리기 → 시트마다 [합계] 줄의 재고 합 = 구내용, 3PL 공급가액
@@ -2408,11 +2410,11 @@ function VoucherBox({ title, lines, copyTsv }) {
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 14 }}>
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
         <b>{title}</b><span style={{ fontSize: 12.5, color: d === c ? C.green : C.red }}>차변 {d.toLocaleString()} · 대변 {c.toLocaleString()} {d === c ? "✓" : "불일치"}</span>
-        <button style={btnGhost} onClick={() => copyTsv([["계정과목", "적요", "거래처/코스트센터", "공급가(부가세)", "차변", "대변"], ...lines.map((x) => [x.acct, x.memo, pr(x), x.supply || "", x.debit || "", x.credit || ""])])}>복사</button>
+        <button style={btnGhost} onClick={() => copyTsv([["계정코드", "계정과목", "코스트센터", "적요", "거래처", "차변", "대변", "관리항목(ERP 입력값)"], ...lines.map((x) => [x.code || "", x.acct, x.cc ? (x.ccCode || "") + " " + x.cc : "", x.memo, x.partner ? x.partner.code + " " + x.partner.name : "", x.debit || "", x.credit || "", x.mgmt || ""])])}>복사</button>
       </div>
       <div style={{ overflowX: "auto" }}><table style={{ ...tbl, minWidth: 640 }}>
-        <thead><tr><Th>계정과목</Th><Th>적요</Th><Th>거래처 / 코스트센터</Th><Th r>차변</Th><Th r>대변</Th></tr></thead>
-        <tbody>{lines.map((x, i) => <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td>{x.acct}</Td><Td>{x.memo}{x.supply ? <div style={{ fontSize: 11.5, color: C.hint }}>공급가 {x.supply.toLocaleString()}</div> : null}</Td><Td><span style={{ fontSize: 12, color: C.sub }}>{pr(x)}</span></Td><Td r>{x.debit ? x.debit.toLocaleString() : ""}</Td><Td r>{x.credit ? x.credit.toLocaleString() : ""}</Td></tr>)}</tbody>
+        <thead><tr><Th>계정코드 · 계정과목</Th><Th>코스트센터</Th><Th>적요</Th><Th>거래처</Th><Th r>차변</Th><Th r>대변</Th></tr></thead>
+        <tbody>{lines.map((x, i) => <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td><b style={{ fontFamily: "monospace" }}>{x.code}</b> {x.acct}</Td><Td>{x.cc ? <span style={{ fontSize: 12.5 }}><b style={{ fontFamily: "monospace", color: x.ccCode === "코드 검색 필요" ? C.amber : C.text }}>{x.ccCode}</b> {x.cc}</span> : ""}</Td><Td>{x.memo}{x.mgmt ? <div style={{ fontSize: 11.5, color: C.hint, marginTop: 2 }}>관리항목: {x.mgmt}</div> : null}</Td><Td><span style={{ fontSize: 12, color: C.sub }}>{x.partner ? x.partner.code + " " + x.partner.name : ""}</span></Td><Td r>{x.debit ? x.debit.toLocaleString() : ""}</Td><Td r>{x.credit ? x.credit.toLocaleString() : ""}</Td></tr>)}</tbody>
       </table></div>
     </div>
   );
