@@ -2372,7 +2372,15 @@ function ClosingScreen({ caps = {} }) {
             <span style={{ fontSize: 12.5, color: C.sub }}>「바로스 X월26일 - X월25일 거래명세서」(작업장별 시트). 올리면 작업장별로 EDI와 비교하고, 계산에는 AJ 숫자를 써요.</span>
           </div>
           <div style={{ fontSize: 13, marginBottom: 8 }}>14C·18F 구내용 EDI <b>{nf(totEdi)}</b>{inp.ajGunae ? <> · AJ <b>{nf(Object.values(inp.ajGunae).reduce((a, v) => a + v, 0))}</b> (EDI에 있는 곳 {nf(totAj)})</> : " · AJ 거래명세서를 올리면 비교해요"}</div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장" style={{ ...inpS, textAlign: "left", width: 160 }} /><label style={{ fontSize: 12.5 }}><input type="checkbox" checked={onlyNeed} onChange={(e) => setOnlyNeed(e.target.checked)} /> 차이 있는 곳만</label></div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="작업장" style={{ ...inpS, textAlign: "left", width: 160 }} /><label style={{ fontSize: 12.5 }}><input type="checkbox" checked={onlyNeed} onChange={(e) => setOnlyNeed(e.target.checked)} /> 차이 있는 곳만</label>
+            <button style={{ ...btnGhost, marginLeft: "auto" }} onClick={() => {
+              const rows = units.map((u) => ({ 작업장: u.name + (u.item ? " · " + u.item : ""), 계정: CLOSE_OPS[u.account] || u.account, 분류: u.grp || "분류 필요", "EDI 구내용": u.gunae, "마이너스=0": u.pos, "AJ 구내용": u.aj, "차이(EDI-AJ)": u.aj !== null ? u.gunae - u.aj : null, 수량조정: u.adj || null, "계산 구내용": u.use, 월평균: Math.ceil(u.use / P.days) }));
+              const wb = XLSX.utils.book_new();
+              XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "수량대조");
+              if ((inp.adjust || []).length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(inp.adjust.map((a) => ({ 작업장: a.name, 계정: CLOSE_OPS[a.account] || a.account, "구내용 ±": a.delta, 사유: a.reason, 등록: a.at }))), "수량조정");
+              XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([{ 마감월: ym, 기간: `${P.from} ~ ${P.to}`, 일수: P.days, "EDI 구내용(14C·18F)": totEdi, "AJ 구내용": inp.ajGunae ? Object.values(inp.ajGunae).reduce((a, v) => a + v, 0) : null, 출처: "AJ EDI 일별 재고(LETUS PMS) / AJ 거래명세서", 작성: new Date().toLocaleString() }]), "기준");
+              XLSX.writeFile(wb, `파렛트_수량대조_${ym}.xlsx`);
+            }}>엑셀 내려받기</button></div>
           <div style={{ overflowX: "auto", maxHeight: 520 }}><table style={{ ...tbl, minWidth: 720 }}>
             <thead><tr><Th>작업장</Th><Th>계정</Th><Th>분류</Th><Th r>EDI 구내용</Th><Th r>마이너스=0</Th><Th r>AJ</Th><Th r>차이</Th><Th r>조정</Th><Th r>월평균</Th></tr></thead>
             <tbody>{units.filter((u) => (!q || u.name.includes(q)) && (!onlyNeed || (u.aj !== null && u.aj !== u.gunae))).slice(0, 600).map((u) => {
