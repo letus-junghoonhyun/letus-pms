@@ -2291,9 +2291,9 @@ async function exportClosingWorkbook({ ym, P, R, result, units, inp, edi11A }) {
   {
     const ws = sheet("5. 수량조정", [24, 14, 12, 12, 48, 20]);
     let r = title(ws, "수량조정 (업체 이의·AJ 확인)", "EDI 원본은 그대로 두고 이 달 마감 계산에만 더한 수량. 구내용 단위(월평균 1장 = 구내용 " + P.days + ")", 6);
-    r = header(ws, r, ["작업장", "계정", "구내용 ±", "월평균 환산", "사유", "등록"]);
+    r = header(ws, r, ["작업장", "계정", "구내용 ±", "월평균 환산", "사유 · 종류 · 기간 · 원래 이동 · 협의 근거", "등록"]);
     const a0 = r;
-    (inp.adjust || []).forEach((a) => { r = put(ws, r, [a.name, CLOSE_OPS[a.account] || a.account, Number(a.delta) || 0, F(`C${r}/${P.days}`), a.reason, a.at ? new Date(a.at).toLocaleString() : ""], { fmt: [null, null, NUM, "0.0"], wrap: true }); });
+    (inp.adjust || []).forEach((a) => { r = put(ws, r, [a.name, CLOSE_OPS[a.account] || a.account, Number(a.delta) || 0, F(`C${r}/${P.days}`), [a.reason, a.kind === "exempt" ? "청구 면제(전량)" : "수량 조정", (a.from || ym) + (a.to && a.to !== a.from ? " ~ " + a.to : ""), a.moveCode ? "원래 " + a.moveCode : "", a.basis ? "근거 " + a.basis : ""].filter(Boolean).join(" · "), a.origin ? a.origin + " 등록(이어짐)" : a.at ? new Date(a.at).toLocaleString() : ""], { fmt: [null, null, NUM, "0.0"], wrap: true }); });
     if (!(inp.adjust || []).length) r = put(ws, r, ["이 달 수량조정 없음", "", "", "", "", ""]);
     else put(ws, r, ["합계", "", F(`SUM(C${a0}:C${r - 1})`), F(`SUM(D${a0}:D${r - 1})`), "", ""], { bold: true, fill: GRAY, fmt: [null, null, NUM, "0.0"] });
   }
@@ -2332,10 +2332,51 @@ async function exportClosingWorkbook({ ym, P, R, result, units, inp, edi11A }) {
 }
 const CLOSE_STEPS = [["upload", "자료 업로드"], ["qty", "수량 대조"], ["mail", "업체 메일 발송"], ["claim", "이의 접수·조정"], ["voucher", "전표 입력"], ["confirm", "마감 확정"]];
 
+// EDI 정정 이동 만들기: 재고는 지금 열린 기간 안에서 새 이동으로 맞춘다(마감 끝난 기간은 건드리지 않음). EDI에 사람이 입력할 내용을 만들어 준다
+function EdiFixMove({ u, P }) {
+  const [open, setOpen] = useState(false);
+  const [sit, setSit] = useState("wrong"); const [item, setItem] = useState(u.item || "18F"); const [qty, setQty] = useState("");
+  const [center, setCenter] = useState("양지물류센터"); const [code, setCode] = useState(""); const [date, setDate] = useState(() => isoD(new Date()));
+  const [copied, setCopied] = useState(false);
+  const openFrom = periodOf(billingMonthOf(new Date())).from; // 지금 열린 정산기간 첫날
+  const d = date < openFrom ? openFrom : date;
+  const SIT = {
+    wrong: { l: "오출고(업체가 실제로 못 받음)", from: center, to: u.raw || u.name, neg: true, note: `[오출고정정] 원래 ${code || "이동코드"} · 업체 미수령` },
+    back: { l: "반납했는데 기록 없음", from: u.raw || u.name, to: center, neg: false, note: `[반납정정] 실제 반납 ${date} · 확인자 ` },
+    audit: { l: "현장에 없음(실사로 확인)", from: u.raw || u.name, to: center, neg: false, note: `[실사정리] 실사일 ${date} · 확인자 ` },
+  }[sit];
+  const text = `EDI 이동조회/관리 › 추가\n출고처: ${SIT.from}\n입고처: ${SIT.to}\n이동일: ${d}${d !== date ? " (지난 기간 → 지금 열린 기간 첫날로)" : ""}\n제품: ${item}\n수량: ${SIT.neg ? "-" : ""}${qty || "?"}\n비고: ${SIT.note}`;
+  const sel = { fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6 };
+  if (!open) return <button style={{ ...btnGhost, marginTop: 8, fontSize: 12 }} onClick={() => setOpen(true)}>EDI 정정 이동 만들기 (재고 맞추기)</button>;
+  return (
+    <div style={{ marginTop: 10, display: "grid", gap: 6, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, fontSize: 12.5 }}>
+      <b>EDI 정정 이동 만들기</b>
+      <span style={{ fontSize: 11.5, color: C.hint }}>마감 끝난 기간은 고치지 않고, 지금 열린 기간({openFrom}~) 안에 새 이동으로 재고를 맞춰요. 지난 기간 청구 차이는 위 "이의 처리"로.</span>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        <select value={sit} onChange={(e) => setSit(e.target.value)} style={sel}>{[["wrong", "오출고(업체가 실제로 못 받음)"], ["back", "반납했는데 기록 없음"], ["audit", "현장에 없음(실사로 확인)"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+        <select value={item} onChange={(e) => setItem(e.target.value)} style={sel}>{["14C", "18F", "11A", "15A", "23E"].map((x) => <option key={x}>{x}</option>)}</select>
+        <input value={qty} onChange={(e) => setQty(e.target.value.replace(/[^\d]/g, ""))} placeholder="수량" style={{ ...sel, width: 70, textAlign: "right" }} />
+        <input value={center} onChange={(e) => setCenter(e.target.value)} placeholder="센터" style={{ ...sel, width: 130 }} />
+        <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} style={sel} />
+        {sit === "wrong" && <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="원래 이동코드" style={{ ...sel, width: 130 }} />}
+      </div>
+      <pre style={{ margin: 0, background: "#f7f9fb", padding: 8, borderRadius: 6, fontSize: 12, whiteSpace: "pre-wrap" }}>{text}</pre>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button style={btnTealSm} disabled={!qty} onClick={async () => { try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (e) {} }}>{copied ? "복사됨 ✓" : "내용 복사"}</button>
+        <button style={btnGhost} onClick={() => setOpen(false)}>닫기</button>
+        <span style={{ fontSize: 11.5, color: C.hint, alignSelf: "center" }}>오출고는 원래 출고와 같은 방향에 마이너스 수량(기존 "재회수"와 같은 방식). EDI 저장은 사람이 해요.</span>
+      </div>
+    </div>
+  );
+}
+
 // 수량 대조 상세: 작업장 하나의 EDI 일별 재고와 미확인·거부 이동으로 AJ와의 차이 원인을 나눠 본다(추정)
 function QtyDrill({ u, P, locked, onAdjust }) {
   const [d, setD] = useState(null);
   const [delta, setDelta] = useState(""); const [reason, setReason] = useState("");
+  const ymNow = P.to.slice(0, 7);
+  const [aKind, setAKind] = useState("delta"); const [aFrom, setAFrom] = useState(ymNow); const [aTo, setATo] = useState(ymNow);
+  const [aMove, setAMove] = useState(""); const [aBasis, setABasis] = useState("");
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -2373,14 +2414,27 @@ function QtyDrill({ u, P, locked, onAdjust }) {
         </div>
         <div style={{ fontSize: 11.5, color: C.hint, marginTop: 6, lineHeight: 1.6 }}>①은 AJ가 마이너스를 0으로 본다고 가정한 값이에요. ②는 아직 승인되지 않은 이동을 AJ가 반영하지 않았다고 가정해, 수량 × 이동일부터 마감일까지 일수로 계산했어요.</div>
         {!locked && onAdjust && (
-          <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <b style={{ fontSize: 12.5 }}>수량조정</b>
-            <input value={delta} onChange={(e) => setDelta(e.target.value.replace(/[^\d-]/g, ""))} placeholder="구내용 ±" style={{ width: 90, fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6, textAlign: "right" }} />
-            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="사유 (업체 이의·AJ 확인 등)" style={{ flex: 1, minWidth: 140, fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
-            <button style={btnTealSm} disabled={!Number(delta) || !reason.trim()} onClick={() => { onAdjust({ account: u.account, name: u.name, delta: Number(delta), reason: reason.trim() }); setDelta(""); setReason(""); }}>추가</button>
-            <span style={{ fontSize: 11.5, color: C.hint, width: "100%" }}>구내용 단위예요(월평균 1장 = 구내용 {P.days}). EDI 원본은 바꾸지 않고 이 달 마감 계산에만 더해요.</span>
+          <div style={{ marginTop: 10, display: "grid", gap: 6, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, padding: 10 }}>
+            <b style={{ fontSize: 12.5 }}>이의 처리 · 청구 조정 (EDI는 그대로, 청구만)</b>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", fontSize: 12.5 }}>
+              {[["delta", "수량 조정"], ["exempt", "청구 면제"]].map(([k, l]) => <label key={k} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}><input type="radio" checked={aKind === k} onChange={() => setAKind(k)} />{l}</label>)}
+              {aKind === "delta" && <input value={delta} onChange={(e) => setDelta(e.target.value.replace(/[^\d-]/g, ""))} placeholder="구내용 ±" style={{ width: 90, fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6, textAlign: "right" }} />}
+              <span>적용</span>
+              <input type="month" value={aFrom} onChange={(e) => setAFrom(e.target.value)} style={{ fontSize: 12, padding: "4px 6px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
+              <span>~</span>
+              <input type="month" value={aTo} onChange={(e) => setATo(e.target.value)} style={{ fontSize: 12, padding: "4px 6px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
+              <span style={{ color: C.hint }}>(같은 달이면 이번 달만, 뒤로 정하면 다음 달 마감에도 자동 적용)</span>
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="사유 (예: 오출고로 실제 미수령)" style={{ flex: 2, minWidth: 160, fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
+              <input value={aMove} onChange={(e) => setAMove(e.target.value)} placeholder="원래 이동코드 (선택)" style={{ flex: 1, minWidth: 120, fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
+              <input value={aBasis} onChange={(e) => setABasis(e.target.value)} placeholder="협의 근거 (메일·담당자·날짜)" style={{ flex: 1.5, minWidth: 140, fontSize: 12.5, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 6 }} />
+              <button style={btnTealSm} disabled={(aKind === "delta" && !Number(delta)) || !reason.trim() || aTo < aFrom} onClick={() => { onAdjust({ account: u.account, name: u.name, kind: aKind, delta: aKind === "delta" ? Number(delta) : 0, reason: reason.trim(), moveCode: aMove.trim(), basis: aBasis.trim(), from: aFrom, to: aTo }); setDelta(""); setReason(""); setAMove(""); setABasis(""); }}>추가</button>
+            </div>
+            <span style={{ fontSize: 11.5, color: C.hint }}>수량 조정은 구내용 단위(월평균 1장 = 구내용 {P.days}). 청구 면제는 그 작업장 이 계정 수량을 청구에서 0으로 봐요(산출 기록은 그대로).</span>
           </div>
         )}
+        <EdiFixMove u={u} P={P} />
       </div>
       <div>
         {d.moves.length > 0 && <>
@@ -2402,6 +2456,7 @@ function ClosingScreen({ caps = {} }) {
   const [tab, setTab] = useState("qty");
   const [wps, setWps] = useState(null); const [cls, setCls] = useState({}); const [gun, setGun] = useState(null);
   const [inp, setInp] = useState({}); const [row, setRow] = useState(null); const [err, setErr] = useState(""); const [msg, setMsg] = useState(""); const [tick, setTick] = useState(0);
+  const [carry, setCarry] = useState([]);
   const [eng, setEng] = useState(null); const [q, setQ] = useState(""); const [onlyNeed, setOnlyNeed] = useState(false); const [edi11A, setEdi11A] = useState(null);
   useEffect(() => { import("./closing.js").then(setEng); }, []);
   useEffect(() => {
@@ -2420,6 +2475,9 @@ function ClosingScreen({ caps = {} }) {
         if (!alive) return;
         const cm = {}; c.forEach((x) => { cm[x.account + "|" + x.wp_no] = x.grp; });
         setWps(w); setCls(cm); setGun(g.data || []); setRow(m.data || null); setInp((m.data && m.data.inputs) || {});
+        // 이전 달 기간 조정(면제·감면) 이어받기
+        const prev = await supabase.from("closing_month").select("ym,inputs").lt("ym", ym).order("ym", { ascending: false }).limit(36);
+        if (alive) setCarry((prev.data || []).flatMap((p) => ((p.inputs && p.inputs.adjust) || []).filter((a) => a.to && a.to >= ym && (a.from || p.ym) <= ym).map((a) => ({ ...a, origin: p.ym }))));
       } catch (e) { if (alive) setErr((e.message || String(e)) + " — letus_edi20.sql 실행 필요"); }
     })();
     return () => { alive = false; };
@@ -2434,6 +2492,8 @@ function ClosingScreen({ caps = {} }) {
   };
   // 계정·작업장별 구내용 → 분류
   const defGroup = (acc, item) => acc === "P208335" ? (item === "11A" ? "11A" : "15A") : acc === "P326529" ? "23E" : acc === "P365851" ? "이케아" : null;
+  // 이 달 조정 + 이전 달에 등록했지만 기간이 이번 달까지 이어지는 조정
+  const allAdjust = useMemo(() => [...(inp.adjust || []).filter((a) => (a.from || ym) <= ym && ym <= (a.to || ym)), ...carry.map((a) => ({ ...a, carried: true }))], [inp.adjust, carry, ym]);
   const units = useMemo(() => {
     if (!gun) return [];
     const m = {};
@@ -2447,10 +2507,13 @@ function ClosingScreen({ caps = {} }) {
       const grp = cls[u.account + "|" + u.wp_no] || defGroup(u.account, u.item) || "";
       const aj = inp.ajGunae && inp.ajGunae[name] !== undefined && u.account === "P156063" ? Number(inp.ajGunae[name]) : null;
       // 이의제기 수량조정(구내용 단위, ±). EDI 원본은 그대로 두고 마감 계산에만 더한다
-      const adj = (inp.adjust || []).filter((a) => a.account === u.account && a.name === name).reduce((s, a) => s + (Number(a.delta) || 0), 0);
-      return { ...u, name, raw: w ? w.name : "", kind: w ? w.kind : "", grp, aj, adj, use: (aj !== null ? aj : u.gunae) + adj };
+      const mine = allAdjust.filter((a) => a.account === u.account && a.name === name);
+      const exempt = mine.some((a) => a.kind === "exempt");
+      const adj = mine.reduce((s, a) => s + (Number(a.delta) || 0), 0);
+      const base = aj !== null ? aj : u.gunae;
+      return { ...u, name, raw: w ? w.name : "", kind: w ? w.kind : "", grp, aj, adj: exempt ? -base : adj, exempt, use: exempt ? 0 : base + adj };
     }).filter((u) => u.gunae || u.aj).sort((a, b) => b.use - a.use);
-  }, [gun, cls, wpName, inp.ajGunae, inp.adjust]);
+  }, [gun, cls, wpName, inp.ajGunae, allAdjust]);
   const [openKey, setOpenKey] = useState(null);
   const addAdjust = async (a) => {
     const n = { ...(inp || {}), adjust: [...(inp.adjust || []), { ...a, at: new Date().toISOString() }] };
@@ -2630,9 +2693,18 @@ function ClosingScreen({ caps = {} }) {
                 {openKey === u.key && <tr><td colSpan={9} style={{ padding: 0 }}><QtyDrill u={u} P={P} locked={locked || !caps.billing} onAdjust={addAdjust} /></td></tr>}</Fragment>;
             })}</tbody>
           </table></div>
-          {(inp.adjust || []).length > 0 && <div style={{ marginTop: 12 }}>
-            <b style={{ fontSize: 13 }}>이 달 수량조정 {inp.adjust.length}건</b> <span style={{ fontSize: 12, color: C.hint }}>합계 구내용 {nf(inp.adjust.reduce((a, x) => a + (Number(x.delta) || 0), 0))}</span>
-            <table style={{ ...tbl, marginTop: 6 }}><thead><tr><Th>작업장</Th><Th r>구내용 ±</Th><Th>사유</Th><Th>등록</Th><Th /></tr></thead><tbody>{inp.adjust.map((a, i) => <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}><Td>{a.name}</Td><Td r b>{(a.delta > 0 ? "+" : "") + nf(a.delta)}</Td><Td>{a.reason}</Td><Td><span style={{ fontSize: 11.5, color: C.hint }}>{fmtDT(a.at)}</span></Td><Td>{!locked && caps.billing && <button style={{ ...btnGhost, padding: "2px 8px", fontSize: 11.5 }} onClick={() => delAdjust(i)}>삭제</button>}</Td></tr>)}</tbody></table>
+          {((inp.adjust || []).length > 0 || carry.length > 0) && <div style={{ marginTop: 12 }}>
+            <b style={{ fontSize: 13 }}>이의 처리 · 청구 조정 {(inp.adjust || []).length + carry.length}건</b> <span style={{ fontSize: 12, color: C.hint }}>이번 달 등록 {(inp.adjust || []).length} · 이전 달에서 이어짐 {carry.length}</span>
+            <div style={{ overflowX: "auto" }}><table style={{ ...tbl, marginTop: 6, minWidth: 760 }}><thead><tr><Th>작업장</Th><Th>종류</Th><Th r>구내용 ±</Th><Th>적용 기간</Th><Th>사유</Th><Th>원래 이동</Th><Th>협의 근거</Th><Th>등록</Th><Th /></tr></thead><tbody>
+              {[...(inp.adjust || []).map((a, i) => ({ ...a, idx: i })), ...carry].map((a, k) => <tr key={k} style={{ borderTop: `1px solid ${C.border}`, background: a.origin ? "#f7f9fb" : undefined }}>
+                <Td>{a.name}</Td><Td><span style={{ fontSize: 12, color: a.kind === "exempt" ? C.red : C.blue }}>{a.kind === "exempt" ? "청구 면제" : "수량 조정"}</span></Td>
+                <Td r b>{a.kind === "exempt" ? "전량" : (a.delta > 0 ? "+" : "") + nf(a.delta)}</Td>
+                <Td><span style={{ fontSize: 12 }}>{(a.from || ym) === (a.to || ym) ? (a.from || ym) : `${a.from || ym} ~ ${a.to}`}</span></Td>
+                <Td>{a.reason}</Td><Td><span style={{ fontSize: 11.5, fontFamily: "monospace" }}>{a.moveCode || ""}</span></Td><Td><span style={{ fontSize: 12 }}>{a.basis || ""}</span></Td>
+                <Td><span style={{ fontSize: 11.5, color: C.hint }}>{a.origin ? a.origin + " 등록" : fmtDT(a.at)}</span></Td>
+                <Td>{!a.origin && !locked && caps.billing && <button style={{ ...btnGhost, padding: "2px 8px", fontSize: 11.5 }} onClick={() => delAdjust(a.idx)}>삭제</button>}</Td></tr>)}
+            </tbody></table></div>
+            {carry.length > 0 && <div style={{ fontSize: 11.5, color: C.hint, marginTop: 4 }}>회색 줄은 이전 달에 기간으로 등록한 조정이에요. 끝내려면 등록한 달 마감에서 지우거나 기간을 다시 등록하세요.</div>}
           </div>}
           <Note>EDI 구내용 = 기간 매일 재고의 합. "마이너스=0"은 마이너스 재고 날을 0으로 본 값이에요(AJ는 마이너스 재고를 그대로 청구하지 않는 것으로 보여 비교용). 월평균 = 구내용 ÷ {P.days}일 올림.</Note>
         </div>
@@ -2679,7 +2751,7 @@ function ClosingScreen({ caps = {} }) {
             {needCls.length > 0 && <div style={{ ...box, background: C.amberBg, color: C.amber, fontSize: 13 }}>분류가 정해지지 않은 작업장 {needCls.length}곳(구내용 {nf(needCls.reduce((a, u) => a + u.use, 0))})이 청구에서 빠져 있어요. ②에서 정해 주세요.</div>}
             <div style={{ ...box, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <b>우리 마감 엑셀</b>
-              <button style={btnTealSm} onClick={() => exportClosingWorkbook({ ym, P, R, result, units, inp, edi11A })}>마감 엑셀 내려받기 (증빙)</button>
+              <button style={btnTealSm} onClick={() => exportClosingWorkbook({ ym, P, R, result, units, inp: { ...inp, adjust: allAdjust }, edi11A })}>마감 엑셀 내려받기 (증빙)</button>
               <span style={{ fontSize: 12.5, color: C.sub }}>요약·이용료·안분 근거·작업장별 구내용(EDI·AJ·조정)·수량조정·전표·입력 자료를 시트별로 — 숫자마다 어디서 왔는지 따라갈 수 있게</span>
             </div>
             <UsageReport R={R} P={P} ymLabel={result.ymLabel} setMsg={setMsg} />
