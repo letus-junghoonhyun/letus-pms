@@ -2139,6 +2139,61 @@ const nf = (n) => (n || 0).toLocaleString();
 const ERP_KEYS = [["퍼시스", "경인"], ["퍼시스", "지방"], ["퍼시스", "수출"], ["일룸", "경인"], ["일룸", "지방"], ["일룸", "수출"], ["시디즈", "경인"], ["시디즈", "지방"], ["시디즈", "수출"]];
 const INV_KEYS = ["18F,14C", "11A", "23E", "15A", "풀필먼트23E"];
 const TP_KEYS = ["블링크프로젝트", "네오스코리아", "에이스침대중부공장"];
+// 우리 마감 엑셀: 기존 엑셀처럼 시트끼리 수식으로 얽지 않고, PMS가 계산한 숫자와 근거를 시트별로 펼친다
+function exportClosingWorkbook({ ym, P, R, result, units, inp, edi11A }) {
+  const wb = XLSX.utils.book_new();
+  const add = (name, rows) => XLSX.utils.book_append_sheet(wb, Array.isArray(rows) && rows.length && !Array.isArray(rows[0]) ? XLSX.utils.json_to_sheet(rows) : XLSX.utils.aoa_to_sheet(rows.length ? rows : [["(없음)"]]), name);
+  const price = (R.cfg && R.cfg.rentPrice) || 2400;
+  const sumV = (o) => Object.values(o || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+  const rentTot = (result.rent || []).reduce((a, x) => a + (x.debit || 0), 0);
+  const leaseTot = result.lease ? result.lease.lines.reduce((a, x) => a + (x.debit || 0), 0) : 0;
+  // 1 요약
+  add("1_요약", [
+    ["LETUS 파렛트 월마감", result.ymLabel], ["기간", `${P.from} ~ ${P.to} (${P.days}일)`], ["작성", new Date().toLocaleString()], [],
+    ["구분", "수량(월평균)", "금액(원)", "비고"],
+    ...["퍼시스", "일룸", "시디즈"].map((b) => [b + " 이용료(내수+해외)", R.bills[b].domQty + R.bills[b].expQty, (R.bills[b].domQty + R.bills[b].expQty) * price, `내수 ${R.bills[b].domQty} / 해외 ${R.bills[b].expQty} × ${price}`]),
+    ["11A 일룸 / 시디즈", `${R.a11.일룸} / ${R.a11.시디즈}`, (R.a11.일룸 + R.a11.시디즈) * 13200, "× 13,200"],
+    ["15A 시디즈 쿠팡", R.q15A, R.q15A * 13200, "× 13,200"],
+    ["23E 일룸 매트리스", R.q23E, R.q23E * 7000, "× 7,000 (일룸 내수에 포함 청구)"], [],
+    ["임대료 전표 합계(차변=대변)", "", rentTot, "브랜드 청구"],
+    ["임차료 전표 합계(차변=대변)", "", leaseTot, "AJ 지급"],
+    ["AJ 세금계산서 공급가액 합", "", sumV(inp.invoices), Object.entries(inp.invoices || {}).map(([k, v]) => `${k} ${Number(v).toLocaleString()}`).join(" / ")],
+    ["수량조정", (inp.adjust || []).length + "건", "", "구내용 합 " + (inp.adjust || []).reduce((a, x) => a + (Number(x.delta) || 0), 0)],
+  ]);
+  // 2 이용료 표(업무연락)
+  add("2_이용료표", R.table.map((t) => ({ 브랜드: t.brand, 구분: t.place, 내수_수량: t.dom, 내수_금액: t.dom * price, 해외_수량: t.exp, 해외_금액: t.exp * price, 비고: t.note || "" })));
+  // 3 안분 근거
+  const rt = R.ratios || {};
+  add("3_안분근거", [
+    ["항목", "값", "설명"],
+    ...Object.entries(R.avgByGroup || {}).map(([g, v]) => ["분류별 월평균 · " + g, v, "작업장 월평균의 합"]),
+    [], ["시디즈 음성창고 재고금액", Number(inp.sidizStockAmt) || 0, "ERP 재고현황"], ["÷ 기준 단가", (R.cfg && R.cfg.sidizUnit) || 881485, "2017 품의 기준(재검토 필요)"], ["= 양지센터 시디즈 몫", R.sidizYangji, "올림"],
+    [], ["11A 출고(일룸/시디즈)", `${(inp.out11A || edi11A || {}).일룸 || 0} / ${(inp.out11A || edi11A || {}).시디즈 || 0}`, inp.out11A ? "파일" : "EDI 자동"],
+    [], ["ERP 매출", "경인 / 지방 / 수출", ""],
+    ...["퍼시스", "일룸", "시디즈"].map((b) => [b, ["경인", "지방", "수출"].map((k) => Number(((inp.erp || {})[b] || {})[k] || 0).toLocaleString()).join(" / "), "관계사 제외·시공가·매출실적"]),
+    [], ["비율(계산값)", JSON.stringify(rt), ""],
+  ]);
+  // 4 작업장별 구내용
+  add("4_작업장구내용", units.map((u) => ({ 작업장: u.name, 제품: u.item || "", 계정: CLOSE_OPS[u.account] || u.account, 분류: u.grp || "분류 필요", EDI_구내용: u.gunae, 마이너스0_구내용: u.pos, AJ_구내용: u.aj, "차이(EDI-AJ)": u.aj !== null ? u.gunae - u.aj : null, 수량조정: u.adj || 0, 계산_구내용: u.use, 월평균: Math.ceil(u.use / P.days) })));
+  // 5 계산에 들어간 줄(분류별)
+  add("5_계산줄", (R.lines || []).map((l) => ({ 이름: l.name, 분류: l.group, 구내용: l.gunae, 월평균: l.avg })));
+  // 6 수량조정·이의
+  add("6_수량조정", (inp.adjust || []).map((a) => ({ 작업장: a.name, 계정: CLOSE_OPS[a.account] || a.account, "구내용 ±": a.delta, "월평균 환산": Math.round((a.delta / P.days) * 10) / 10, 사유: a.reason, 등록: a.at })));
+  // 7·8 전표
+  const vrow = (x) => ({ 계정코드: x.code || "", 계정과목: x.acct, 코스트센터: x.cc ? (x.ccCode || "") + " " + x.cc : "", 적요: x.memo, 거래처: x.partner ? x.partner.code + " " + x.partner.name : "", 차변: x.debit || 0, 대변: x.credit || 0, 관리항목: x.mgmt || "", 전표일자: x.date || "" });
+  add("7_임대료전표", (result.rent || []).map(vrow));
+  add("8_임차료전표", result.lease ? result.lease.lines.map(vrow) : []);
+  // 9 입력 자료
+  add("9_입력자료", [
+    ["자료", "값"],
+    ["AJ 작업장 구내용(14C·18F)", inp.ajGunae ? `${Object.keys(inp.ajGunae).length}곳 · 합 ${sumV(inp.ajGunae).toLocaleString()}` : "없음(EDI 사용)"],
+    ["AJ 품목 구내용", JSON.stringify(inp.ajItem || {})],
+    ["AJ 세금계산서", JSON.stringify(inp.invoices || {})],
+    ["3PL 고객 몫", JSON.stringify(inp.thirdParty || {})],
+    ["진행 단계", Object.entries(inp.steps || {}).filter(([, v]) => v).map(([k, v]) => k + " " + v).join(" / ")],
+  ]);
+  XLSX.writeFile(wb, `LETUS_파렛트마감_${ym}.xlsx`);
+}
 const CLOSE_STEPS = [["upload", "자료 업로드"], ["qty", "수량 대조"], ["mail", "업체 메일 발송"], ["claim", "이의 접수·조정"], ["voucher", "전표 입력"], ["confirm", "마감 확정"]];
 
 // 수량 대조 상세: 작업장 하나의 EDI 일별 재고와 미확인·거부 이동으로 AJ와의 차이 원인을 나눠 본다(추정)
@@ -2486,6 +2541,11 @@ function ClosingScreen({ caps = {} }) {
         !result ? <Splash text="계산 중…" /> : result.missing ? <div style={box}>③에서 ERP 금액 9개와 시디즈 재고금액을 넣으면 계산돼요.{needCls.length ? ` 분류가 필요한 작업장 ${needCls.length}곳은 청구에서 빠져 있어요.` : ""}</div> : (
           <>
             {needCls.length > 0 && <div style={{ ...box, background: C.amberBg, color: C.amber, fontSize: 13 }}>분류가 정해지지 않은 작업장 {needCls.length}곳(구내용 {nf(needCls.reduce((a, u) => a + u.use, 0))})이 청구에서 빠져 있어요. ②에서 정해 주세요.</div>}
+            <div style={{ ...box, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <b>우리 마감 엑셀</b>
+              <button style={btnTealSm} onClick={() => exportClosingWorkbook({ ym, P, R, result, units, inp, edi11A })}>마감 엑셀 내려받기 (증빙)</button>
+              <span style={{ fontSize: 12.5, color: C.sub }}>요약·이용료·안분 근거·작업장별 구내용(EDI·AJ·조정)·수량조정·전표·입력 자료를 시트별로 — 숫자마다 어디서 왔는지 따라갈 수 있게</span>
+            </div>
             <UsageReport R={R} P={P} ymLabel={result.ymLabel} setMsg={setMsg} />
             <VoucherBox title="임대료 전표 (브랜드 청구)" lines={result.rent} copyTsv={copyTsv} date={eng.monthEnd(ym)} setMsg={setMsg} />
             {result.lease ? <VoucherBox title="임차료 전표 (AJ)" lines={result.lease.lines} copyTsv={copyTsv} date={eng.monthEnd(ym)} setMsg={setMsg} /> : <div style={box}>③에 AJ 세금계산서 금액을 넣으면 임차료 전표가 나와요.</div>}
