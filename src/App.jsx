@@ -2139,60 +2139,196 @@ const nf = (n) => (n || 0).toLocaleString();
 const ERP_KEYS = [["퍼시스", "경인"], ["퍼시스", "지방"], ["퍼시스", "수출"], ["일룸", "경인"], ["일룸", "지방"], ["일룸", "수출"], ["시디즈", "경인"], ["시디즈", "지방"], ["시디즈", "수출"]];
 const INV_KEYS = ["18F,14C", "11A", "23E", "15A", "풀필먼트23E"];
 const TP_KEYS = ["블링크프로젝트", "네오스코리아", "에이스침대중부공장"];
-// 우리 마감 엑셀: 기존 엑셀처럼 시트끼리 수식으로 얽지 않고, PMS가 계산한 숫자와 근거를 시트별로 펼친다
-function exportClosingWorkbook({ ym, P, R, result, units, inp, edi11A }) {
-  const wb = XLSX.utils.book_new();
-  const add = (name, rows) => XLSX.utils.book_append_sheet(wb, Array.isArray(rows) && rows.length && !Array.isArray(rows[0]) ? XLSX.utils.json_to_sheet(rows) : XLSX.utils.aoa_to_sheet(rows.length ? rows : [["(없음)"]]), name);
-  const price = (R.cfg && R.cfg.rentPrice) || 2400;
-  const sumV = (o) => Object.values(o || {}).reduce((a, v) => a + (Number(v) || 0), 0);
-  const rentTot = (result.rent || []).reduce((a, x) => a + (x.debit || 0), 0);
-  const leaseTot = result.lease ? result.lease.lines.reduce((a, x) => a + (x.debit || 0), 0) : 0;
-  // 1 요약
-  add("1_요약", [
-    ["LETUS 파렛트 월마감", result.ymLabel], ["기간", `${P.from} ~ ${P.to} (${P.days}일)`], ["작성", new Date().toLocaleString()], [],
-    ["구분", "수량(월평균)", "금액(원)", "비고"],
-    ...["퍼시스", "일룸", "시디즈"].map((b) => [b + " 이용료(내수+해외)", R.bills[b].domQty + R.bills[b].expQty, (R.bills[b].domQty + R.bills[b].expQty) * price, `내수 ${R.bills[b].domQty} / 해외 ${R.bills[b].expQty} × ${price}`]),
-    ["11A 일룸 / 시디즈", `${R.a11.일룸} / ${R.a11.시디즈}`, (R.a11.일룸 + R.a11.시디즈) * 13200, "× 13,200"],
-    ["15A 시디즈 쿠팡", R.q15A, R.q15A * 13200, "× 13,200"],
-    ["23E 일룸 매트리스", R.q23E, R.q23E * 7000, "× 7,000 (일룸 내수에 포함 청구)"], [],
-    ["임대료 전표 합계(차변=대변)", "", rentTot, "브랜드 청구"],
-    ["임차료 전표 합계(차변=대변)", "", leaseTot, "AJ 지급"],
-    ["AJ 세금계산서 공급가액 합", "", sumV(inp.invoices), Object.entries(inp.invoices || {}).map(([k, v]) => `${k} ${Number(v).toLocaleString()}`).join(" / ")],
-    ["수량조정", (inp.adjust || []).length + "건", "", "구내용 합 " + (inp.adjust || []).reduce((a, x) => a + (Number(x.delta) || 0), 0)],
-  ]);
-  // 2 이용료 표(업무연락)
-  add("2_이용료표", R.table.map((t) => ({ 브랜드: t.brand, 구분: t.place, 내수_수량: t.dom, 내수_금액: t.dom * price, 해외_수량: t.exp, 해외_금액: t.exp * price, 비고: t.note || "" })));
-  // 3 안분 근거
-  const rt = R.ratios || {};
-  add("3_안분근거", [
-    ["항목", "값", "설명"],
-    ...Object.entries(R.avgByGroup || {}).map(([g, v]) => ["분류별 월평균 · " + g, v, "작업장 월평균의 합"]),
-    [], ["시디즈 음성창고 재고금액", Number(inp.sidizStockAmt) || 0, "ERP 재고현황"], ["÷ 기준 단가", (R.cfg && R.cfg.sidizUnit) || 881485, "2017 품의 기준(재검토 필요)"], ["= 양지센터 시디즈 몫", R.sidizYangji, "올림"],
-    [], ["11A 출고(일룸/시디즈)", `${(inp.out11A || edi11A || {}).일룸 || 0} / ${(inp.out11A || edi11A || {}).시디즈 || 0}`, inp.out11A ? "파일" : "EDI 자동"],
-    [], ["ERP 매출", "경인 / 지방 / 수출", ""],
-    ...["퍼시스", "일룸", "시디즈"].map((b) => [b, ["경인", "지방", "수출"].map((k) => Number(((inp.erp || {})[b] || {})[k] || 0).toLocaleString()).join(" / "), "관계사 제외·시공가·매출실적"]),
-    [], ["비율(계산값)", JSON.stringify(rt), ""],
-  ]);
-  // 4 작업장별 구내용
-  add("4_작업장구내용", units.map((u) => ({ 작업장: u.name, 제품: u.item || "", 계정: CLOSE_OPS[u.account] || u.account, 분류: u.grp || "분류 필요", EDI_구내용: u.gunae, 마이너스0_구내용: u.pos, AJ_구내용: u.aj, "차이(EDI-AJ)": u.aj !== null ? u.gunae - u.aj : null, 수량조정: u.adj || 0, 계산_구내용: u.use, 월평균: Math.ceil(u.use / P.days) })));
-  // 5 계산에 들어간 줄(분류별)
-  add("5_계산줄", (R.lines || []).map((l) => ({ 이름: l.name, 분류: l.group, 구내용: l.gunae, 월평균: l.avg })));
-  // 6 수량조정·이의
-  add("6_수량조정", (inp.adjust || []).map((a) => ({ 작업장: a.name, 계정: CLOSE_OPS[a.account] || a.account, "구내용 ±": a.delta, "월평균 환산": Math.round((a.delta / P.days) * 10) / 10, 사유: a.reason, 등록: a.at })));
-  // 7·8 전표
-  const vrow = (x) => ({ 계정코드: x.code || "", 계정과목: x.acct, 코스트센터: x.cc ? (x.ccCode || "") + " " + x.cc : "", 적요: x.memo, 거래처: x.partner ? x.partner.code + " " + x.partner.name : "", 차변: x.debit || 0, 대변: x.credit || 0, 관리항목: x.mgmt || "", 전표일자: x.date || "" });
-  add("7_임대료전표", (result.rent || []).map(vrow));
-  add("8_임차료전표", result.lease ? result.lease.lines.map(vrow) : []);
-  // 9 입력 자료
-  add("9_입력자료", [
-    ["자료", "값"],
-    ["AJ 작업장 구내용(14C·18F)", inp.ajGunae ? `${Object.keys(inp.ajGunae).length}곳 · 합 ${sumV(inp.ajGunae).toLocaleString()}` : "없음(EDI 사용)"],
-    ["AJ 품목 구내용", JSON.stringify(inp.ajItem || {})],
-    ["AJ 세금계산서", JSON.stringify(inp.invoices || {})],
-    ["3PL 고객 몫", JSON.stringify(inp.thirdParty || {})],
-    ["진행 단계", Object.entries(inp.steps || {}).filter(([, v]) => v).map(([k, v]) => k + " " + v).join(" / ")],
-  ]);
-  XLSX.writeFile(wb, `LETUS_파렛트마감_${ym}.xlsx`);
+// 우리 마감 엑셀: 서식·계산식이 살아 있는 증빙 파일. 숫자가 어디서 와서 어떻게 계산됐는지 시트마다 보이게 한다.
+// ExcelJS는 내려받기 누를 때만 CDN에서 불러온다(앱 크기 그대로)
+const loadExcelJS = () => window.ExcelJS ? Promise.resolve(window.ExcelJS) : new Promise((ok, no) => {
+  const s = document.createElement("script"); s.src = "https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js";
+  s.onload = () => ok(window.ExcelJS); s.onerror = () => no(new Error("엑셀 도구를 불러오지 못했어요(인터넷 연결 확인)")); document.head.appendChild(s);
+});
+async function exportClosingWorkbook({ ym, P, R, result, units, inp, edi11A }) {
+  let ExcelJS;
+  try { ExcelJS = await loadExcelJS(); } catch (e) { alert(e.message); return; }
+  const wb = new ExcelJS.Workbook(); wb.creator = "LETUS PMS"; wb.created = new Date();
+  const price = (R.cfg && R.cfg.rentPrice) || 2400, unitS = (R.cfg && R.cfg.sidizUnit) || 881485;
+  const FONT = "맑은 고딕";
+  const TEAL = "FF0F7A6C", TEAL_L = "FFE2F2EF", GRAY = "FFF2F4F3", AMBER_L = "FFFDF0DC", RED = "FFB3261E", BLUE_L = "FFE7F0FF";
+  const NUM = "#,##0", PCT = "0.00%";
+  const thin = { style: "thin", color: { argb: "FFC9D1CE" } };
+  const box = { top: thin, left: thin, bottom: thin, right: thin };
+  const sheet = (name, widths) => { const ws = wb.addWorksheet(name, { views: [{ showGridLines: false }] }); ws.columns = widths.map((w) => ({ width: w })); ws.properties.defaultRowHeight = 18; return ws; };
+  const title = (ws, text, sub, span) => {
+    ws.mergeCells(1, 1, 1, span); const c = ws.getCell(1, 1); c.value = text; c.font = { name: FONT, size: 15, bold: true, color: { argb: "FFFFFFFF" } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: TEAL } }; c.alignment = { vertical: "middle", indent: 1 }; ws.getRow(1).height = 30;
+    ws.mergeCells(2, 1, 2, span); const s = ws.getCell(2, 1); s.value = sub; s.font = { name: FONT, size: 9.5, color: { argb: "FF5A6966" } }; s.alignment = { indent: 1 };
+    return 4;
+  };
+  const section = (ws, r, text, span, note) => {
+    ws.mergeCells(r, 1, r, span); const c = ws.getCell(r, 1); c.value = text; c.font = { name: FONT, size: 11.5, bold: true, color: { argb: TEAL } };
+    c.border = { bottom: { style: "medium", color: { argb: TEAL } } };
+    if (note) { ws.mergeCells(r + 1, 1, r + 1, span); const n = ws.getCell(r + 1, 1); n.value = note; n.font = { name: FONT, size: 9, italic: true, color: { argb: "FF5A6966" } }; n.alignment = { wrapText: true }; return r + 2; }
+    return r + 1;
+  };
+  const header = (ws, r, cols) => { cols.forEach((h, i) => { const c = ws.getCell(r, i + 1); c.value = h; c.font = { name: FONT, size: 10, bold: true }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: TEAL_L } }; c.border = box; c.alignment = { horizontal: "center", vertical: "middle", wrapText: true }; }); ws.getRow(r).height = 30; return r + 1; };
+  const put = (ws, r, vals, o = {}) => {
+    vals.forEach((v, i) => {
+      const c = ws.getCell(r, i + 1); c.value = v; c.border = box; c.font = { name: FONT, size: 10, bold: !!o.bold, color: o.color ? { argb: o.color } : undefined };
+      const isNum = typeof v === "number" || (v && v.formula);
+      if (isNum) { c.numFmt = (o.fmt && o.fmt[i]) || NUM; c.alignment = { horizontal: "right" }; } else c.alignment = { vertical: "top", wrapText: !!o.wrap };
+      if (o.fill) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: o.fill } };
+    });
+    return r + 1;
+  };
+  const F = (formula, result) => ({ formula, result });
+
+  // ── 1. 요약 ───────────────────────────────────────
+  {
+    const ws = sheet("1. 요약", [30, 16, 18, 52]);
+    let r = title(ws, `LETUS 파렛트 월마감 · ${result.ymLabel}`, `기간 ${P.from} ~ ${P.to} (${P.days}일) · 작성 ${new Date().toLocaleString()} · LETUS PMS`, 4);
+    r = section(ws, r, "마감은 이렇게 계산했어요", 4);
+    [["①", "구내용", "기간 중 매일 재고의 합. 14C·18F는 AJ 거래명세서 작업장별 값을 쓰고, 이의로 고친 수량(수량조정)을 더함 → 「3. 작업장별 구내용」"],
+     ["②", "월평균", "구내용 ÷ " + P.days + "일, 올림 → 작업장마다 계산 후 분류(양지·안성공장·충주·지방센터…)별로 합침 → 「2. 산출과정」 ①"],
+     ["③", "안분", "분류별 월평균을 ERP 매출 비율(경인 내수 : 해외, 지방 내수 비중)과 고정 비율(시디즈 공장 64/26.6/9.4, 시디즈 몫 ÷ 881,485)로 브랜드에 나눔 → 「2. 산출과정」 ②③④"],
+     ["④", "청구", "브랜드별 수량 × " + price.toLocaleString() + "원(11A·15A 13,200 / 23E 7,000) → 「4. 이용료」, 임대료 전표 → 「6」"],
+     ["⑤", "지급", "AJ 세금계산서 − 15A·풀필먼트·3PL 몫을 39 / 47.3 / 13.7로 나눠 임차료 전표 → 「7」"]].forEach((x) => { r = put(ws, r, [x[0] + " " + x[1], "", "", x[2]], { wrap: true }); ws.mergeCells(r - 1, 1, r - 1, 3); ws.getRow(r - 1).height = 32; });
+    r++;
+    r = section(ws, r, "결과", 4);
+    r = header(ws, r, ["구분", "수량(월평균)", "금액(원)", "근거"]);
+    const s0 = r;
+    ["퍼시스", "일룸", "시디즈"].forEach((b) => { const q = R.bills[b].domQty + R.bills[b].expQty; r = put(ws, r, [b + " 이용료", q, F(`B${r}*${price}`, q * price), `내수 ${R.bills[b].domQty} + 해외 ${R.bills[b].expQty} (「4. 이용료」 소계)`]); });
+    r = put(ws, r, ["11A (일룸 + 시디즈)", R.a11.일룸 + R.a11.시디즈, F(`B${r}*13200`, (R.a11.일룸 + R.a11.시디즈) * 13200), `일룸 ${R.a11.일룸} / 시디즈 ${R.a11.시디즈} · 출고 비율로 나눔`]);
+    r = put(ws, r, ["15A 시디즈 쿠팡", R.q15A, F(`B${r}*13200`, R.q15A * 13200), "AJ 일반유형 15A 구내용 ÷ 일수"]);
+    r = put(ws, r, ["23E 일룸 매트리스", R.q23E, F(`B${r}*7000`, R.q23E * 7000), "일룸 내수에 포함해 청구"]);
+    r = put(ws, r, ["청구 합계(공급가)", F(`SUM(B${s0}:B${r - 1})`), F(`SUM(C${s0}:C${r - 1})`), ""], { bold: true, fill: GRAY });
+    r++;
+    const rentTot = (result.rent || []).reduce((a, x) => a + (x.debit || 0), 0);
+    const leaseTot = result.lease ? result.lease.lines.reduce((a, x) => a + (x.debit || 0), 0) : 0;
+    const invSum = Object.values(inp.invoices || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+    r = header(ws, r, ["전표·지급", "", "금액(원)", "근거"]);
+    r = put(ws, r, ["임대료 전표 (브랜드 청구, VAT 포함)", "", rentTot, "「6. 임대료 전표」 차변 = 대변"]);
+    r = put(ws, r, ["임차료 전표 (AJ 지급, VAT 포함)", "", leaseTot, "「7. 임차료 전표」 차변 = 대변"]);
+    r = put(ws, r, ["AJ 세금계산서 공급가액 합", "", invSum, Object.entries(inp.invoices || {}).map(([k, v]) => `${k} ${Number(v).toLocaleString()}`).join(" · ")], { wrap: true });
+    r++;
+    const adjN = (inp.adjust || []).length, adjQ = (inp.adjust || []).reduce((a, x) => a + (Number(x.delta) || 0), 0);
+    r = put(ws, r, ["수량조정(업체 이의 등)", adjN + "건", adjQ, "구내용 합 · 「5. 수량조정」"], { fill: adjN ? AMBER_L : undefined });
+    ws.getColumn(4).alignment = { wrapText: true };
+  }
+
+  // ── 2. 산출과정 ─────────────────────────────────
+  {
+    const ws = sheet("2. 산출과정", [30, 16, 16, 16, 44]);
+    let r = title(ws, "산출 과정", "분류별 월평균 → 비율 → 브랜드 나누기. 노란 칸은 입력값, 나머지는 계산식", 5);
+    r = section(ws, r, "① 분류별 월평균", 5, "작업장마다 구내용 ÷ " + P.days + "일 올림 후 분류별로 합침 (「3. 작업장별 구내용」 월평균의 분류 합)");
+    r = header(ws, r, ["분류", "월평균 합", "", "", "설명"]);
+    const g0 = r;
+    Object.entries(R.avgByGroup || {}).sort((a, b) => b[1] - a[1]).forEach(([g, v]) => { r = put(ws, r, [g, v, "", "", (typeof GROUP_HINT !== "undefined" && GROUP_HINT[g]) || ""]); });
+    r = put(ws, r, ["합계", F(`SUM(B${g0}:B${r - 1})`), "", "", ""], { bold: true, fill: GRAY });
+    r++;
+    r = section(ws, r, "② ERP 매출로 만든 비율", 5, "ERP 제품구분별 수주/판매실적(관계사 제외·시공가·매출실적). 비율 칸은 엑셀 계산식이라 매출을 바꾸면 같이 바뀌어요");
+    r = header(ws, r, ["브랜드", "경인 내수", "지방 내수", "수출", "비율"]);
+    const e0 = r; const erp = inp.erp || {};
+    ["퍼시스", "일룸", "시디즈"].forEach((b) => { const e = erp[b] || {}; r = put(ws, r, [b, Number(e.경인) || 0, Number(e.지방) || 0, Number(e.수출) || 0, F(`B${r}/(B${r}+D${r})`)], { fmt: [null, NUM, NUM, NUM, PCT] }); [2, 3, 4].forEach((c) => { ws.getCell(r - 1, c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: AMBER_L } }; }); });
+    r = put(ws, r, ["", "", "", "", "← 양지센터용 경인 내수 비중 = 경인 ÷ (경인 + 수출)"], { color: "FF5A6966" });
+    r = put(ws, r, ["공장(퍼시스+일룸) 내수 비중", F(`(B${e0}+C${e0}+B${e0 + 1}+C${e0 + 1})/(B${e0}+C${e0}+D${e0}+B${e0 + 1}+C${e0 + 1}+D${e0 + 1})`), "", "", "안성·충주 공장: (경인+지방) ÷ 전체"], { fmt: [null, PCT] });
+    const lsum = `(C${e0}+C${e0 + 1}+C${e0 + 2})`;
+    ["퍼시스", "일룸", "시디즈"].forEach((b, i) => { r = put(ws, r, [`지방센터 ${b} 비중`, F(`C${e0 + i}/${lsum}`), "", "", "지방 내수 ÷ 3사 지방 내수 합"], { fmt: [null, PCT] }); });
+    r++;
+    r = section(ws, r, "③ 고정 기준 (재검토 대상)", 5);
+    r = header(ws, r, ["항목", "값", "", "", "출처"]);
+    const sa = r; r = put(ws, r, ["시디즈 음성창고 재고금액", Number(inp.sidizStockAmt) || 0, "", "", "ERP 재고현황 Total 재고금액"], {}); ws.getCell(sa, 2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: AMBER_L } };
+    r = put(ws, r, ["÷ 기준 단가", unitS, "", "", "2017 품의(바로스-품의17-07-00042) · 9년간 미갱신"]);
+    r = put(ws, r, ["= 양지센터 시디즈 몫(장)", F(`ROUNDUP(B${sa}/B${sa + 1},0)`, R.sidizYangji), "", "", "올림"], { bold: true });
+    const sf = (R.cfg && R.cfg.sidizFactory) || {}; const ls = (R.cfg && R.cfg.leaseSplit) || {};
+    r = put(ws, r, ["시디즈 공장 나누기 (시디즈/퍼시스/일룸)", `${(sf.시디즈 * 100).toFixed(1)} / ${(sf.퍼시스 * 100).toFixed(1)} / ${(sf.일룸 * 100).toFixed(1)} %`, "", "", "고정 비율"]);
+    r = put(ws, r, ["임차료 브랜드 나누기 (퍼시스/일룸/시디즈)", `${(ls.퍼시스 * 100).toFixed(1)} / ${(ls.일룸 * 100).toFixed(1)} / ${(ls.시디즈 * 100).toFixed(1)} %`, "", "", "고정 비율"]);
+    const o11 = inp.out11A || edi11A || {};
+    r = put(ws, r, ["11A 출고 (일룸 / 시디즈)", `${o11.일룸 || 0} / ${o11.시디즈 || 0}`, "", "", inp.out11A ? "11A 출고내역 파일" : "EDI 이동으로 자동 계산"]);
+    r++;
+    r = section(ws, r, "④ 브랜드별로 나눈 결과", 5, "분류별 월평균에 ②③ 비율을 곱해 정수로 내림, 남는 수는 내수에 더함(보정). 결과는 「4. 이용료」와 같음");
+    r = header(ws, r, ["브랜드", "구분", "내수", "해외", "비고"]);
+    R.table.forEach((t) => { r = put(ws, r, [t.brand, PLACE_LABEL[t.place] || t.place, t.dom, t.exp, t.note || ""]); });
+  }
+
+  // ── 3. 작업장별 구내용 ─────────────────────────────
+  {
+    const ws = sheet("3. 작업장별 구내용", [26, 8, 12, 14, 14, 13, 13, 13, 11, 14, 11]);
+    let r = title(ws, "작업장별 구내용", `EDI = 매일 재고 합(PMS 연동) · AJ = 거래명세서 · 계산 구내용 = AJ(없으면 EDI) + 수량조정 · 월평균 = ROUNDUP(계산 구내용 ÷ ${P.days}, 0)`, 11);
+    ws.getCell(r, 1).value = "일수"; ws.getCell(r, 2).value = P.days; ws.getCell(r, 2).font = { name: FONT, bold: true }; ws.getCell(r, 2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: AMBER_L } }; const dayCell = `$B$${r}`; r += 2;
+    r = header(ws, r, ["작업장", "제품", "계정", "분류", "EDI 구내용", "마이너스=0", "AJ 구내용", "차이 EDI−AJ", "수량조정", "계산 구내용", "월평균"]);
+    const h = r - 1; const u0 = r;
+    units.forEach((u) => {
+      const row = r;
+      r = put(ws, r, [u.name, u.item || "", CLOSE_OPS[u.account] || u.account, u.grp || "분류 필요", u.gunae, u.pos, u.aj === null ? null : u.aj,
+        u.aj === null ? null : F(`E${row}-G${row}`, u.gunae - u.aj), u.adj || 0, F(`IF(G${row}="",E${row},G${row})+I${row}`, u.use), F(`ROUNDUP(J${row}/${dayCell},0)`, Math.ceil(u.use / P.days))]);
+      if (u.aj !== null && u.aj !== u.gunae) ws.getCell(row, 8).font = { name: FONT, size: 10, color: { argb: RED }, bold: true };
+      if (u.adj) ws.getCell(row, 9).fill = { type: "pattern", pattern: "solid", fgColor: { argb: BLUE_L } };
+      if (!u.grp) ws.getCell(row, 4).font = { name: FONT, size: 10, color: { argb: RED } };
+    });
+    put(ws, r, ["합계", "", "", "", F(`SUM(E${u0}:E${r - 1})`), F(`SUM(F${u0}:F${r - 1})`), F(`SUM(G${u0}:G${r - 1})`), F(`SUM(H${u0}:H${r - 1})`), F(`SUM(I${u0}:I${r - 1})`), F(`SUM(J${u0}:J${r - 1})`), F(`SUM(K${u0}:K${r - 1})`)], { bold: true, fill: GRAY });
+    ws.views = [{ state: "frozen", ySplit: h, showGridLines: false }];
+    ws.autoFilter = { from: { row: h, column: 1 }, to: { row: r, column: 11 } };
+  }
+
+  // ── 4. 이용료(업무연락) ─────────────────────────────
+  {
+    const ws = sheet("4. 이용료", [12, 18, 13, 16, 13, 16, 36]);
+    let r = title(ws, `${result.ymLabel} 파렛트 이용료`, `${P.from} ~ ${P.to} (${P.days}일) · 금액 = 일평균 사용량 × ${price.toLocaleString()}원 · 업무연락 본문과 같은 표`, 7);
+    ws.getCell(r, 1).value = "단가"; ws.getCell(r, 2).value = price; ws.getCell(r, 2).numFmt = NUM; ws.getCell(r, 2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: AMBER_L } }; const pc = `$B$${r}`; r += 2;
+    r = header(ws, r, ["브랜드", "구분", "내수 수량", "내수 금액", "해외 수량", "해외 금액", "비고"]);
+    const subs = [];
+    ["퍼시스", "일룸", "시디즈"].forEach((b) => {
+      const rows = R.table.filter((t) => t.brand === b); const b0 = r;
+      rows.forEach((t) => { r = put(ws, r, [b, PLACE_LABEL[t.place] || t.place, t.dom, F(`C${r}*${pc}`, t.dom * price), t.exp, F(`E${r}*${pc}`, t.exp * price), t.note || ""]); });
+      r = put(ws, r, [b, "소계", F(`SUM(C${b0}:C${r - 1})`), F(`SUM(D${b0}:D${r - 1})`), F(`SUM(E${b0}:E${r - 1})`), F(`SUM(F${b0}:F${r - 1})`), ""], { bold: true, fill: GRAY }); subs.push(r - 1);
+    });
+    const sm = (col) => subs.map((x) => col + x).join("+");
+    r = put(ws, r, ["합계", "", F(sm("C")), F(sm("D")), F(sm("E")), F(sm("F")), ""], { bold: true, fill: TEAL_L });
+    r = put(ws, r, ["수량 총계", "", F(`C${r - 1}+E${r - 1}`), "금액 총계", F(`D${r - 1}+F${r - 1}`), "", ""], { bold: true });
+    r += 1;
+    r = header(ws, r, ["제품", "구분", "일평균 사용량", "단가", "임대 사용료", "", "비고"]);
+    [["11A", "일룸", R.a11.일룸, 13200, "일룸 온라인"], ["11A", "시디즈", R.a11.시디즈, 13200, "시디즈 온라인"], ["15A", "시디즈 쿠팡", R.q15A, 13200, "시디즈 온라인"], ["23E", "일룸 매트리스", R.q23E, 7000, "일룸 내수에 포함 청구"]].forEach((x) => { r = put(ws, r, [x[0], x[1], x[2], x[3], F(`C${r}*D${r}`, x[2] * x[3]), "", x[4]]); });
+  }
+
+  // ── 5. 수량조정 ─────────────────────────────────
+  {
+    const ws = sheet("5. 수량조정", [24, 14, 12, 12, 48, 20]);
+    let r = title(ws, "수량조정 (업체 이의·AJ 확인)", "EDI 원본은 그대로 두고 이 달 마감 계산에만 더한 수량. 구내용 단위(월평균 1장 = 구내용 " + P.days + ")", 6);
+    r = header(ws, r, ["작업장", "계정", "구내용 ±", "월평균 환산", "사유", "등록"]);
+    const a0 = r;
+    (inp.adjust || []).forEach((a) => { r = put(ws, r, [a.name, CLOSE_OPS[a.account] || a.account, Number(a.delta) || 0, F(`C${r}/${P.days}`), a.reason, a.at ? new Date(a.at).toLocaleString() : ""], { fmt: [null, null, NUM, "0.0"], wrap: true }); });
+    if (!(inp.adjust || []).length) r = put(ws, r, ["이 달 수량조정 없음", "", "", "", "", ""]);
+    else put(ws, r, ["합계", "", F(`SUM(C${a0}:C${r - 1})`), F(`SUM(D${a0}:D${r - 1})`), "", ""], { bold: true, fill: GRAY, fmt: [null, null, NUM, "0.0"] });
+  }
+
+  // ── 6·7. 전표 ───────────────────────────────────
+  const voucher = (name, lines, note) => {
+    const ws = sheet(name, [12, 16, 24, 40, 22, 15, 15, 46]);
+    let r = title(ws, name.replace(/^\d\. /, ""), note, 8);
+    r = header(ws, r, ["계정코드", "계정과목", "코스트센터", "적요", "거래처", "차변", "대변", "관리항목(ERP 입력값)"]);
+    const v0 = r;
+    (lines || []).forEach((x) => { r = put(ws, r, [x.code || "", x.acct, x.cc ? (x.ccCode || "") + " " + x.cc : "", x.memo, x.partner ? x.partner.code + " " + x.partner.name : "", x.debit || 0, x.credit || 0, x.mgmt || ""], { wrap: true }); });
+    r = put(ws, r, ["", "", "", "합계", "", F(`SUM(F${v0}:F${r - 1})`), F(`SUM(G${v0}:G${r - 1})`), F(`IF(F${r}=G${r},"차변 = 대변 ✓","불일치")`)], { bold: true, fill: GRAY });
+  };
+  voucher("6. 임대료 전표", result.rent, `전표일자 ${(result.rent && result.rent[0] && result.rent[0].date) || ""} · 브랜드 청구(외상매출금 / 용역수입 / 예수부가세)`);
+  voucher("7. 임차료 전표", result.lease ? result.lease.lines : [], "AJ 지급((용)임차료 / 선급부가세 / 외상매입금) · 선급부가세는 A6로 작성 후 세금계산서 연결");
+
+  // ── 8. 입력 자료 ────────────────────────────────
+  {
+    const ws = sheet("8. 입력 자료", [30, 22, 60]);
+    let r = title(ws, "입력 자료", "이 마감에 쓴 원자료와 출처", 3);
+    r = header(ws, r, ["자료", "값", "출처·내용"]);
+    const sumV = (o) => Object.values(o || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+    r = put(ws, r, ["AJ 작업장별 구내용(14C·18F)", inp.ajGunae ? sumV(inp.ajGunae) : 0, inp.ajGunae ? `AJ 작업장별 거래명세서 엑셀 · ${Object.keys(inp.ajGunae).length}곳` : "없음 → EDI 구내용 사용"]);
+    Object.entries(inp.ajItem || {}).forEach(([k, v]) => { r = put(ws, r, ["AJ 구내용 " + k, Number(v) || 0, "AJ 통합 거래명세서 PDF"]); });
+    Object.entries(inp.invoices || {}).forEach(([k, v]) => { r = put(ws, r, ["AJ 세금계산서 " + k, Number(v) || 0, "AJ 통합 거래명세서 PDF 공급가액"]); });
+    Object.entries(inp.thirdParty || {}).forEach(([k, v]) => { r = put(ws, r, ["3PL 고객 몫 " + k, Number(v) || 0, "18F·14C 계산서 안 · 풀필먼트로 대체"]); });
+    r = put(ws, r, ["시디즈 음성창고 재고금액", Number(inp.sidizStockAmt) || 0, "ERP 재고현황"]);
+    ["퍼시스", "일룸", "시디즈"].forEach((b) => { const e = (inp.erp || {})[b] || {}; r = put(ws, r, [`ERP 매출 ${b} (경인/지방/수출)`, (Number(e.경인) || 0) + (Number(e.지방) || 0) + (Number(e.수출) || 0), `${Number(e.경인 || 0).toLocaleString()} / ${Number(e.지방 || 0).toLocaleString()} / ${Number(e.수출 || 0).toLocaleString()}`]); });
+    r++;
+    r = put(ws, r, ["진행 단계", "", Object.entries(inp.steps || {}).filter(([, v]) => v).map(([k, v]) => `${(CLOSE_STEPS.find((s) => s[0] === k) || [k, k])[1]} ${new Date(v).toLocaleString()}`).join(" · ") || "기록 없음"], { wrap: true });
+  }
+
+  const buf = await wb.xlsx.writeBuffer();
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+  a.download = `LETUS_파렛트마감_${ym}.xlsx`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 const CLOSE_STEPS = [["upload", "자료 업로드"], ["qty", "수량 대조"], ["mail", "업체 메일 발송"], ["claim", "이의 접수·조정"], ["voucher", "전표 입력"], ["confirm", "마감 확정"]];
 
