@@ -2510,7 +2510,8 @@ function ClosingScreen({ caps = {} }) {
       const mine = allAdjust.filter((a) => a.account === u.account && a.name === name);
       const exempt = mine.some((a) => a.kind === "exempt");
       const adj = mine.reduce((s, a) => s + (Number(a.delta) || 0), 0);
-      const base = aj !== null ? aj : u.gunae;
+      // AJ 값이 없는 곳(EDI만)은 마이너스 구내용을 청구에서 0으로 본다(EDI 장부 마이너스가 브랜드 청구를 깎지 않게)
+      const base = aj !== null ? aj : u.account === "P156063" ? Math.max(u.gunae, 0) : u.gunae;
       return { ...u, name, raw: w ? w.name : "", kind: w ? w.kind : "", grp, aj, adj: exempt ? -base : adj, exempt, use: exempt ? 0 : base + adj };
     }).filter((u) => u.gunae || u.aj).sort((a, b) => b.use - a.use);
   }, [gun, cls, wpName, inp.ajGunae, allAdjust]);

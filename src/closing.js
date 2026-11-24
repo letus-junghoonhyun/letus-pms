@@ -153,7 +153,7 @@ export function leaseVoucher(invoices, thirdParty, ym, split = CLOSING_DEFAULTS.
 
 // ERP 전표 입력용 코드 (2026-11-08 ERP 화면에서 확인)
 export const ERP_ACCT = { 외상매출금1: "1112010", 용역수입: "410051B", 예수부가세: "2106000", "(용)임차료": "850370B", 선급부가세: "1117000", 외상매입금: "2100510" };
-export const ERP_CC = { 퍼시스PLT: "CB024701", 일룸PLT: "CB024702", 시디즈PLT: "CB024703", 풀필먼트PLT: "CB024704" };
+export const ERP_CC = { 퍼시스PLT: "CB024701", 일룸PLT: "CB024702", 시디즈PLT: "CB024703", 풀필먼트PLT: "CB024704", "풀필먼트 OUTSITE물류": "CB023801", "풀필먼트양지3 물류(공통)": "CB023514" }; // 풀필먼트 2개는 2026-11 ERP 입력 연습 때 확인한 코드
 // 줄마다 계정코드·코스트센터 코드·관리항목(ERP 입력값)을 붙인다. date = 전표일자(해당 월 말일)
 export function erpAnnotate(lines, date) {
   return lines.map((x) => {
