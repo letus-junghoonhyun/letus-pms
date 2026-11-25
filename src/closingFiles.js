@@ -71,9 +71,11 @@ export function readWorkbook(wb, fileName) {
       const v = { 경인: num(tot[col("내수금액(경인)")]), 지방: num(tot[col("내수금액(지방)")]), 수출: num(tot[col("수출금액")]), 합계: num(tot[col("합계금액")]) };
       return { kind: "erp", company, value: v, note: `ERP 수주/판매실적 ${company} (경인 ${v.경인.toLocaleString()} / 지방 ${v.지방.toLocaleString()} / 수출 ${v.수출.toLocaleString()})` };
     }
-    const si = s.rows.findIndex((r) => r.some((c) => String(c).trim() === "재고금액"));
+    // 재고금액 열: 예전 양식 "재고금액", 새 양식 "재고금액(공장도가)" (입고가 열은 쓰지 않음)
+    const isAmt = (x) => /^재고금액(\(공장도가\))?$/.test(String(x).replace(/\s/g, ""));
+    const si = s.rows.findIndex((r) => r.some(isAmt));
     if (si >= 0) { // ERP 일/월기준 재고현황
-      const c = s.rows[si].findIndex((x) => String(x).trim() === "재고금액");
+      const c = s.rows[si].findIndex(isAmt);
       const tot = s.rows.slice(si + 1).reverse().find((r) => String(r[0]).trim() === "Total");
       if (tot) return { kind: "stock", amount: num(tot[c]), note: `ERP 재고현황 Total 재고금액 ${num(tot[c]).toLocaleString()}` };
     }
