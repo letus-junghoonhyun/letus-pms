@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LETUS PMS · EDI 재고 자동 동기화
 // @namespace    letus-pms
-// @version      3.18
+// @version      3.19
 // @updateURL    https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @downloadURL  https://raw.githubusercontent.com/letus-junghoonhyun/letus-pms/main/tools/edi-sync.user.js
 // @description  EDI 로그인 후 메인 화면이 열리면, 로그인한 계정(14C·18F / 일반유형 / 15A 전용 / 23E 전용)의 재고·이동을 어제까지 조회해 PMS로 보냅니다.
@@ -122,6 +122,8 @@
     return { code: c[1], name: n ? n[1] : "" };
   }
 
+  // XML이 아닌 응답: 로그인 화면이면 세션 만료, 아니면 서버 지연("모든작업장 합계"는 수십 초 걸려 시간초과가 잦다)
+  function ediFail(text) { return /loginId|login_form|index.do|세션|로그인/i.test(text.slice(0, 4000)) ? "EDI 응답이 비정상이에요(로그인 만료?)" : "EDI 응답 지연(서버 시간초과) — 잠시 뒤 다시 받아요"; }
   async function pull(demd, no, from, to) {
     const body = "S_SAVENAME=" + COLS.join("|") + "&title=조회기간&begnDate=" + from + "&enddDate=" + to +
       "&title=제품유형&itemCode=&title=작업장&demdCode=" + encodeURIComponent(demd.code) + "&demdName=" + encodeURIComponent(demd.name) +
@@ -129,7 +131,7 @@
     const res = await fetch("/edi/stoc/EDI_STOC_CLNT_LIST_NEW.do", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }, body, credentials: "same-origin" });
     const text = await res.text();
     const at = text.indexOf("<?xml");
-    if (at < 0) throw new Error("EDI 응답이 비정상이에요(로그인 만료?)");
+    if (at < 0) throw new Error(ediFail(text));
     const xml = new DOMParser().parseFromString(text.slice(at), "text/xml");
     const out = [];
     xml.querySelectorAll("TR").forEach((tr) => {
@@ -313,12 +315,12 @@
           if (w.last_synced) { const rf = refresh.has(w.no) ? refreshFrom : recentFrom; if (rf < from) from = rf; }
           let guard = 0, any = false;
           while (from <= yesterday && guard++ < 10) {
-            const to = new Date(Math.min(addDays(from, CHUNK_DAYS - 1), yesterday));
+            const to = new Date(Math.min(addDays(from, (w.no === 0 ? 3 : CHUNK_DAYS) - 1), yesterday)); // 전체 합계(0번)는 느려서 3일씩
             say(`${w.name} ${fmt(from)}~${fmt(to)} 조회 중… (${label()})`, true);
             let rows;
             for (let t = 0; ; t++) { // 일시 오류는 최대 2번 재시도
               try { rows = await pull(demd, w.no, fmt(from), fmt(to)); break; }
-              catch (e) { if (/로그인 만료/.test(e.message) || t >= 2) throw e; await sleep(4000 * (t + 1)); }
+              catch (e) { if (/로그인 만료/.test(e.message) || t >= 3) throw e; await sleep(8000 * (t + 1)); }
             }
             if (rows.length) { await assertAccount(); await call("upsert", { rows, note: "userscript " + w.name }); st.total += rows.length; any = true; }
             from = addDays(to, 1);
