@@ -2145,6 +2145,79 @@ const loadExcelJS = () => window.ExcelJS ? Promise.resolve(window.ExcelJS) : new
   const s = document.createElement("script"); s.src = "https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js";
   s.onload = () => ok(window.ExcelJS); s.onerror = () => no(new Error("엑셀 도구를 불러오지 못했어요(인터넷 연결 확인)")); document.head.appendChild(s);
 });
+// 브랜드 발송용 마감 엑셀: AJ 마감자료 기준 숫자만. EDI·차이·마이너스·수량조정·전표 같은 내부 자료는 넣지 않는다
+async function exportBrandWorkbook({ ym, P, R, result }) {
+  let ExcelJS;
+  try { ExcelJS = await loadExcelJS(); } catch (e) { alert(e.message); return; }
+  const wb = new ExcelJS.Workbook(); wb.creator = "레터스 운송사업팀";
+  const price = (R.cfg && R.cfg.rentPrice) || 2400;
+  const FONT = "맑은 고딕", TEAL = "FF0F7A6C", TEAL_L = "FFE2F2EF", GRAY = "FFF2F4F3", NUM = "#,##0";
+  const thin = { style: "thin", color: { argb: "FFC9D1CE" } }, box = { top: thin, left: thin, bottom: thin, right: thin };
+  const sheet = (name, widths) => { const ws = wb.addWorksheet(name, { views: [{ showGridLines: false }] }); ws.columns = widths.map((w) => ({ width: w })); return ws; };
+  const title = (ws, text, sub, span) => {
+    ws.mergeCells(1, 1, 1, span); const c = ws.getCell(1, 1); c.value = text; c.font = { name: FONT, size: 14, bold: true, color: { argb: "FFFFFFFF" } }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: TEAL } }; c.alignment = { vertical: "middle", indent: 1 }; ws.getRow(1).height = 28;
+    ws.mergeCells(2, 1, 2, span); const s = ws.getCell(2, 1); s.value = sub; s.font = { name: FONT, size: 9.5, color: { argb: "FF5A6966" } }; s.alignment = { indent: 1, wrapText: true }; ws.getRow(2).height = 30;
+    return 4;
+  };
+  const header = (ws, r, cols) => { cols.forEach((h, i) => { const c = ws.getCell(r, i + 1); c.value = h; c.font = { name: FONT, size: 10, bold: true }; c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: TEAL_L } }; c.border = box; c.alignment = { horizontal: "center", vertical: "middle", wrapText: true }; }); ws.getRow(r).height = 28; return r + 1; };
+  const put = (ws, r, vals, o = {}) => { vals.forEach((v, i) => { const c = ws.getCell(r, i + 1); c.value = v; c.border = box; c.font = { name: FONT, size: 10, bold: !!o.bold }; if (typeof v === "number" || (v && v.formula)) { c.numFmt = NUM; c.alignment = { horizontal: "right" }; } if (o.fill) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: o.fill } }; }); return r + 1; };
+  const F = (formula, result) => ({ formula, result });
+  const period = `${P.from.replace(/-/g, ".")} ~ ${P.to.replace(/-/g, ".")} (${P.days}일)`;
+
+  // 1. 요약
+  {
+    const ws = sheet("요약", [26, 16, 18, 40]);
+    let r = title(ws, `${result.ymLabel} 파렛트 이용료`, `기간 ${period} · 단가 14C·18F ${price.toLocaleString()}원 / 11A·15A 13,200원 / 23E 7,000원 (월평균 사용량 기준, VAT 별도)`, 4);
+    r = header(ws, r, ["구분", "월평균 사용량(EA)", "이용료(원)", "비고"]);
+    const s0 = r;
+    ["퍼시스", "일룸", "시디즈"].forEach((b) => { const q = R.bills[b].domQty + R.bills[b].expQty; r = put(ws, r, [b, q, F(`B${r}*${price}`, q * price), `내수 ${R.bills[b].domQty.toLocaleString()} · 해외 ${R.bills[b].expQty.toLocaleString()}`]); });
+    r = put(ws, r, ["11A 일룸", R.a11.일룸, F(`B${r}*13200`, R.a11.일룸 * 13200), "일룸 온라인"]);
+    r = put(ws, r, ["11A 시디즈", R.a11.시디즈, F(`B${r}*13200`, R.a11.시디즈 * 13200), "시디즈 온라인"]);
+    r = put(ws, r, ["15A 시디즈 쿠팡", R.q15A, F(`B${r}*13200`, R.q15A * 13200), "시디즈 온라인"]);
+    r = put(ws, r, ["23E 일룸 매트리스", R.q23E, F(`B${r}*7000`, R.q23E * 7000), "일룸 내수에 포함 청구"]);
+    r = put(ws, r, ["합계 (VAT 별도)", "", F(`SUM(C${s0}:C${r - 1})`), ""], { bold: true, fill: GRAY });
+    r++;
+    ws.mergeCells(r, 1, r, 4); const n = ws.getCell(r, 1);
+    n.value = "산출 방식: 구내용 = 기간 중 매일 보유 수량의 합(AJ네트웍스 거래명세서 기준) · 월평균 사용량 = 구내용 ÷ " + P.days + "일(올림) · 센터 사용분은 ERP 매출(경인·지방·수출) 비율로 브랜드별 안분";
+    n.font = { name: FONT, size: 9, color: { argb: "FF5A6966" } }; n.alignment = { wrapText: true }; ws.getRow(r).height = 32;
+  }
+  // 2. 이용료 (업무연락 표)
+  {
+    const ws = sheet("이용료", [11, 16, 13, 15, 13, 15, 60]);
+    let r = title(ws, `${result.ymLabel} 파렛트 이용료 — 브랜드·구분별`, `${period} · 금액 = 월평균 사용량 × ${price.toLocaleString()}원`, 7);
+    r = header(ws, r, ["브랜드", "구분", "내수 사용량(EA)", "내수 이용료(원)", "해외 사용량(EA)", "해외 이용료(원)", "비고 (외주업체·시공팀 월평균 사용량)"]);
+    const subs = [];
+    ["퍼시스", "일룸", "시디즈"].forEach((b) => {
+      const b0 = r;
+      R.table.filter((t) => t.brand === b).forEach((t) => {
+        const notes = usageNotes(R, b, t.place).filter((p) => p[1] > 0).map((p) => `${p[0]} ${p[1]}`).join(", ");
+        r = put(ws, r, [b, PLACE_LABEL[t.place] || t.place, t.dom, F(`C${r}*${price}`, t.dom * price), t.exp, F(`E${r}*${price}`, t.exp * price), notes]);
+        ws.getCell(r - 1, 7).alignment = { wrapText: true, vertical: "top" }; ws.getCell(r - 1, 7).font = { name: FONT, size: 9 };
+      });
+      r = put(ws, r, [b, "소계", F(`SUM(C${b0}:C${r - 1})`), F(`SUM(D${b0}:D${r - 1})`), F(`SUM(E${b0}:E${r - 1})`), F(`SUM(F${b0}:F${r - 1})`), ""], { bold: true, fill: GRAY }); subs.push(r - 1);
+    });
+    const sm = (c) => subs.map((x) => c + x).join("+");
+    put(ws, r, ["합계", "", F(sm("C")), F(sm("D")), F(sm("E")), F(sm("F")), ""], { bold: true, fill: TEAL_L });
+  }
+  // 3. 사용처별 수량 (AJ 거래명세서 기준)
+  {
+    const ws = sheet("사용처별 수량", [18, 30, 16, 14]);
+    let r = title(ws, "사용처별 수량 (AJ네트웍스 거래명세서 기준)", `${period} · 구내용 = 매일 보유 수량의 합, 월평균 = 구내용 ÷ ${P.days}일(올림). 분류별 월평균을 합쳐 「이용료」 시트처럼 브랜드에 안분합니다.`, 4);
+    r = header(ws, r, ["분류", "사용처", "구내용", "월평균(EA)"]);
+    const groups = {};
+    (R.lines || []).filter((l) => (l.gunae || 0) > 0 && !/^AJ /.test(l.name)).forEach((l) => { (groups[l.group] = groups[l.group] || []).push(l); });
+    Object.keys(groups).sort().forEach((g) => {
+      const g0 = r;
+      groups[g].sort((a, b) => b.gunae - a.gunae).forEach((l) => { r = put(ws, r, [GROUP_HINT[g] ? g : g, l.name, l.gunae, l.avg]); });
+      r = put(ws, r, [g, "분류 합계", F(`SUM(C${g0}:C${r - 1})`), F(`SUM(D${g0}:D${r - 1})`)], { bold: true, fill: GRAY });
+    });
+    ws.views = [{ state: "frozen", ySplit: 4, showGridLines: false }];
+  }
+  const buf = await wb.xlsx.writeBuffer();
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+  a.download = `${result.ymLabel.replace(/\s/g, "")}_파렛트이용료_레터스.xlsx`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
 async function exportClosingWorkbook({ ym, P, R, result, units, inp, edi11A }) {
   let ExcelJS;
   try { ExcelJS = await loadExcelJS(); } catch (e) { alert(e.message); return; }
@@ -2752,8 +2825,9 @@ function ClosingScreen({ caps = {} }) {
             {needCls.length > 0 && <div style={{ ...box, background: C.amberBg, color: C.amber, fontSize: 13 }}>분류가 정해지지 않은 작업장 {needCls.length}곳(구내용 {nf(needCls.reduce((a, u) => a + u.use, 0))})이 청구에서 빠져 있어요. ②에서 정해 주세요.</div>}
             <div style={{ ...box, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <b>우리 마감 엑셀</b>
-              <button style={btnTealSm} onClick={() => exportClosingWorkbook({ ym, P, R, result, units, inp: { ...inp, adjust: allAdjust }, edi11A })}>마감 엑셀 내려받기 (증빙)</button>
-              <span style={{ fontSize: 12.5, color: C.sub }}>요약·이용료·안분 근거·작업장별 구내용(EDI·AJ·조정)·수량조정·전표·입력 자료를 시트별로 — 숫자마다 어디서 왔는지 따라갈 수 있게</span>
+              <button style={btnTealSm} onClick={() => exportClosingWorkbook({ ym, P, R, result, units, inp: { ...inp, adjust: allAdjust }, edi11A })}>내부용 엑셀 (증빙)</button>
+              <button style={btnTealSm} onClick={() => exportBrandWorkbook({ ym, P, R, result })}>브랜드 발송용 엑셀</button>
+              <span style={{ fontSize: 12.5, color: C.sub }}>내부용 = 안분 근거·EDI 대조·수량조정·전표까지(우리만) · 브랜드 발송용 = AJ 마감자료 기준 요약·이용료·사용처별 수량만(메일 첨부)</span>
             </div>
             <UsageReport R={R} P={P} ymLabel={result.ymLabel} setMsg={setMsg} />
             <VoucherBox title="임대료 전표 (브랜드 청구)" lines={result.rent} copyTsv={copyTsv} date={eng.monthEnd(ym)} setMsg={setMsg} />
