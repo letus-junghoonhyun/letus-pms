@@ -83,8 +83,8 @@ export function readWorkbook(wb, fileName) {
   const sum = sheets.find((s) => s.name.includes("요약"));
   if (sum) { // 11A 사용·출고내역 요약
     const row = (k) => sum.rows.find((r) => String(r[1]).trim() === k);
-    const il = row("일룸"), si = row("시디즈");
-    if (il || si) return { kind: "out11A", value: { 일룸: num(il && il[3]), 시디즈: num(si && si[3]) }, note: `11A 출고수량 일룸 ${num(il && il[3])} / 시디즈 ${num(si && si[3])}` };
+    const il = row("일룸"), si = row("시디즈"), ys = row("음성창고"); // 시디즈 몫 = 시디즈 + 음성창고(인수인계 STEP 26)
+    if (il || si) { const sd = num(si && si[3]) + num(ys && ys[3]); return { kind: "out11A", value: { 일룸: num(il && il[3]), 시디즈: sd }, note: `11A 출고수량 일룸 ${num(il && il[3])} / 시디즈 ${sd}(음성창고 포함)` }; }
   }
   return { kind: "unknown", note: "어떤 자료인지 모르겠어요" };
 }

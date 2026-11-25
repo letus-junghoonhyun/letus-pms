@@ -2592,7 +2592,7 @@ function ClosingScreen({ caps = {} }) {
     (async () => {
       const { data } = await supabase.from("aj_move").select("from_name,to_name,qty,iner,move_type").eq("account", "P208335").eq("item", "11A").gte("move_date", P.from).lte("move_date", P.to).limit(5000);
       const o = { 일룸: 0, 시디즈: 0 };
-      (data || []).forEach((m) => { if (m.iner !== "외부" || !(m.qty > 0)) return; if (/일룸/.test(m.from_name)) o.일룸 += m.qty; else if (/시디즈/.test(m.from_name)) o.시디즈 += m.qty; });
+      (data || []).forEach((m) => { if (m.iner !== "외부" || !(m.qty > 0)) return; if (/일룸/.test(m.from_name)) o.일룸 += m.qty; else if (/시디즈|음성창고/.test(m.from_name)) o.시디즈 += m.qty; }); // 인수인계 방식: 시디즈 = (주)시디즈 + 음성창고 출고
       setEdi11A(o);
     })();
   }, [ym]); // eslint-disable-line
