@@ -2590,9 +2590,9 @@ function ClosingScreen({ caps = {} }) {
   // EDI 이동으로 11A 출고수량(일룸·시디즈 → 외부) 자동 계산
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.from("aj_move").select("from_name,to_name,qty,iner,move_type").eq("account", "P208335").eq("item", "11A").gte("move_date", P.from).lte("move_date", P.to).limit(5000);
+      const { data } = await supabase.from("aj_move").select("from_name,to_name,qty,iner,move_type").eq("account", "P208335").eq("item", "11A") // 가이드 4단계: 이동조회(입출고) 11A 출고 합계(정정 마이너스 포함).gte("move_date", P.from).lte("move_date", P.to).limit(5000);
       const o = { 일룸: 0, 시디즈: 0 };
-      (data || []).forEach((m) => { if (m.iner !== "외부" || !(m.qty > 0)) return; if (/일룸/.test(m.from_name)) o.일룸 += m.qty; else if (/시디즈|음성창고/.test(m.from_name)) o.시디즈 += m.qty; }); // 인수인계 방식: 시디즈 = (주)시디즈 + 음성창고 출고
+      (data || []).forEach((m) => { if (m.move_type && m.move_type !== "이동출고") return; if (/일룸/.test(m.from_name)) o.일룸 += m.qty; else if (/시디즈|음성창고/.test(m.from_name)) o.시디즈 += m.qty; }); // 인수인계 방식: 시디즈 = (주)시디즈 + 음성창고 출고
       setEdi11A(o);
     })();
   }, [ym]); // eslint-disable-line
