@@ -2619,7 +2619,7 @@ function ClosingScreen({ caps = {} }) {
     const num = (o) => Object.fromEntries(Object.entries(o || {}).map(([k, v]) => [k, Number(v) || 0]));
     const erp = { 퍼시스: num(e.퍼시스), 일룸: num(e.일룸), 시디즈: num(e.시디즈) };
     const o11 = inp.out11A && (Number(inp.out11A.일룸) || Number(inp.out11A.시디즈)) ? num(inp.out11A) : edi11A || { 일룸: 0, 시디즈: 0 };
-    const r = eng.computeClosing({ rows, days: P.days, erp, sidizStockAmt: Number(inp.sidizStockAmt), out11A: o11 });
+    const r = eng.computeClosing({ rows, days: P.days, erp, sidizStockAmt: Number(inp.sidizStockAmt), out11A: o11, opts: { sidizRemainder: ym >= "2026-12" } });
     const ymLabel = `${ym.slice(2, 4)}년 ${Number(ym.slice(5))}월`;
     const vDate = eng.monthEnd(ym);
     const rent = eng.erpAnnotate(eng.rentVoucher(r.bills, ymLabel), vDate);

@@ -59,7 +59,9 @@ export function computeClosing({ rows, days, erp, sidizStockAmt, out11A, cfg = {
   const I82 = INT(base82 * C.sidizFactory.시디즈), K82 = INT(D82 * R.시디즈.exp);
   const O81 = INT(D82 * C.sidizFactory.시디즈) + INT(D82 * C.sidizFactory.퍼시스) + INT(D82 * C.sidizFactory.일룸);
   const K457 = g("시디즈공장") + g("시디즈기타") - D82 + 1;
-  const O82 = D82 - O81 + K457;
+  // 이전 엑셀 방식(+1)은 내림 끝수 때문에 1~2개가 어느 브랜드에도 안 잡힌다.
+  // opts.sidizRemainder(2026-12 마감부터): 공장+기타 전체에서 시디즈 해외·퍼시스·일룸 몫을 뺀 나머지를 시디즈 내수로 → 끝수가 빠지지 않음
+  const O82 = opts.sidizRemainder ? g("시디즈공장") + g("시디즈기타") - K82 - O43 - O44 - I82 : D82 - O81 + K457;
 
   // 퍼시스: 안성공장·충주1·충주2
   for (const k of ["안성공장", "충주1", "충주2"]) { const s = split(g(k), R.factory); push("퍼시스", k, s.dom, s.exp); }
