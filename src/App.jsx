@@ -2138,7 +2138,7 @@ const ymPeriod = (ym) => { const [y, m] = ym.split("-").map(Number); const p = n
 const nf = (n) => (n || 0).toLocaleString();
 const ERP_KEYS = [["퍼시스", "경인"], ["퍼시스", "지방"], ["퍼시스", "수출"], ["일룸", "경인"], ["일룸", "지방"], ["일룸", "수출"], ["시디즈", "경인"], ["시디즈", "지방"], ["시디즈", "수출"]];
 const INV_KEYS = ["18F,14C", "11A", "23E", "15A", "풀필먼트23E"];
-const TP_KEYS = ["블링크프로젝트", "네오스코리아", "에이스침대중부공장"];
+const TP_KEYS = ["블링크프로젝트", "네오스코리아", "에이스침대중부공장", "금강SDF"]; // 풀필먼트 고객: AJ 공급가액을 풀필먼트 비용으로
 // 우리 마감 엑셀: 서식·계산식이 살아 있는 증빙 파일. 숫자가 어디서 와서 어떻게 계산됐는지 시트마다 보이게 한다.
 // ExcelJS는 내려받기 누를 때만 CDN에서 불러온다(앱 크기 그대로)
 const loadExcelJS = () => window.ExcelJS ? Promise.resolve(window.ExcelJS) : new Promise((ok, no) => {
@@ -2610,6 +2610,9 @@ function ClosingScreen({ caps = {} }) {
   const needCls = units.filter((u) => !u.grp);
   const result = useMemo(() => {
     if (!eng || !units.length) return null;
+    // 분류가 없는 작업장(새 업체 등)은 어디에도 임의로 넣지 않는다 → 관리자 확인 후 ② 작업장 분류에서 지정해야 계산
+    const nc = units.filter((u) => !u.grp && u.use > 0);
+    if (nc.length) return { unclassified: nc };
     const e = inp.erp || {};
     const ok = ERP_KEYS.every(([b, k]) => Number((e[b] || {})[k]) > 0) && Number(inp.sidizStockAmt) > 0;
     if (!ok) return { missing: true };
@@ -2709,7 +2712,7 @@ function ClosingScreen({ caps = {} }) {
   if (err) return (<><Head title="파렛트 월마감" /><div style={{ background: C.redBg, color: C.red, padding: 12, borderRadius: 8 }}>{err}</div></>);
   const tabs = [["qty", "① 수량 대조"], ["cls", `② 작업장 분류${needCls.length ? " · 필요 " + needCls.length : ""}`], ["in", "③ ERP·세금계산서"], ["out", "④ 이용료·전표"]];
   const totEdi = units.filter((u) => u.account === "P156063").reduce((a, u) => a + u.gunae, 0), totAj = units.filter((u) => u.account === "P156063" && u.aj !== null).reduce((a, u) => a + u.aj, 0);
-  const R = result && !result.missing ? result.r : null;
+  const R = result && !result.missing && !result.unclassified ? result.r : null;
   const tableRows = R ? R.table : [];
   return (
     <>
@@ -2821,7 +2824,7 @@ function ClosingScreen({ caps = {} }) {
           {!locked && <button onClick={() => save()} style={btnTeal}>입력값 저장</button>}
         </>
       ) : (
-        !result ? <Splash text="계산 중…" /> : result.missing ? <div style={box}>③에서 ERP 금액 9개와 시디즈 재고금액을 넣으면 계산돼요.{needCls.length ? ` 분류가 필요한 작업장 ${needCls.length}곳은 청구에서 빠져 있어요.` : ""}</div> : (
+        !result ? <Splash text="계산 중…" /> : result.unclassified ? <div style={{ ...box, borderColor: C.red }}><b style={{ color: C.red }}>분류가 안 된 작업장 {result.unclassified.length}곳이 있어 계산을 멈췄어요.</b> 새로 생긴 업체·현장은 어느 브랜드·분류로 청구할지 정훈님(관리자)께 확인한 뒤 ② 작업장 분류에서 지정해 주세요. 임의로 넣지 않아요.<div style={{ marginTop: 6, fontSize: 13 }}>{result.unclassified.map((u) => `${u.name} (구내용 ${nf(u.use)})`).join(" · ")}</div></div> : result.missing ? <div style={box}>③에서 ERP 금액 9개와 시디즈 재고금액을 넣으면 계산돼요.{needCls.length ? ` 분류가 필요한 작업장 ${needCls.length}곳은 청구에서 빠져 있어요.` : ""}</div> : (
           <>
             {needCls.length > 0 && <div style={{ ...box, background: C.amberBg, color: C.amber, fontSize: 13 }}>분류가 정해지지 않은 작업장 {needCls.length}곳(구내용 {nf(needCls.reduce((a, u) => a + u.use, 0))})이 청구에서 빠져 있어요. ②에서 정해 주세요.</div>}
             <div style={{ ...box, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
